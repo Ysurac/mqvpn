@@ -1574,7 +1574,7 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     conn_settings.enable_multipath = 1;
     conn_settings.mp_ping_on = 1;
     conn_settings.pacing_on = 1;
-    conn_settings.enable_pmtud = 0x3;
+    conn_settings.max_pkt_out_size = 1400;
     conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
     conn_settings.cc_params.cc_optimization_flags =
         XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
