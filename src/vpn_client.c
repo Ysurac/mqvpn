@@ -1082,13 +1082,21 @@ cli_tun_read_handler(int fd, short what, void *arg)
             /* Validate source IP matches assigned address */
             if (conn->addr_assigned &&
                 memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
-                LOG_DBG("dropping outbound packet: src IPv4 mismatch");
+                LOG_DBG("dropping outbound packet: src IPv4 mismatch "
+                        "(pkt=%d.%d.%d.%d, expected=%d.%d.%d.%d)",
+                        pkt[12], pkt[13], pkt[14], pkt[15],
+                        conn->assigned_ip[0], conn->assigned_ip[1],
+                        conn->assigned_ip[2], conn->assigned_ip[3]);
                 continue;
             }
         } else if (ip_ver == 6) {
             if (n < 40 || !conn->addr6_assigned) continue;
             if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) {
-                LOG_DBG("dropping outbound packet: src IPv6 mismatch");
+                char _src6[INET6_ADDRSTRLEN], _exp6[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, pkt + 8, _src6, sizeof(_src6));
+                inet_ntop(AF_INET6, conn->assigned_ip6, _exp6, sizeof(_exp6));
+                LOG_DBG("dropping outbound packet: src IPv6 mismatch "
+                        "(pkt=%s, expected=%s)", _src6, _exp6);
                 continue;
             }
         } else {
@@ -1999,6 +2007,7 @@ cli_start_connection(cli_ctx_t *ctx)
     conn_settings.enable_multipath = multipath;
     conn_settings.mp_ping_on = multipath;
     conn_settings.pacing_on = 1;
+    conn_settings.enable_pmtud = 0x3;
     conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
     conn_settings.cc_params.cc_optimization_flags =
         XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;

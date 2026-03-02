@@ -131,8 +131,10 @@ cleanup() {
         echo "  iptables rules removed"
     fi
 
-    # Remove IPv6 FORWARD rules (independent of NAT_IFACE)
+    # Remove IPv6 FORWARD + NAT66 rules (independent of NAT_IFACE)
     if [ "$SKIP_NAT" -eq 0 ] && [ -n "$SUBNET6" ]; then
+        while ip6tables -t nat -D POSTROUTING -s "$SUBNET6" -o "$NAT6_IFACE" -j MASQUERADE \
+            -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
         while ip6tables -D FORWARD -i "$TUN_NAME" -s "$SUBNET6" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
         while ip6tables -D FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
@@ -188,7 +190,7 @@ if [ "$SKIP_NAT" -eq 0 ]; then
             -m comment --comment "$IPTABLES_COMMENT"
     fi
 
-    # IPv6 forwarding + FORWARD rules (no NAT needed for IPv6)
+    # IPv6 forwarding + FORWARD + NAT66 rules
     if [ -n "$SUBNET6" ]; then
         ORIG_IP6_FORWARD=$(sysctl -n net.ipv6.conf.all.forwarding)
         echo "Enabling IPv6 forwarding..."
@@ -197,6 +199,12 @@ if [ "$SKIP_NAT" -eq 0 ]; then
             -m comment --comment "$IPTABLES_COMMENT"
         ip6tables -I FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT"
+        NAT6_IFACE=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | grep -oP 'dev \K\S+' || true)
+        if [ -n "$NAT6_IFACE" ]; then
+            ip6tables -t nat -A POSTROUTING -s "$SUBNET6" -o "$NAT6_IFACE" -j MASQUERADE \
+                -m comment --comment "$IPTABLES_COMMENT"
+            echo "  IPv6 NAT66: $SUBNET6 → $NAT6_IFACE"
+        fi
         echo "  IPv6 FORWARD rules added for $SUBNET6"
     fi
 fi

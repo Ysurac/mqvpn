@@ -8,7 +8,7 @@
 # Reads Subnet/Subnet6 from the config file and manages:
 #   - net.ipv4.ip_forward = 1 (+ net.ipv6.conf.all.forwarding if Subnet6 set)
 #   - iptables MASQUERADE + FORWARD rules
-#   - ip6tables FORWARD rules (no NAT needed for IPv6)
+#   - ip6tables FORWARD + NAT66 (MASQUERADE) rules
 
 set -e
 
@@ -66,7 +66,7 @@ setup() {
             -m comment --comment "$COMMENT"
     fi
 
-    # IPv6 forwarding + FORWARD rules (no NAT needed)
+    # IPv6 forwarding + FORWARD + NAT66 rules
     if [ -n "$SUBNET6" ]; then
         sysctl -n net.ipv6.conf.all.forwarding > "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
         sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
@@ -74,6 +74,12 @@ setup() {
             -m comment --comment "$COMMENT"
         ip6tables -I FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
             -m comment --comment "$COMMENT"
+        NAT6_IFACE=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | grep -oP 'dev \K\S+' || true)
+        if [ -n "$NAT6_IFACE" ]; then
+            ip6tables -t nat -A POSTROUTING -s "$SUBNET6" -o "$NAT6_IFACE" -j MASQUERADE \
+                -m comment --comment "$COMMENT"
+            echo "mqvpn-server-nat: IPv6 NAT66 $SUBNET6 → $NAT6_IFACE"
+        fi
         echo "mqvpn-server-nat: IPv6 FORWARD rules added for $SUBNET6"
     fi
 }
@@ -108,6 +114,7 @@ teardown() {
             ip6tables -t "$table" -D "$chain" "$line" 2>/dev/null || break
         done
     }
+    delete_by_comment_v6 nat POSTROUTING
     delete_by_comment_v6 filter FORWARD
 
     # Restore forwarding settings

@@ -21,9 +21,13 @@ iptables -A FORWARD -d "$SUBNET" -j ACCEPT
 if [ -n "$SUBNET6" ]; then
     echo "Enabling IPv6 forwarding..."
     sysctl -w net.ipv6.conf.all.forwarding=1
-    echo "Setting up IPv6 FORWARD: $SUBNET6"
+    echo "Setting up IPv6 FORWARD + NAT66: $SUBNET6"
     ip6tables -I FORWARD -s "$SUBNET6" -j ACCEPT
     ip6tables -I FORWARD -d "$SUBNET6" -j ACCEPT
+    NAT6_IFACE=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | grep -oP 'dev \K\S+' || true)
+    NAT6_IFACE="${NAT6_IFACE:-$IFACE}"
+    ip6tables -t nat -A POSTROUTING -s "$SUBNET6" -o "$NAT6_IFACE" -j MASQUERADE
+    echo "  IPv6 NAT66: $SUBNET6 → $NAT6_IFACE"
 fi
 
 echo "NAT configured successfully."
@@ -33,6 +37,7 @@ echo "  iptables -t nat -D POSTROUTING -s $SUBNET -o $IFACE -j MASQUERADE"
 echo "  iptables -D FORWARD -s $SUBNET -j ACCEPT"
 echo "  iptables -D FORWARD -d $SUBNET -j ACCEPT"
 if [ -n "$SUBNET6" ]; then
+    echo "  ip6tables -t nat -D POSTROUTING -s $SUBNET6 -o $NAT6_IFACE -j MASQUERADE"
     echo "  ip6tables -D FORWARD -s $SUBNET6 -j ACCEPT"
     echo "  ip6tables -D FORWARD -d $SUBNET6 -j ACCEPT"
 fi
