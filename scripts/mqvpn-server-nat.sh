@@ -5,9 +5,10 @@
 #   mqvpn-server-nat.sh setup   CONFIG_PATH
 #   mqvpn-server-nat.sh teardown CONFIG_PATH
 #
-# Reads Subnet from the config file and manages:
-#   - net.ipv4.ip_forward = 1
+# Reads Subnet/Subnet6 from the config file and manages:
+#   - net.ipv4.ip_forward = 1 (+ net.ipv6.conf.all.forwarding if Subnet6 set)
 #   - iptables MASQUERADE + FORWARD rules
+#   - ip6tables FORWARD rules (no NAT needed for IPv6)
 
 set -e
 
@@ -25,14 +26,19 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 # Read Subnet from config (fallback: 10.0.0.0/24)
-SUBNET=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | head -1 | tr -d '[:space:]')
+SUBNET=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
 SUBNET="${SUBNET:-10.0.0.0/24}"
 
+# Read Subnet6 from config (optional, empty if not set)
+SUBNET6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+SUBNET6="${SUBNET6:-}"
+
 # Read TunName from config (fallback: mqvpn0)
-TUN_NAME=$(sed -n 's/^[[:space:]]*TunName[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | head -1 | tr -d '[:space:]')
+TUN_NAME=$(sed -n 's/^[[:space:]]*TunName[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
 TUN_NAME="${TUN_NAME:-mqvpn0}"
 
 COMMENT="mqvpn-server-nat"
+STATE_DIR="/run/mqvpn"
 
 # Detect default outbound interface
 detect_iface() {
@@ -40,23 +46,36 @@ detect_iface() {
 }
 
 setup() {
-    # Enable IP forwarding
+    mkdir -p "$STATE_DIR"
+
+    # Save and enable IP forwarding
+    sysctl -n net.ipv4.ip_forward > "$STATE_DIR/orig_ip_forward.$TUN_NAME"
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
     NAT_IFACE=$(detect_iface)
     if [ -z "$NAT_IFACE" ]; then
-        echo "Warning: could not detect default interface, skipping NAT rules" >&2
-        return 0
+        echo "Warning: could not detect default interface, skipping IPv4 NAT rules" >&2
+    else
+        echo "mqvpn-server-nat: setup subnet=$SUBNET iface=$NAT_IFACE tun=$TUN_NAME"
+
+        iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
+            -m comment --comment "$COMMENT"
+        iptables -I FORWARD -i "$TUN_NAME" -s "$SUBNET" -j ACCEPT \
+            -m comment --comment "$COMMENT"
+        iptables -I FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
+            -m comment --comment "$COMMENT"
     fi
 
-    echo "mqvpn-server-nat: setup subnet=$SUBNET iface=$NAT_IFACE tun=$TUN_NAME"
-
-    iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
-        -m comment --comment "$COMMENT"
-    iptables -I FORWARD -i "$TUN_NAME" -s "$SUBNET" -j ACCEPT \
-        -m comment --comment "$COMMENT"
-    iptables -I FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
-        -m comment --comment "$COMMENT"
+    # IPv6 forwarding + FORWARD rules (no NAT needed)
+    if [ -n "$SUBNET6" ]; then
+        sysctl -n net.ipv6.conf.all.forwarding > "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
+        sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+        ip6tables -I FORWARD -i "$TUN_NAME" -s "$SUBNET6" -j ACCEPT \
+            -m comment --comment "$COMMENT"
+        ip6tables -I FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
+            -m comment --comment "$COMMENT"
+        echo "mqvpn-server-nat: IPv6 FORWARD rules added for $SUBNET6"
+    fi
 }
 
 teardown() {
@@ -77,6 +96,29 @@ teardown() {
 
     delete_by_comment nat POSTROUTING
     delete_by_comment filter FORWARD
+
+    # Remove IPv6 FORWARD rules (unconditional — handles config changes between setup/teardown)
+    delete_by_comment_v6() {
+        local table="$1" chain="$2"
+        while true; do
+            local line
+            line=$(ip6tables -t "$table" -L "$chain" --line-numbers -n 2>/dev/null \
+                | grep "$COMMENT" | head -1 | awk '{print $1}')
+            [ -z "$line" ] && break
+            ip6tables -t "$table" -D "$chain" "$line" 2>/dev/null || break
+        done
+    }
+    delete_by_comment_v6 filter FORWARD
+
+    # Restore forwarding settings
+    if [ -f "$STATE_DIR/orig_ip_forward.$TUN_NAME" ]; then
+        sysctl -w net.ipv4.ip_forward="$(cat "$STATE_DIR/orig_ip_forward.$TUN_NAME")" >/dev/null
+        rm -f "$STATE_DIR/orig_ip_forward.$TUN_NAME"
+    fi
+    if [ -f "$STATE_DIR/orig_ip6_forward.$TUN_NAME" ]; then
+        sysctl -w net.ipv6.conf.all.forwarding="$(cat "$STATE_DIR/orig_ip6_forward.$TUN_NAME")" >/dev/null
+        rm -f "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
+    fi
 }
 
 case "$ACTION" in

@@ -7,7 +7,8 @@
 #
 # Without --config:
 #   --listen ADDR:PORT   Listen address (default: 0.0.0.0:443)
-#   --subnet CIDR        Client IP pool (default: 10.0.0.0/24)
+#   --subnet CIDR        Client IPv4 pool (default: 10.0.0.0/24)
+#   --subnet6 CIDR       Client IPv6 pool (optional, enables IPv6 forwarding)
 #   --cert PATH          TLS certificate (default: certs/server.crt)
 #   --key PATH           TLS private key (default: certs/server.key)
 #   --auth-key KEY       Pre-shared key for client auth (default: auto-generated)
@@ -19,6 +20,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 LISTEN="0.0.0.0:443"
 SUBNET="10.0.0.0/24"
+SUBNET6=""
 TUN_NAME="mqvpn0"
 CERT="$PROJECT_DIR/certs/server.crt"
 KEY="$PROJECT_DIR/certs/server.key"
@@ -27,6 +29,7 @@ CONFIG=""
 SKIP_NAT=0
 HAS_LISTEN=0
 HAS_SUBNET=0
+HAS_SUBNET6=0
 HAS_CERT=0
 HAS_KEY=0
 HAS_AUTH_KEY=0
@@ -35,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --listen)  LISTEN="$2"; HAS_LISTEN=1; shift 2 ;;
         --subnet)  SUBNET="$2"; HAS_SUBNET=1; shift 2 ;;
+        --subnet6) SUBNET6="$2"; HAS_SUBNET6=1; shift 2 ;;
         --cert)    CERT="$2"; HAS_CERT=1; shift 2 ;;
         --key)     KEY="$2"; HAS_KEY=1; shift 2 ;;
         --auth-key) AUTH_KEY="$2"; HAS_AUTH_KEY=1; shift 2 ;;
@@ -49,6 +53,7 @@ if [ -n "$CONFIG" ]; then
     CONFLICT=""
     [ "$HAS_LISTEN" -eq 1 ] && CONFLICT="$CONFLICT --listen"
     [ "$HAS_SUBNET" -eq 1 ] && CONFLICT="$CONFLICT --subnet"
+    [ "$HAS_SUBNET6" -eq 1 ] && CONFLICT="$CONFLICT --subnet6"
     [ "$HAS_CERT" -eq 1 ] && CONFLICT="$CONFLICT --cert"
     [ "$HAS_KEY" -eq 1 ] && CONFLICT="$CONFLICT --key"
     [ "$HAS_AUTH_KEY" -eq 1 ] && CONFLICT="$CONFLICT --auth-key"
@@ -76,6 +81,11 @@ if [ -n "$CONFIG" ]; then
     if [ -n "$cfg_subnet" ]; then
         SUBNET="$cfg_subnet"
     fi
+    # Extract Subnet6 from config (used for IPv6 FORWARD rules)
+    cfg_subnet6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    if [ -n "$cfg_subnet6" ]; then
+        SUBNET6="$cfg_subnet6"
+    fi
     # Extract TunName from config (used for FORWARD rules)
     cfg_tun=$(sed -n 's/^[[:space:]]*TunName[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
     if [ -n "$cfg_tun" ]; then
@@ -94,6 +104,7 @@ echo $$ >&9
 
 # --- Cleanup state (set early so partial setup is always cleaned up) ---
 ORIG_IP_FORWARD=""
+ORIG_IP6_FORWARD=""
 NAT_IFACE=""
 MQVPN_PID=""
 IPTABLES_COMMENT="mqvpn-start-server:$$"
@@ -120,10 +131,23 @@ cleanup() {
         echo "  iptables rules removed"
     fi
 
+    # Remove IPv6 FORWARD rules (independent of NAT_IFACE)
+    if [ "$SKIP_NAT" -eq 0 ] && [ -n "$SUBNET6" ]; then
+        while ip6tables -D FORWARD -i "$TUN_NAME" -s "$SUBNET6" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
+        while ip6tables -D FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT" 2>/dev/null; do :; done
+        echo "  ip6tables rules removed"
+    fi
+
     # Restore ip_forward
     if [ -n "$ORIG_IP_FORWARD" ]; then
         sysctl -w net.ipv4.ip_forward="$ORIG_IP_FORWARD" >/dev/null
         echo "  ip_forward restored to $ORIG_IP_FORWARD"
+    fi
+    if [ -n "$ORIG_IP6_FORWARD" ]; then
+        sysctl -w net.ipv6.conf.all.forwarding="$ORIG_IP6_FORWARD" >/dev/null
+        echo "  ip6_forward restored to $ORIG_IP6_FORWARD"
     fi
 
     echo "Done."
@@ -163,6 +187,18 @@ if [ "$SKIP_NAT" -eq 0 ]; then
         iptables -I FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
             -m comment --comment "$IPTABLES_COMMENT"
     fi
+
+    # IPv6 forwarding + FORWARD rules (no NAT needed for IPv6)
+    if [ -n "$SUBNET6" ]; then
+        ORIG_IP6_FORWARD=$(sysctl -n net.ipv6.conf.all.forwarding)
+        echo "Enabling IPv6 forwarding..."
+        sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+        ip6tables -I FORWARD -i "$TUN_NAME" -s "$SUBNET6" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT"
+        ip6tables -I FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
+            -m comment --comment "$IPTABLES_COMMENT"
+        echo "  IPv6 FORWARD rules added for $SUBNET6"
+    fi
 fi
 
 # --- Generate PSK if not provided (skip if --config) ---
@@ -178,9 +214,11 @@ if [ -n "$CONFIG" ]; then
     "$MQVPN" --config "$CONFIG" &
 else
     echo "Starting mqvpn server (listen=$LISTEN, subnet=$SUBNET)..."
-    "$MQVPN" --mode server --listen "$LISTEN" \
-        --subnet "$SUBNET" --cert "$CERT" --key "$KEY" \
-        --auth-key "$AUTH_KEY" &
+    MQVPN_ARGS=(--mode server --listen "$LISTEN"
+        --subnet "$SUBNET" --cert "$CERT" --key "$KEY"
+        --auth-key "$AUTH_KEY")
+    [ -n "$SUBNET6" ] && MQVPN_ARGS+=(--subnet6 "$SUBNET6")
+    "$MQVPN" "${MQVPN_ARGS[@]}" &
 fi
 MQVPN_PID=$!
 wait $MQVPN_PID 2>/dev/null || true
