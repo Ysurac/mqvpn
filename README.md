@@ -64,7 +64,7 @@ Instead of CLI flags, you can use an INI-style config file. CLI arguments overri
 TunName = mqvpn0
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
-Subnet6 = fd00:vpn::/112
+Subnet6 = 2001:db8:1::/112
 LogLevel = info
 
 [TLS]
@@ -105,6 +105,39 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 ```
 
 Mode is auto-detected from the config (`[Interface] Listen` → server, `[Server] Address` → client).
+
+## systemd Service
+
+Systemd unit files are provided for production deployments.
+
+**Server:**
+
+```bash
+sudo mkdir -p /etc/mqvpn
+sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
+# Edit server.conf: set cert, key, and auth-key
+sudo systemctl enable --now mqvpn-server
+```
+
+The server unit runs `mqvpn-server-nat.sh` as `ExecStartPre`/`ExecStopPost` to manage NAT rules and IP forwarding automatically.
+Always stop the service before changing the configuration, then apply changes with `systemctl restart mqvpn-server`.
+
+**Client:**
+
+```bash
+sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
+# Edit client-home.conf: set server address and auth-key
+sudo systemctl enable --now mqvpn-client@home
+```
+
+The client unit is a template — the instance name maps to the config file: `mqvpn-client@home` reads `/etc/mqvpn/client-home.conf`.
+
+**Install unit files (via cmake):**
+
+```bash
+cd build && sudo cmake --install .
+sudo systemctl daemon-reload
+```
 
 ## Benchmarks
 
@@ -234,7 +267,7 @@ Client:
 Server:
   --listen BIND:PORT        Listen address (default: 0.0.0.0:443)
   --subnet CIDR             Client IPv4 pool (default: 10.0.0.0/24)
-  --subnet6 CIDR            Client IPv6 pool (e.g. fd00:vpn::/112)
+  --subnet6 CIDR            Client IPv6 pool (e.g. 2001:db8:1::/112)
   --cert PATH               TLS certificate file
   --key PATH                TLS private key file
   --auth-key KEY            PSK for client authentication
@@ -247,6 +280,15 @@ Server:
 - `--insecure` accepts certificates that fail verification (self-signed, unknown CA, etc.) and is intended for local/testing use only.
 - `--auth-key` is required for server mode. The server refuses to start without it. Generate one with `mqvpn --genkey`.
 - PSK authentication protects against unauthorized connections. The key is transmitted over QUIC's TLS 1.3 channel, so it is never exposed in plaintext on the wire.
+- **TLS certificates** — Use an external tool like `certbot` to obtain and renew certificates. Point mqvpn to the certificate files in your config:
+  ```bash
+  sudo certbot certonly --standalone -d vpn.example.com
+  # In /etc/mqvpn/server.conf:
+  #   [TLS]
+  #   Cert = /etc/letsencrypt/live/vpn.example.com/fullchain.pem
+  #   Key = /etc/letsencrypt/live/vpn.example.com/privkey.pem
+  ```
+  certbot's systemd timer handles automatic renewal. Add a deploy hook to restart mqvpn: `certbot renew --deploy-hook "systemctl restart mqvpn-server"`.
 
 ## Testing
 
@@ -255,7 +297,7 @@ Server:
 cd build && ctest --output-on-failure
 
 # Integration test (requires root, uses network namespaces)
-sudo scripts/run_test.sh
+sudo scripts/ci_e2e/run_test.sh
 
 # Multipath integration test (2 paths, failover, recovery)
 sudo scripts/run_multipath_test.sh
@@ -280,8 +322,7 @@ sudo scripts/run_multipath_test.sh
 - [x] Kill switch (prevent traffic leaking outside the tunnel)
 - [x] IPv6 support (dual-stack tunnel with `--subnet6`, IPv6 QUIC transport)
 - [x] ICMP Packet Too Big responses (RFC 9484 §10.1)
-- [ ] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
-- [ ] Let's Encrypt / ACME integration for TLS certificates
+- [x] systemd service unit (`mqvpn-server.service`, `mqvpn-client@.service`)
 
 ### Future
 - [ ] Per-client token authentication

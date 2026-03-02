@@ -25,7 +25,7 @@ usage(const char *prog)
         "  --server HOST:PORT        Server address (client mode, [IPv6]:PORT for IPv6)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
-        "  --subnet6 CIDR            IPv6 client IP pool (server mode, e.g. fd00:vpn::/112)\n"
+        "  --subnet6 CIDR            IPv6 client IP pool (server mode, e.g. 2001:db8:1::/112)\n"
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
