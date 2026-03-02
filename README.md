@@ -64,7 +64,7 @@ Instead of CLI flags, you can use an INI-style config file. CLI arguments overri
 TunName = mqvpn0
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
-Subnet6 = fd00:vpn::/112
+Subnet6 = 2001:db8:1::/112
 LogLevel = info
 
 [TLS]
@@ -120,6 +120,7 @@ sudo systemctl enable --now mqvpn-server
 ```
 
 The server unit runs `mqvpn-server-nat.sh` as `ExecStartPre`/`ExecStopPost` to manage NAT rules and IP forwarding automatically.
+Always stop the service before changing the configuration, then apply changes with `systemctl restart mqvpn-server`.
 
 **Client:**
 
@@ -266,7 +267,7 @@ Client:
 Server:
   --listen BIND:PORT        Listen address (default: 0.0.0.0:443)
   --subnet CIDR             Client IPv4 pool (default: 10.0.0.0/24)
-  --subnet6 CIDR            Client IPv6 pool (e.g. fd00:vpn::/112)
+  --subnet6 CIDR            Client IPv6 pool (e.g. 2001:db8:1::/112)
   --cert PATH               TLS certificate file
   --key PATH                TLS private key file
   --auth-key KEY            PSK for client authentication
