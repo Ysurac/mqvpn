@@ -1,6 +1,6 @@
 build/
 build-*/
-impl_status.md
+ref/
 benchmarks/*
 !benchmarks/*.sh
 !benchmarks/*.py
