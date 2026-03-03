@@ -13,7 +13,7 @@ This is an independent personal project focused on an end-to-end standards-based
 - **PSK authentication** — Pre-shared key via `authorization: Bearer` header over TLS 1.3-encrypted QUIC.
 - **Seamless failover** — If one path goes down, the tunnel continues on another without reconnecting (Multipath QUIC).
 - **Multiple network paths** — Bind to two or more Linux interfaces (e.g. two ISP lines, WiFi + LTE) via XQUIC's Multipath QUIC.
-- **Bandwidth aggregation** — Implemented a bandwidth-aggregation scheduler for multipath QUIC datagrams (WLB), combining flow-affinity WRR with LATE-based bandwidth estimates.(implemented in our XQUIC fork)
+- **Bandwidth aggregation** — Implemented a bandwidth-aggregation scheduler for multipath QUIC datagrams (WLB), combining flow-affinity WRR with LATE-based bandwidth estimates (implemented in our XQUIC fork).
   - [Performance comparison: WLB vs. MinRTT scheduler](docs/benchmarks_netns.md#2-bandwidth-aggregation--wlb-vs-minrtt)
 - **Configuration file** — INI-style config file for all options; CLI arguments override config values.
 - **DNS override** — Client-side `/etc/resolv.conf` management with automatic backup and restore. Prevents DNS leak by routing all queries through the tunnel.
@@ -35,6 +35,9 @@ sudo scripts/start_server.sh
 # Or with custom listen address and tunnel subnet (client IP pool)
 sudo scripts/start_server.sh --listen 0.0.0.0:4433 --subnet 10.0.0.0/24
 
+# Server (dual-stack — IPv4 + IPv6)
+sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
+
 # Client (single path, --insecure for self-signed cert)
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= \
@@ -52,6 +55,41 @@ sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
 ```
 
 `start_server.sh` generates a self-signed certificate, configures NAT/forwarding, and starts the server. The client's default route points through the tunnel — all traffic flows: client app → TUN (mqvpn0) → QUIC tunnel → server → NAT → internet.
+
+<details>
+<summary>IPv6(dual stack) setup</summary>
+
+Add `--subnet6` to enable IPv6 inside the tunnel. The server assigns each client an IPv6 address from the specified ULA prefix alongside its IPv4 address. No special client-side flags are needed — the client automatically configures IPv6 when the server assigns an address.
+
+```bash
+# Server
+sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
+
+# Client (same as IPv4-only — IPv6 is automatic)
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
+    --auth-key <KEY> --insecure
+```
+
+`start_server.sh` automatically configures:
+- IPv6 forwarding (`net.ipv6.conf.all.forwarding=1`)
+- IPv6 FORWARD rules for the tunnel subnet
+- NAT66 (MASQUERADE) for ULA → internet traffic
+
+**Verify IPv6 connectivity:**
+
+```bash
+# Check assigned addresses
+ip addr show mqvpn0
+
+# Test IPv6 connectivity through the tunnel
+ping -6 -c 3 fd00:abcd::1   # ping the server's tunnel address
+```
+
+**Notes:**
+- ULA addresses (`fd00::/8`) are not globally routable, so NAT66 is required for internet access. This is handled automatically by `start_server.sh`.
+- The tunnel MTU is set to at least 1280 bytes (IPv6 minimum link MTU per RFC 8200).
+- `max_pkt_out_size=1400` is used to ensure sufficient QUIC payload capacity for IPv6, fitting within both standard Ethernet (1500) and PPPoE (1492) paths.
+</details>
 
 ## Configuration File
 
@@ -349,9 +387,9 @@ sudo scripts/run_multipath_test.sh
 mqvpn is licensed under [Apache-2.0](LICENSE).
 Copyright (c) 2026 github.com/mp0rta.
 
-mqvpn uses a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque) (Apache-2.0) as a git submodule. The fork adds MASQUE CONNECT-IP (RFC 9484) and HTTP Datagrams (RFC 9297) on top of XQUIC's QUIC, HTTP/3, and Multipath QUIC transport. Plans to contribute the MASQUE implementation upstream.
+mqvpn uses a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/feature/masque) (Apache-2.0) as a git submodule. The fork adds MASQUE CONNECT-IP (RFC 9484) and HTTP Datagrams (RFC 9297) on top of XQUIC's QUIC, HTTP/3, and Multipath QUIC transport. The MASQUE implementation is planned to be contributed upstream.
 
 ## Acknowledgments
 
 - [XQUIC](https://github.com/alibaba/xquic) — QUIC, HTTP/3, and Multipath QUIC library by Alibaba
-- IETF QUIC and MASQUE working groups for the protocol specifications
+- IETF QUIC and MASQUE working groups for defining the protocol specifications

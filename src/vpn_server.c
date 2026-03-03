@@ -1585,7 +1585,7 @@ mqvpn_server_run(const mqvpn_server_cfg_t *cfg)
     }
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
-    conn_settings.idle_time_out = 30000;       /* 30s idle timeout */
+    conn_settings.idle_time_out = 120000;      /* 120s idle timeout (paths need headroom for keep-alive) */
     conn_settings.init_idle_time_out = 10000;  /* 10s initial idle timeout */
     xqc_server_set_conn_settings(g_svr.engine, &conn_settings);
 

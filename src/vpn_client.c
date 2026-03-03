@@ -2005,6 +2005,7 @@ cli_start_connection(cli_ctx_t *ctx)
     conn_settings.max_datagram_frame_size = 65535;
     conn_settings.proto_version = XQC_VERSION_V1;
     conn_settings.enable_multipath = multipath;
+    conn_settings.ping_on = 1;
     conn_settings.mp_ping_on = multipath;
     conn_settings.pacing_on = 1;
     conn_settings.max_pkt_out_size = 1400;
@@ -2013,6 +2014,8 @@ cli_start_connection(cli_ctx_t *ctx)
         XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
+    conn_settings.idle_time_out = 120000;      /* 120s idle timeout */
+    conn_settings.init_idle_time_out = 10000;  /* 10s initial idle timeout */
     if (ctx->cfg->scheduler == MQVPN_SCHED_WLB) {
         conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
     } else {
