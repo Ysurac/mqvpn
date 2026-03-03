@@ -76,3 +76,9 @@ jobs:
 
       - name: IPv6 full multipath test (netns)
         run: sudo scripts/ci_e2e/run_ipv6_full_multipath_test.sh
+
+      - name: Install mqvpn (system-wide)
+        run: cd build && sudo cmake --install . --prefix /usr/local
+
+      - name: Systemd service integration test
+        run: sudo scripts/ci_e2e/run_systemd_test.sh

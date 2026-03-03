@@ -12,6 +12,7 @@
 #   --cert PATH          TLS certificate (default: certs/server.crt)
 #   --key PATH           TLS private key (default: certs/server.key)
 #   --auth-key KEY       Pre-shared key for client auth (default: auto-generated)
+#   --scheduler minrtt|wlb  Multipath scheduler (default: wlb)
 
 set -e
 
@@ -25,6 +26,7 @@ TUN_NAME="mqvpn0"
 CERT="$PROJECT_DIR/certs/server.crt"
 KEY="$PROJECT_DIR/certs/server.key"
 AUTH_KEY=""
+SCHEDULER=""
 CONFIG=""
 SKIP_NAT=0
 HAS_LISTEN=0
@@ -33,6 +35,7 @@ HAS_SUBNET6=0
 HAS_CERT=0
 HAS_KEY=0
 HAS_AUTH_KEY=0
+HAS_SCHEDULER=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -42,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --cert)    CERT="$2"; HAS_CERT=1; shift 2 ;;
         --key)     KEY="$2"; HAS_KEY=1; shift 2 ;;
         --auth-key) AUTH_KEY="$2"; HAS_AUTH_KEY=1; shift 2 ;;
+        --scheduler) SCHEDULER="$2"; HAS_SCHEDULER=1; shift 2 ;;
         --config)  CONFIG="$2"; shift 2 ;;
         --skip-nat) SKIP_NAT=1; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -57,6 +61,7 @@ if [ -n "$CONFIG" ]; then
     [ "$HAS_CERT" -eq 1 ] && CONFLICT="$CONFLICT --cert"
     [ "$HAS_KEY" -eq 1 ] && CONFLICT="$CONFLICT --key"
     [ "$HAS_AUTH_KEY" -eq 1 ] && CONFLICT="$CONFLICT --auth-key"
+    [ "$HAS_SCHEDULER" -eq 1 ] && CONFLICT="$CONFLICT --scheduler"
     if [ -n "$CONFLICT" ]; then
         echo "Error: --config cannot be combined with:$CONFLICT"
         echo "Only --skip-nat can be used with --config."
@@ -226,6 +231,7 @@ else
         --subnet "$SUBNET" --cert "$CERT" --key "$KEY"
         --auth-key "$AUTH_KEY")
     [ -n "$SUBNET6" ] && MQVPN_ARGS+=(--subnet6 "$SUBNET6")
+    [ -n "$SCHEDULER" ] && MQVPN_ARGS+=(--scheduler "$SCHEDULER")
     "$MQVPN" "${MQVPN_ARGS[@]}" &
 fi
 MQVPN_PID=$!
