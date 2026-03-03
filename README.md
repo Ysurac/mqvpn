@@ -191,7 +191,7 @@ On connection, the client sends an HTTP/3 Extended CONNECT request with `:protoc
 
 For multipath, mqvpn creates per-interface UDP sockets and registers them as additional QUIC paths via `xqc_conn_create_path()`. XQUIC handles path validation, packet scheduling, and failover transparently.
 
-The server side is simple: one UDP socket, one TUN device, NAT via iptables. It does not need to know about multipath — XQUIC sees packets arriving from different source addresses on the same connection.
+The server side is simple: one UDP socket, one TUN device, NAT via iptables.— XQUIC sees packets arriving from different source addresses on the same connection.
 
 ## Building
 
