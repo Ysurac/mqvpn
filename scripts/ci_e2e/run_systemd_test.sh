@@ -209,7 +209,8 @@ StartLimitBurst=10
 [Service]
 ExecStart=
 ExecStart=/usr/bin/ip netns exec sd-client /usr/local/bin/mqvpn --config /etc/mqvpn/client-%i.conf
-ReadWritePaths=/run/netns
+ReadWritePaths=
+ReadWritePaths=/dev/net/tun /run/netns
 DROPIN
 
 systemctl daemon-reload
