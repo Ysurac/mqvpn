@@ -265,7 +265,7 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     for (int i = 0; i < 64; i++) {
         ssize_t n = recvfrom(fd, buf, sizeof(buf), 0,
                              (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0) break;
+        if (n <= 0 || (size_t)n > sizeof(buf)) break;
 
         /* Find which library path handle matches this fd */
         mqvpn_path_handle_t handle = -1;
@@ -612,7 +612,7 @@ svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
         peer_len = sizeof(peer);
         ssize_t n = recvfrom(fd, buf, sizeof(buf), 0,
                              (struct sockaddr *)&peer, &peer_len);
-        if (n <= 0) break;
+        if (n <= 0 || (size_t)n > sizeof(buf)) break;
 
         mqvpn_server_on_socket_recv(sp->server, buf, (size_t)n,
                                      (struct sockaddr *)&peer, peer_len);

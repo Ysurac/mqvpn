@@ -1389,7 +1389,7 @@ int mqvpn_client_on_socket_recv(
     const uint8_t *pkt, size_t len,
     const struct sockaddr *peer, socklen_t peer_len)
 {
-    if (!c || !pkt || len == 0) return MQVPN_ERR_INVALID_ARG;
+    if (!c || !pkt || len == 0 || len > 65536) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
     if (!c->engine) return MQVPN_ERR_ENGINE;
 
