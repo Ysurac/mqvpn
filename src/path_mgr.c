@@ -8,7 +8,6 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <inttypes.h>
-#include <event2/event.h>
 
 void
 mqvpn_path_mgr_init(mqvpn_path_mgr_t *mgr)
@@ -129,11 +128,6 @@ void
 mqvpn_path_mgr_destroy(mqvpn_path_mgr_t *mgr)
 {
     for (int i = 0; i < mgr->n_paths; i++) {
-        if (mgr->paths[i].ev_socket) {
-            event_del(mgr->paths[i].ev_socket);
-            event_free(mgr->paths[i].ev_socket);
-            mgr->paths[i].ev_socket = NULL;
-        }
         if (mgr->paths[i].fd >= 0) {
             close(mgr->paths[i].fd);
             mgr->paths[i].fd = -1;

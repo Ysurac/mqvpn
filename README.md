@@ -112,6 +112,9 @@ Key = /etc/mqvpn/server.key
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 MaxClients = 64
+
+[Multipath]
+Scheduler = wlb
 ```
 
 **Client (`/etc/mqvpn/client.conf`):**

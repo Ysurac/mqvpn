@@ -58,6 +58,8 @@ jobs:
           name: build
           path: |
             build/mqvpn
+            build/libmqvpn.a
+            build/libmqvpn.so*
             build/cmake_install.cmake
           retention-days: 1
 
