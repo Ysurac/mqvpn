@@ -1074,8 +1074,6 @@ cli_tun_read_handler(int fd, short what, void *arg)
     for (;;) {
         int n = mqvpn_tun_read(&ctx->tun, pkt, sizeof(pkt));
         if (n <= 0) break;
-
-        if (n < 1) continue;
         uint8_t ip_ver = pkt[0] >> 4;
 
         if (ip_ver == 4) {
@@ -1524,7 +1522,7 @@ cli_request_read_notify(xqc_h3_request_t *h3_request,
                 return -1;
             }
             cli_process_capsules(stream);
-        } while (n > 0 && !fin);
+        } while (!fin);
 
         /* Set up TUN after ADDRESS_ASSIGN */
         if (conn->addr_assigned && !conn->ctx->tun_up) {

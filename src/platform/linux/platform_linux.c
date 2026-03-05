@@ -118,7 +118,7 @@ fail:
 static void
 cb_tunnel_closed(mqvpn_error_t reason, void *user_ctx)
 {
-    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
+    (void)user_ctx;
     LOG_INF("tunnel closed: %s", mqvpn_error_string(reason));
 }
 
