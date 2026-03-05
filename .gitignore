@@ -16,3 +16,7 @@ tests/test_auth
 tests/test_session
 tests/test_dns
 client.conf
+
+# Gradle build cache
+android/.gradle/
+
