@@ -68,6 +68,7 @@ struct cli_ctx_s {
 
     /* Multipath: per-path UDP sockets */
     mqvpn_path_mgr_t     path_mgr;
+    struct event        *ev_path_socket[MQVPN_MAX_PATHS];
     struct sockaddr_storage server_addr;
     socklen_t            server_addrlen;
 
@@ -2239,10 +2240,10 @@ mqvpn_client_run(const mqvpn_client_cfg_t *cfg)
     /* Register all path sockets with libevent */
     for (int i = 0; i < g_cli.path_mgr.n_paths; i++) {
         mqvpn_path_t *p = &g_cli.path_mgr.paths[i];
-        p->ev_socket = event_new(g_cli.eb, p->fd,
+        g_cli.ev_path_socket[i] = event_new(g_cli.eb, p->fd,
                                   EV_READ | EV_PERSIST,
                                   cli_socket_event_callback, &g_cli);
-        event_add(p->ev_socket, NULL);
+        event_add(g_cli.ev_path_socket[i], NULL);
     }
 
     /* Mark primary path (path 0) as in-use with path_id=0 */

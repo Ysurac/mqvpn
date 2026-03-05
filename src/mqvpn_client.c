@@ -1010,10 +1010,27 @@ static void cb_path_removed(const xqc_cid_t *cid, uint64_t path_id,
 
 static void cli_conn_destroy(mqvpn_client_t *c)
 {
-    if (c->conn) {
-        free(c->conn);
-        c->conn = NULL;
-    }
+    if (!c->conn) return;
+
+    cli_conn_t *conn = c->conn;
+
+    /*
+     * Note: h3_conn and masque_request are owned by the xquic engine.
+     * When the connection is closed normally, xquic releases them via
+     * the close notify callbacks. We only need to free the conn struct.
+     *
+     * For reconnect (Level 2 teardown), the connection close callbacks
+     * have already been invoked by xquic before we reach here, so
+     * h3_conn/masque_request are already invalid.
+     */
+    conn->h3_conn = NULL;
+    conn->masque_request = NULL;
+    conn->tunnel_ok = 0;
+    conn->addr_assigned = 0;
+    conn->addr6_assigned = 0;
+
+    free(conn);
+    c->conn = NULL;
 }
 
 /* ─── Start a QUIC/H3 connection ─── */
@@ -1023,7 +1040,6 @@ static int cli_start_connection(mqvpn_client_t *c)
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
     conn->client = c;
-    c->conn = conn;
 
     int multipath = (c->config.multipath && c->n_paths > 1) ? 1 : 0;
 
@@ -1061,9 +1077,7 @@ static int cli_start_connection(mqvpn_client_t *c)
         conn);
     if (!cid) {
         LOG_E(c, "xqc_h3_connect failed");
-        free(conn);
-        c->conn = NULL;
-        return -1;
+        goto cleanup;
     }
 
     memcpy(&conn->cid, cid, sizeof(*cid));
@@ -1076,10 +1090,17 @@ static int cli_start_connection(mqvpn_client_t *c)
         c->paths[0].in_use = 1;
     }
 
+    c->conn = conn;  /* ownership transfer — cleanup won't free */
+    conn = NULL;
+
     LOG_I(c, "connecting to %s:%d (multipath=%d, paths=%d)",
           c->config.server_host, c->config.server_port,
           multipath, c->n_paths);
     return 0;
+
+cleanup:
+    free(conn);
+    return -1;
 }
 
 /* ================================================================
@@ -1141,18 +1162,14 @@ mqvpn_client_t *mqvpn_client_new(
     }
 
     xqc_config_t xconfig;
-    if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) {
-        free(c);
-        return NULL;
-    }
+    if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0)
+        goto cleanup;
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
     c->engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xconfig,
                                    &engine_ssl, &engine_cbs, &tcbs, c);
-    if (!c->engine) {
-        free(c);
-        return NULL;
-    }
+    if (!c->engine)
+        goto cleanup;
 
     /* H3 callbacks */
     xqc_h3_callbacks_t h3_cbs = {
@@ -1174,11 +1191,8 @@ mqvpn_client_t *mqvpn_client_new(
             .dgram_mss_updated_notify = cb_dgram_mss_updated,
         },
     };
-    if (xqc_h3_ctx_init(c->engine, &h3_cbs) != XQC_OK) {
-        xqc_engine_destroy(c->engine);
-        free(c);
-        return NULL;
-    }
+    if (xqc_h3_ctx_init(c->engine, &h3_cbs) != XQC_OK)
+        goto cleanup;
 
     xqc_h3_conn_settings_t h3s = {
         .max_field_section_size       = 32 * 1024,
@@ -1191,6 +1205,14 @@ mqvpn_client_t *mqvpn_client_new(
     xqc_h3_engine_set_local_settings(c->engine, &h3s);
 
     return c;
+
+cleanup:
+    if (c->engine) {
+        xqc_engine_destroy(c->engine);
+        c->engine = NULL;
+    }
+    free(c);
+    return NULL;
 }
 
 void mqvpn_client_destroy(mqvpn_client_t *client)

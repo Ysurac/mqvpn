@@ -15,7 +15,6 @@ typedef struct {
     uint64_t             path_id;
     int                  active;        /* socket created and registered */
     int                  in_use;        /* xquic path created */
-    struct event        *ev_socket;
 } mqvpn_path_t;
 
 typedef struct {
