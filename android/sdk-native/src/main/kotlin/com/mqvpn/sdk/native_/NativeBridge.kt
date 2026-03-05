@@ -11,7 +11,7 @@ package com.mqvpn.sdk.native_
  * Thread safety: All client methods (clientConnect, clientTick, etc.)
  * must be called from the same thread (the executor/poller thread).
  */
-internal object NativeBridge {
+object NativeBridge {
 
     init {
         System.loadLibrary("mqvpn_jni")
