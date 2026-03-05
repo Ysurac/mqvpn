@@ -18,6 +18,11 @@
 int
 mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 {
+    /* Copy dev_name before memset — caller may pass tun->name which aliases tun */
+    char name_buf[IFNAMSIZ] = "";
+    if (dev_name && dev_name[0])
+        snprintf(name_buf, sizeof(name_buf), "%s", dev_name);
+
     memset(tun, 0, sizeof(*tun));
     tun->fd = -1;
 
@@ -31,8 +36,8 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
     memset(&ifr, 0, sizeof(ifr));
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
-    if (dev_name && dev_name[0]) {
-        strncpy(ifr.ifr_name, dev_name, IFNAMSIZ - 1);
+    if (name_buf[0]) {
+        strncpy(ifr.ifr_name, name_buf, IFNAMSIZ - 1);
     }
 
     if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
