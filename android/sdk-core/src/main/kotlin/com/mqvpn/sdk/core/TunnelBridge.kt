@@ -77,11 +77,15 @@ internal class TunnelBridge(
                     val frames = batch.toList()
                     batch.clear()
                     executor.enqueue {
-                        for ((frame, len) in frames) {
+                        for (i in frames.indices) {
+                            val (frame, len) = frames[i]
                             val rc = tunnel.onTunPacket(frame, 0, len)
                             releaseFrame(frame)
                             if (rc == MqvpnTunnel.ERR_AGAIN) {
-                                // Backpressure: release remaining frames
+                                // Backpressure: release ALL remaining frames before stop
+                                for (j in (i + 1) until frames.size) {
+                                    releaseFrame(frames[j].first)
+                                }
                                 break
                             }
                         }

@@ -43,7 +43,7 @@ class MqvpnManager(private val context: Context) {
 
     /**
      * Start VPN with the given config.
-     * Launches the VpnService and calls startTunnel().
+     * Launches the VpnService, binds to it, and calls startTunnel().
      */
     fun connect(config: MqvpnConfig, serviceClass: Class<out MqvpnVpnService>) {
         _vpnState.value = MqvpnState.Connecting
@@ -52,13 +52,33 @@ class MqvpnManager(private val context: Context) {
             putExtra(EXTRA_CONFIG_JSON, config.toJson())
         }
         context.startForegroundService(intent)
+
+        // Bind to service for lifecycle observation
+        val conn = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                val binder = service as? MqvpnVpnService.LocalBinder ?: return
+                boundService = binder.getService()
+            }
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+                // Service crashed or was killed — reset state to prevent UI divergence
+                boundService = null
+                _vpnState.value = MqvpnState.Disconnected
+                _stats.value = VpnStats()
+                _paths.value = emptyList()
+            }
+        }
+        serviceConnection = conn
+        try {
+            context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
+        } catch (e: Exception) {
+            Log.w(TAG, "bindService failed: ${e.message}")
+        }
     }
 
     /** Disconnect the VPN. */
     fun disconnect() {
-        boundService?.let {
-            // Service handles cleanup
-        }
+        boundService?.stopTunnel()
         _vpnState.value = MqvpnState.Disconnected
     }
 
@@ -84,14 +104,15 @@ class MqvpnManager(private val context: Context) {
     }
 
     fun destroy() {
-        serviceConnection?.let {
-            try { context.unbindService(it) } catch (_: Exception) {}
+        serviceConnection?.let { conn ->
+            try { context.unbindService(conn) } catch (_: Exception) {}
         }
         serviceConnection = null
         boundService = null
     }
 
     companion object {
+        private const val TAG = "MqvpnManager"
         internal const val EXTRA_CONFIG_JSON = "mqvpn_config_json"
     }
 }

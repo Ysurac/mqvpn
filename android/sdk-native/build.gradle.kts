@@ -11,18 +11,17 @@ android {
         minSdk = 26
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            // Only ABIs with prebuilt .a files (build_android.sh output)
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
-    // Native build enabled after M3-5 (NDK cross-compile).
-    // Uncomment after prebuilt/{ABI}/libmqvpn.a exists:
-    // externalNativeBuild {
-    //     cmake {
-    //         path = file("src/main/jni/CMakeLists.txt")
-    //         version = "3.22.1"
-    //     }
-    // }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/jni/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11

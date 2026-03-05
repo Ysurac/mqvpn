@@ -1,6 +1,9 @@
 package com.mqvpn.sdk.core
 
+import android.content.Intent
 import android.net.VpnService
+import android.os.Binder
+import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.mqvpn.sdk.core.internal.PathManager
@@ -32,6 +35,15 @@ import java.net.InetAddress
  * [onCreateTun] is called from the executor thread (NOT the UI thread).
  */
 abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
+
+    /** Binder for local (in-process) binding from MqvpnManager. */
+    inner class LocalBinder : Binder() {
+        fun getService(): MqvpnVpnService = this@MqvpnVpnService
+    }
+
+    private val binder = LocalBinder()
+
+    override fun onBind(intent: Intent?): IBinder = binder
 
     private lateinit var executor: MqvpnPoller
     private var tunnel: MqvpnTunnel? = null
@@ -113,9 +125,10 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     }
 
     /**
-     * Stop VPN tunnel. Do NOT call from onDestroy — cleanup runs automatically.
+     * Stop VPN tunnel. Called by [MqvpnManager.disconnect].
+     * Do NOT call from onDestroy — cleanup runs automatically.
      */
-    protected fun stopTunnel() {
+    internal fun stopTunnel() {
         executor.enqueue { cleanup() }
     }
 
@@ -152,6 +165,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
             assignedIp = formatIp4(assignedIp),
             prefix = prefix,
             serverIp = formatIp4(serverIp),
+            serverPrefix = serverPrefix,
             mtu = mtu,
             assignedIp6 = assignedIp6?.let { formatIp6(it) },
             prefix6 = prefix6,

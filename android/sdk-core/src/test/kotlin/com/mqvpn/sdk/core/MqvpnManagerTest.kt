@@ -67,6 +67,7 @@ class MqvpnManagerTest {
             assignedIp = "10.8.0.2",
             prefix = 24,
             serverIp = "10.8.0.1",
+            serverPrefix = 24,
             mtu = 1400,
         )
         manager.updateState(MqvpnState.Connected(tunnelInfo))

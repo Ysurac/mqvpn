@@ -5,7 +5,8 @@
  *
  * Thread model: All client methods (clientConnect, clientTick, etc.) must be
  * called from a single "executor" thread. Callbacks from libmqvpn fire on the
- * same thread (since the library is sans-I/O), so no AttachCurrentThread needed.
+ * same thread (since the library is sans-I/O), so GetEnv normally succeeds.
+ * Fallback AttachCurrentThread + DetachCurrentThread is provided for safety.
  *
  * tun_output and send_packet use direct write()/sendto() — no JNI upcall for
  * the hot path.
@@ -54,20 +55,33 @@ static JavaVM *g_jvm = NULL;
  */
 static jni_ctx_t *s_active_ctx = NULL;
 
-/* Helper: get JNIEnv for the current thread.
+/*
+ * Helper: get JNIEnv for the current thread.
  * Since all libmqvpn callbacks fire on the executor thread (which is a JNI
- * thread), GetEnv should succeed without AttachCurrentThread. */
-static JNIEnv *get_env(jni_ctx_t *ctx)
+ * thread), GetEnv should succeed without AttachCurrentThread.
+ *
+ * If fallback attachment is needed (non-JNI thread), *did_attach is set to 1.
+ * Caller MUST call detach_if_needed() after the JNI upcall to prevent leaks.
+ */
+static JNIEnv *get_env(jni_ctx_t *ctx, int *did_attach)
 {
     JNIEnv *env = NULL;
+    *did_attach = 0;
     if ((*ctx->jvm)->GetEnv(ctx->jvm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
         /* Fallback: attach if called from a non-JNI thread */
         if ((*ctx->jvm)->AttachCurrentThread(ctx->jvm, &env, NULL) != JNI_OK) {
             LOGE("Failed to attach thread");
             return NULL;
         }
+        *did_attach = 1;
     }
     return env;
+}
+
+static void detach_if_needed(jni_ctx_t *ctx, int did_attach)
+{
+    if (did_attach)
+        (*ctx->jvm)->DetachCurrentThread(ctx->jvm);
 }
 
 /* ─── JNI_OnLoad ─── */
@@ -100,7 +114,8 @@ static void jni_tunnel_config_ready(const mqvpn_tunnel_info_t *info,
                                      void *user_ctx)
 {
     jni_ctx_t *ctx = (jni_ctx_t *)user_ctx;
-    JNIEnv *env = get_env(ctx);
+    int did_attach;
+    JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
     /* Create byte arrays for IPs */
@@ -136,13 +151,16 @@ static void jni_tunnel_config_ready(const mqvpn_tunnel_info_t *info,
     (*env)->DeleteLocalRef(env, server_ip);
     if (assigned_ip6)
         (*env)->DeleteLocalRef(env, assigned_ip6);
+
+    detach_if_needed(ctx, did_attach);
 }
 
 /* tunnel_closed: JNI upcall */
 static void jni_tunnel_closed(mqvpn_error_t reason, void *user_ctx)
 {
     jni_ctx_t *ctx = (jni_ctx_t *)user_ctx;
-    JNIEnv *env = get_env(ctx);
+    int did_attach;
+    JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
     /* void onNativeTunnelClosed(int errorCode) */
@@ -151,6 +169,8 @@ static void jni_tunnel_closed(mqvpn_error_t reason, void *user_ctx)
 
     if ((*env)->ExceptionCheck(env))
         (*env)->ExceptionClear(env);
+
+    detach_if_needed(ctx, did_attach);
 }
 
 /* state_changed: JNI upcall */
@@ -159,7 +179,8 @@ static void jni_state_changed(mqvpn_client_state_t old_state,
                                 void *user_ctx)
 {
     jni_ctx_t *ctx = (jni_ctx_t *)user_ctx;
-    JNIEnv *env = get_env(ctx);
+    int did_attach;
+    JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
     /* void onNativeStateChanged(int oldState, int newState) */
@@ -169,6 +190,8 @@ static void jni_state_changed(mqvpn_client_state_t old_state,
 
     if ((*env)->ExceptionCheck(env))
         (*env)->ExceptionClear(env);
+
+    detach_if_needed(ctx, did_attach);
 }
 
 /* path_event: JNI upcall */
@@ -177,7 +200,8 @@ static void jni_path_event(mqvpn_path_handle_t path,
                             void *user_ctx)
 {
     jni_ctx_t *ctx = (jni_ctx_t *)user_ctx;
-    JNIEnv *env = get_env(ctx);
+    int did_attach;
+    JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
     /* void onNativePathEvent(long pathHandle, int newStatus) */
@@ -187,13 +211,16 @@ static void jni_path_event(mqvpn_path_handle_t path,
 
     if ((*env)->ExceptionCheck(env))
         (*env)->ExceptionClear(env);
+
+    detach_if_needed(ctx, did_attach);
 }
 
 /* log: JNI upcall */
 static void jni_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 {
     jni_ctx_t *ctx = (jni_ctx_t *)user_ctx;
-    JNIEnv *env = get_env(ctx);
+    int did_attach;
+    JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
     jstring jmsg = (*env)->NewStringUTF(env, msg ? msg : "");
@@ -206,13 +233,16 @@ static void jni_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
         (*env)->ExceptionClear(env);
 
     (*env)->DeleteLocalRef(env, jmsg);
+
+    detach_if_needed(ctx, did_attach);
 }
 
 /* reconnect_scheduled: JNI upcall */
 static void jni_reconnect_scheduled(int delay_sec, void *user_ctx)
 {
     jni_ctx_t *ctx = (jni_ctx_t *)user_ctx;
-    JNIEnv *env = get_env(ctx);
+    int did_attach;
+    JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
     /* void onNativeReconnectScheduled(int delaySec) */
@@ -221,6 +251,8 @@ static void jni_reconnect_scheduled(int delay_sec, void *user_ctx)
 
     if ((*env)->ExceptionCheck(env))
         (*env)->ExceptionClear(env);
+
+    detach_if_needed(ctx, did_attach);
 }
 
 /* ─── CLOCK_BOOTTIME injection ─── */

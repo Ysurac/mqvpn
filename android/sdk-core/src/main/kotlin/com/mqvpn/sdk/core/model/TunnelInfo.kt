@@ -7,6 +7,7 @@ data class TunnelInfo(
     val assignedIp: String,
     val prefix: Int,
     val serverIp: String,
+    val serverPrefix: Int,
     val mtu: Int,
     val assignedIp6: String? = null,
     val prefix6: Int = 0,
