@@ -527,7 +527,7 @@ static ssize_t cb_write_socket(const unsigned char *buf, size_t size,
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
-    do { res = sendto(fd, buf, size, 0, peer, peerlen); } while (res < 0 && errno == EINTR);
+    do { res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen); } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         return XQC_SOCKET_ERROR;
@@ -548,7 +548,7 @@ static ssize_t cb_write_socket_ex(uint64_t path_id,
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
-    do { res = sendto(fd, buf, size, 0, peer, peerlen); } while (res < 0 && errno == EINTR);
+    do { res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen); } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
         return XQC_SOCKET_ERROR;
@@ -1332,6 +1332,16 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
     path_entry_t *p = &c->paths[idx];
     p->handle = c->next_path_handle++;
     p->fd     = fd;
+
+    /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
+    int bufsize = 7 * 1024 * 1024;  /* 7 MiB */
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+#ifdef SO_SNDBUFFORCE
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bufsize, sizeof(bufsize));
+#endif
+
     p->status = MQVPN_PATH_PENDING;
     p->active = 1;
 
