@@ -136,6 +136,7 @@ struct mqvpn_client_s {
     path_entry_t    paths[MQVPN_MAX_PATHS];
     int             n_paths;
     int64_t         next_path_handle;
+    int             multipath_ready;  /* 1 after cb_ready_to_create_path */
 
     /* Reconnect */
     int         reconnect_attempts;
@@ -192,6 +193,21 @@ static uint64_t client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn)
         return c->config.clock_fn(c->config.clock_ctx);
+    return now_us();
+}
+
+/*
+ * xquic timestamp adapter.
+ * xqc_timestamp_pt is void→uint64_t (no user_ctx), so we use a global.
+ * Safe for single-client-per-process (Android VpnService model).
+ */
+static mqvpn_clock_fn s_xqc_clock_fn = NULL;
+static void *s_xqc_clock_ctx = NULL;
+
+static xqc_usec_t xqc_custom_timestamp(void)
+{
+    if (s_xqc_clock_fn)
+        return s_xqc_clock_fn(s_xqc_clock_ctx);
     return now_us();
 }
 
@@ -851,6 +867,14 @@ static int cb_request_read(xqc_h3_request_t *h3_request,
                 info.has_v6 = 1;
             }
 
+            /* Primary path is now active */
+            if (c->n_paths > 0 && c->paths[0].active) {
+                c->paths[0].status = MQVPN_PATH_ACTIVE;
+                if (c->cbs.path_event)
+                    c->cbs.path_event(c->paths[0].handle,
+                                      MQVPN_PATH_ACTIVE, c->user_ctx);
+            }
+
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
             c->cbs.tunnel_config_ready(&info, c->user_ctx);
             c->reconnect_attempts = 0;
@@ -970,6 +994,25 @@ static void cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
     }
 }
 
+/* ─── Multipath helpers ─── */
+
+/* Create an xquic path for a secondary path entry and mark it ACTIVE. */
+static void client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
+{
+    uint64_t new_id = 0;
+    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
+    if (ret < 0) {
+        LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
+        return;
+    }
+    p->xqc_path_id = new_id;
+    p->in_use = 1;
+    p->status = MQVPN_PATH_ACTIVE;
+    LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
+    if (c->cbs.path_event)
+        c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+}
+
 /* ─── Multipath callbacks ─── */
 
 static void cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
@@ -978,25 +1021,13 @@ static void cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
 
-    if (!c->config.multipath || c->n_paths <= 1) return;
+    c->multipath_ready = 1;
+    if (!c->config.multipath) return;
 
-    LOG_I(c, "ready_to_create_path: adding secondary paths");
     for (int i = 1; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
         if (p->in_use || !p->active) continue;
-
-        uint64_t new_id = 0;
-        xqc_int_t ret = xqc_conn_create_path(c->engine, &conn->cid, &new_id, 0);
-        if (ret < 0) {
-            LOG_W(c, "xqc_conn_create_path[%d]: %d", i, ret);
-            continue;
-        }
-        p->xqc_path_id = new_id;
-        p->in_use = 1;
-        p->status = MQVPN_PATH_ACTIVE;
-        LOG_I(c, "path[%d] created: path_id=%" PRIu64 " iface=%s", i, new_id, p->name);
-        if (c->cbs.path_event)
-            c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+        client_activate_path(c, p, i);
     }
 }
 
@@ -1053,7 +1084,7 @@ static int cli_start_connection(mqvpn_client_t *c)
     if (!conn) return -1;
     conn->client = c;
 
-    int multipath = (c->config.multipath && c->n_paths > 1) ? 1 : 0;
+    int multipath = c->config.multipath ? 1 : 0;
 
     xqc_conn_settings_t cs;
     memset(&cs, 0, sizeof(cs));
@@ -1151,6 +1182,17 @@ mqvpn_client_t *mqvpn_client_new(
             .xqc_log_write_stat = cb_xqc_log_write,
         },
     };
+
+    /* Inject custom clock into xquic engine — ensures xquic's internal
+     * timestamps match recv_time passed to xqc_engine_packet_process().
+     * Critical for Android: CLOCK_BOOTTIME vs gettimeofday mismatch
+     * causes immediate idle timeout without this. */
+    if (cfg->clock_fn) {
+        s_xqc_clock_fn = cfg->clock_fn;
+        s_xqc_clock_ctx = cfg->clock_ctx;
+        engine_cbs.realtime_ts = xqc_custom_timestamp;
+        engine_cbs.monotonic_ts = xqc_custom_timestamp;
+    }
 
     xqc_transport_callbacks_t tcbs = {
         .write_socket                = cb_write_socket,
@@ -1297,6 +1339,12 @@ mqvpn_path_handle_t mqvpn_client_add_path_fd(
         p->platform_net_id = desc->platform_net_id;
         p->flags           = desc->flags;
     }
+
+    /* If multipath is already negotiated, activate immediately */
+    if (c->multipath_ready && c->config.multipath && c->conn) {
+        client_activate_path(c, p, idx);
+    }
+
     return p->handle;
 }
 
@@ -1440,7 +1488,8 @@ int mqvpn_client_tick(mqvpn_client_t *c)
             LOG_I(c, "attempting reconnection (attempt %d)...",
                   c->reconnect_attempts);
 
-            /* Reset path in_use for fresh paths */
+            /* Reset path state for fresh connection */
+            c->multipath_ready = 0;
             for (int i = 0; i < c->n_paths; i++) {
                 c->paths[i].in_use = 0;
                 c->paths[i].xqc_path_id = 0;

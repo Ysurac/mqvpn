@@ -65,6 +65,7 @@ internal class PathManager(
             pathFds[h] = fd
 
             if (!connected) {
+                tunnel.setServerAddr(serverHost, serverPort)
                 tunnel.connect()
                 connected = true
             }
