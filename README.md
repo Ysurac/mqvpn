@@ -58,10 +58,10 @@ Subnet6 = 2001:db8:1::/112
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
-Key = /etc/mqvpn/server.key
+Key = /etc/mqvpn/server.key       # TLS private key (PEM file)
 
 [Auth]
-Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=   # PSK example (mqvpn --genkey)
 
 [Multipath]
 Scheduler = wlb
