@@ -60,10 +60,11 @@ add_route4(platform_win_ctx_t *p, const char *dst, int prefix,
     return 0;
 }
 
-/* Helper: add a single IPv6 route */
+/* Helper: add a single IPv6 route (nexthop may be NULL for on-link) */
 static int
 add_route6(platform_win_ctx_t *p, const char *dst, int prefix,
-           const NET_LUID *luid, ULONG metric)
+           const NET_LUID *luid, const struct in6_addr *nexthop,
+           ULONG metric)
 {
     MIB_IPFORWARD_ROW2 row;
     InitializeIpForwardEntry(&row);
@@ -72,6 +73,12 @@ add_route6(platform_win_ctx_t *p, const char *dst, int prefix,
     row.DestinationPrefix.Prefix.Ipv6.sin6_family = AF_INET6;
     inet_pton(AF_INET6, dst, &row.DestinationPrefix.Prefix.Ipv6.sin6_addr);
     row.DestinationPrefix.PrefixLength = (UINT8)prefix;
+
+    if (nexthop) {
+        row.NextHop.Ipv6.sin6_family = AF_INET6;
+        row.NextHop.Ipv6.sin6_addr = *nexthop;
+    }
+
     row.Metric = metric;
     row.Protocol = MIB_IPPROTO_NETMGMT;
 
@@ -127,8 +134,12 @@ win_setup_routes(platform_win_ctx_t *p)
         if (add_route4(p, p->server_ip_str, 32, &best.InterfaceLuid,
                        &gw, 0) < 0)
             return -1;
+    } else if (p->server_addr.ss_family == AF_INET6) {
+        struct in6_addr gw6 = best.NextHop.Ipv6.sin6_addr;
+        if (add_route6(p, p->server_ip_str, 128, &best.InterfaceLuid,
+                       &gw6, 0) < 0)
+            return -1;
     }
-    /* TODO: IPv6 server pin route */
 
     /*
      * 3. Route all traffic through TUN (split default).
@@ -143,8 +154,8 @@ win_setup_routes(platform_win_ctx_t *p)
      * 4. IPv6 routes if available.
      */
     if (p->has_v6) {
-        if (add_route6(p, "::", 1, &p->tun.luid, 5) == 0 &&
-            add_route6(p, "8000::", 1, &p->tun.luid, 5) == 0) {
+        if (add_route6(p, "::", 1, &p->tun.luid, NULL, 5) == 0 &&
+            add_route6(p, "8000::", 1, &p->tun.luid, NULL, 5) == 0) {
             p->routing6_configured = 1;
             LOG_INF("IPv6 routes configured");
         }

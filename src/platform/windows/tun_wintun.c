@@ -193,17 +193,44 @@ mqvpn_tun_win_set_addr6(mqvpn_tun_win_t *tun, const char *addr6, int prefix_len)
     return 0;
 }
 
+/* Helper: set MTU for one address family via IPHLPAPI */
+static int
+set_iface_mtu(const NET_LUID *luid, ADDRESS_FAMILY family, ULONG mtu)
+{
+    MIB_IPINTERFACE_ROW row;
+    InitializeIpInterfaceEntry(&row);
+    row.InterfaceLuid = *luid;
+    row.Family = family;
+
+    DWORD err = GetIpInterfaceEntry(&row);
+    if (err != NO_ERROR) {
+        LOG_WRN("GetIpInterfaceEntry(%s): error %lu",
+                family == AF_INET ? "v4" : "v6", err);
+        return -1;
+    }
+
+    row.NlMtu = mtu;
+    row.SitePrefixLength = 0; /* required: avoids ERROR_INVALID_PARAMETER */
+
+    err = SetIpInterfaceEntry(&row);
+    if (err != NO_ERROR) {
+        LOG_WRN("SetIpInterfaceEntry(%s, mtu=%lu): error %lu",
+                family == AF_INET ? "v4" : "v6", mtu, err);
+        return -1;
+    }
+    return 0;
+}
+
 int
 mqvpn_tun_win_set_mtu(mqvpn_tun_win_t *tun, int mtu)
 {
-    /* Use netsh to set MTU — no clean C API for per-interface MTU */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "netsh interface ipv4 set subinterface \"%s\" mtu=%d store=active",
-             tun->name, mtu);
-    int ret = system(cmd);
-    if (ret != 0)
-        LOG_WRN("MTU set failed (netsh returned %d), continuing with default", ret);
+    if (set_iface_mtu(&tun->luid, AF_INET, (ULONG)mtu) < 0)
+        LOG_WRN("IPv4 MTU set failed, continuing with default");
+
+    if (tun->has_v6) {
+        if (set_iface_mtu(&tun->luid, AF_INET6, (ULONG)mtu) < 0)
+            LOG_WRN("IPv6 MTU set failed, continuing with default");
+    }
 
     tun->mtu = mtu;
     return 0;

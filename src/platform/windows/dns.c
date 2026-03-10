@@ -62,41 +62,78 @@ resolve_dns_api(void)
     }
 }
 
-/* Fallback: use netsh to set DNS */
+/* Helper: run netsh.exe directly via CreateProcessW (no shell) */
+static int
+run_netsh(const WCHAR *args)
+{
+    WCHAR cmd[1024];
+    _snwprintf(cmd, sizeof(cmd) / sizeof(cmd[0]),
+               L"netsh.exe %s", args);
+    cmd[(sizeof(cmd) / sizeof(cmd[0])) - 1] = L'\0';
+
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        LOG_ERR("CreateProcessW(netsh): error %lu", GetLastError());
+        return -1;
+    }
+
+    WaitForSingleObject(pi.hProcess, 10000);
+
+    DWORD exit_code = 1;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return (exit_code == 0) ? 0 : -1;
+}
+
+/* Fallback: use netsh to set DNS (via CreateProcessW, no shell) */
 static int
 set_dns_netsh(const char *adapter_name, const char **servers, int n)
 {
-    char cmd[512];
+    WCHAR wname[256], waddr[64], args[512];
+    MultiByteToWideChar(CP_UTF8, 0, adapter_name, -1, wname, 256);
 
     /* Set primary DNS */
-    snprintf(cmd, sizeof(cmd),
-             "netsh interface ip set dnsservers \"%s\" static %s primary",
-             adapter_name, servers[0]);
-    if (system(cmd) != 0) {
+    MultiByteToWideChar(CP_UTF8, 0, servers[0], -1, waddr, 64);
+    _snwprintf(args, 512,
+               L"interface ip set dnsservers \"%s\" static %s primary",
+               wname, waddr);
+    if (run_netsh(args) != 0) {
         LOG_ERR("netsh set primary DNS failed");
         return -1;
     }
 
     /* Add secondary DNS servers */
     for (int i = 1; i < n; i++) {
-        snprintf(cmd, sizeof(cmd),
-                 "netsh interface ip add dnsservers \"%s\" %s index=%d",
-                 adapter_name, servers[i], i + 1);
-        system(cmd);
+        MultiByteToWideChar(CP_UTF8, 0, servers[i], -1, waddr, 64);
+        _snwprintf(args, 512,
+                   L"interface ip add dnsservers \"%s\" %s index=%d",
+                   wname, waddr, i + 1);
+        run_netsh(args);
     }
 
     return 0;
 }
 
-/* Fallback: clear DNS via netsh */
+/* Fallback: clear DNS via netsh (via CreateProcessW, no shell) */
 static void
 clear_dns_netsh(const char *adapter_name)
 {
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "netsh interface ip set dnsservers \"%s\" dhcp",
-             adapter_name);
-    system(cmd);
+    WCHAR wname[256], args[512];
+    MultiByteToWideChar(CP_UTF8, 0, adapter_name, -1, wname, 256);
+    _snwprintf(args, 512,
+               L"interface ip set dnsservers \"%s\" dhcp", wname);
+    run_netsh(args);
 }
 
 int
