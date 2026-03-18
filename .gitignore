@@ -27,3 +27,7 @@ android/sdk-native/prebuilt/
 android/local.properties
 android/sdk-native/.cxx/
 
+# VitePress website
+website/node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/
