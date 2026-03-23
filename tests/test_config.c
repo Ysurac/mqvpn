@@ -754,6 +754,61 @@ static void test_subnet6_duplicate_last_wins(void)
     ASSERT_EQ_STR(cfg.subnet6, "fd00:2::/112", "subnet6 duplicate: last wins");
 }
 
+static void test_auth_users_ini(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "Listen = 0.0.0.0:443\n"
+        "[Auth]\n"
+        "User = alice:alice-key\n"
+        "User = bob:bob-key\n"
+        "User = alice:alice-key-v2\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "auth users ini parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 2, "2 users parsed");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "user[0] name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "alice-key-v2", "user[0] updated key");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "user[1] name");
+}
+
+static void test_json_config_load(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"server\","
+        "\"listen\":\"0.0.0.0:8443\","
+        "\"subnet\":\"10.20.0.0/24\","
+        "\"auth_key\":\"legacy\","
+        "\"max_clients\":120,"
+        "\"paths\":[\"eth0\",\"wlan0\"],"
+        "\"dns\":[\"1.1.1.1\",\"8.8.8.8\"],"
+        "\"users\":[{\"name\":\"alice\",\"key\":\"a1\"},\"bob:b2\"]"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json config parse ok");
+    ASSERT_EQ_INT(cfg.is_server, 1, "json mode server");
+    ASSERT_EQ_STR(cfg.listen, "0.0.0.0:8443", "json listen");
+    ASSERT_EQ_STR(cfg.subnet, "10.20.0.0/24", "json subnet");
+    ASSERT_EQ_INT(cfg.max_clients, 120, "json max clients");
+    ASSERT_EQ_INT(cfg.n_paths, 2, "json paths");
+    ASSERT_EQ_STR(cfg.paths[1], "wlan0", "json path[1]");
+    ASSERT_EQ_INT(cfg.n_dns, 2, "json dns");
+    ASSERT_EQ_INT(cfg.n_users, 2, "json users");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "json user[0]");
+}
+
 int main(void)
 {
     test_defaults();
@@ -797,6 +852,8 @@ int main(void)
     test_subnet6_whitespace_trimmed();
     test_subnet6_not_set();
     test_subnet6_duplicate_last_wins();
+    test_auth_users_ini();
+    test_json_config_load();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

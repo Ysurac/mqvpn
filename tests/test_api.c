@@ -100,6 +100,44 @@ TEST(config_set_auth_key)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_add_remove_user)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "alice-key"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "bob-key"), MQVPN_OK);
+    /* update existing */
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "alice-key-2"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "bob"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "missing"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user(NULL, "alice", "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "", "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_remove_user(NULL, "alice"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_load_json)
+{
+    const char *json =
+        "{"
+        "\"server_host\":\"vpn.example.com\","
+        "\"server_port\":8443,"
+        "\"auth_key\":\"legacy-key\","
+        "\"listen_addr\":\"0.0.0.0\","
+        "\"listen_port\":443,"
+        "\"subnet\":\"10.5.0.0/24\","
+        "\"tls_cert\":\"/tmp/cert.pem\","
+        "\"tls_key\":\"/tmp/key.pem\","
+        "\"max_clients\":99,"
+        "\"users\":[{\"name\":\"alice\",\"key\":\"a1\"},\"bob:b1\"]"
+        "}";
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(NULL, json), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, NULL), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_insecure)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -592,6 +630,8 @@ int main(void)
     run_config_free_null();
     run_config_set_server();
     run_config_set_auth_key();
+    run_config_add_remove_user();
+    run_config_load_json();
     run_config_set_insecure();
     run_config_set_scheduler();
     run_config_set_log_level();
