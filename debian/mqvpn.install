@@ -1,0 +1,8 @@
+usr/bin/mqvpn
+usr/lib/mqvpn/mqvpn-server-nat.sh
+usr/lib/systemd/system/mqvpn-server.service
+usr/lib/systemd/system/mqvpn-client@.service
+etc/mqvpn/server.conf.example
+etc/mqvpn/client.conf.example
+etc/mqvpn/server.json.example
+etc/mqvpn/client.json.example

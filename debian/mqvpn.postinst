@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create config directory if it doesn't exist
+        if [ ! -d /etc/mqvpn ]; then
+            mkdir -p /etc/mqvpn
+            chmod 750 /etc/mqvpn
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

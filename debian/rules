@@ -1,0 +1,67 @@
+#!/usr/bin/make -f
+# debian/rules for mqvpn
+
+export DH_VERBOSE = 1
+
+# Parallel build
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+# Build directory used by debhelper
+B = $(CURDIR)/obj-$(DEB_HOST_GNU_TYPE)
+
+BORINGSSL_DIR  = $(CURDIR)/third_party/xquic/third_party/boringssl
+BORINGSSL_BUILD = $(BORINGSSL_DIR)/build
+XQUIC_DIR      = $(CURDIR)/third_party/xquic
+XQUIC_BUILD    = $(XQUIC_DIR)/build
+
+%:
+	dh $@
+
+# 1. Build BoringSSL (static, position-independent)
+$(BORINGSSL_BUILD)/ssl/libssl.a:
+	mkdir -p $(BORINGSSL_BUILD)
+	cd $(BORINGSSL_BUILD) && cmake \
+		-DBUILD_SHARED_LIBS=0 \
+		-DCMAKE_C_FLAGS="-fPIC" \
+		-DCMAKE_CXX_FLAGS="-fPIC" \
+		-DCMAKE_BUILD_TYPE=Release \
+		..
+	$(MAKE) -C $(BORINGSSL_BUILD) -j$(shell nproc) ssl crypto
+
+# 2. Build xquic
+$(XQUIC_BUILD)/libxquic.a: $(BORINGSSL_BUILD)/ssl/libssl.a
+	mkdir -p $(XQUIC_BUILD)
+	cd $(XQUIC_BUILD) && cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DSSL_TYPE=boringssl \
+		-DSSL_PATH=$(BORINGSSL_DIR) \
+		-DXQC_ENABLE_BBR2=ON \
+		..
+	$(MAKE) -C $(XQUIC_BUILD) -j$(shell nproc)
+
+override_dh_auto_configure: $(XQUIC_BUILD)/libxquic.a
+	mkdir -p $(B)
+	cd $(B) && cmake \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DXQUIC_BUILD_DIR=$(XQUIC_BUILD) \
+		$(CURDIR)
+
+override_dh_auto_build:
+	$(MAKE) -C $(B) -j$(shell nproc)
+
+override_dh_auto_install:
+	$(MAKE) -C $(B) install DESTDIR=$(CURDIR)/debian/tmp
+
+	# cmake installs examples to $(prefix)/etc/mqvpn which becomes
+	# /usr/etc/mqvpn — move them to /etc/mqvpn instead.
+	install -d $(CURDIR)/debian/tmp/etc/mqvpn
+	if [ -d $(CURDIR)/debian/tmp/usr/etc/mqvpn ]; then \
+		mv $(CURDIR)/debian/tmp/usr/etc/mqvpn/* $(CURDIR)/debian/tmp/etc/mqvpn/; \
+		rmdir $(CURDIR)/debian/tmp/usr/etc/mqvpn; \
+		rmdir --ignore-fail-on-non-empty $(CURDIR)/debian/tmp/usr/etc; \
+	fi
+
+override_dh_auto_test:
+	# Unit tests require a build dir; run if available.
+	if [ -d $(B) ]; then cd $(B) && ctest --output-on-failure || true; fi

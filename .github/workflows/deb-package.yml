@@ -1,0 +1,105 @@
+name: Debian Package
+
+on:
+  push:
+    branches: ['**']
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub Release from the built packages'
+        type: boolean
+        default: false
+
+jobs:
+  build-deb:
+    name: Build .deb (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # BoringSSL is not bundled in the xquic submodule — clone it pinned,
+      # matching the commit used by the main CI workflow.
+      - name: Clone BoringSSL (pinned)
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential debhelper-compat devscripts dpkg-dev \
+            cmake libevent-dev libssl-dev \
+            golang-go ninja-build perl
+
+      - name: Build Debian packages
+        run: dpkg-buildpackage -us -uc -b -j$(nproc)
+
+      - name: Collect packages
+        run: |
+          mkdir -p dist
+          mv ../mqvpn_*.deb ../libmqvpn0_*.deb ../libmqvpn-dev_*.deb dist/ 2>/dev/null || true
+          ls -lh dist/
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: dist/*.deb
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: build-deb
+    # Run on tag pushes, or when manually requested.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download amd64 packages
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-amd64
+          path: dist/amd64
+
+      - name: Download arm64 packages
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-arm64
+          path: dist/arm64
+
+      - name: List packages
+        run: find dist/ -name '*.deb' | sort
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-$(git describe --tags --abbrev=0)}"
+          gh release create "$TAG" \
+            --title "mqvpn $TAG" \
+            --generate-notes \
+            dist/amd64/*.deb \
+            dist/arm64/*.deb

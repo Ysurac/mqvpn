@@ -1,0 +1,54 @@
+Source: mqvpn
+Section: net
+Priority: optional
+Maintainer: mqvpn maintainers <maintainers@example.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake (>= 3.22),
+ libevent-dev,
+ libssl-dev,
+ git,
+ golang-go | golang,
+ ninja-build,
+ perl
+Standards-Version: 4.6.2
+Homepage: https://github.com/mp0rta/mqvpn
+Rules-Requires-Root: no
+
+Package: mqvpn
+Architecture: linux-any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libmqvpn0 (= ${binary:Version})
+Description: Multipath QUIC VPN using MASQUE CONNECT-IP
+ mqvpn is a VPN daemon implementing MASQUE CONNECT-IP (RFC 9484) over
+ HTTP Datagrams and QUIC DATAGRAMs, with Multipath QUIC support for
+ bandwidth aggregation and seamless failover across multiple interfaces.
+ .
+ Features:
+  - Multipath (WiFi + LTE, dual ISP) with WLB scheduler
+  - Standards-based: MASQUE CONNECT-IP (RFC 9484)
+  - Dual-stack IPv4 + IPv6 inside the tunnel
+  - PSK authentication and per-user credentials
+  - DNS override to prevent leaks
+  - Backup/failover paths (standby until all primary paths are down)
+  - JSON control API for runtime management
+
+Package: libmqvpn0
+Architecture: linux-any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: Multipath QUIC VPN shared library
+ Shared library for embedding the mqvpn client engine in applications.
+ Provides a sans-I/O API for use in custom event loops or on Android
+ via JNI.
+
+Package: libmqvpn-dev
+Architecture: linux-any
+Depends:
+ ${misc:Depends},
+ libmqvpn0 (= ${binary:Version})
+Description: Multipath QUIC VPN development files
+ Header and static library for building applications against libmqvpn.
