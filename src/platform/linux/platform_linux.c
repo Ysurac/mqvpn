@@ -70,6 +70,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     char peer_ip[INET_ADDRSTRLEN];
     snprintf(peer_ip, sizeof(peer_ip), "%d.%d.%d.%d", info->server_ip[0],
              info->server_ip[1], info->server_ip[2], info->server_ip[3]);
+    snprintf(p->server_tunnel_ip, sizeof(p->server_tunnel_ip), "%s", peer_ip);
 
     if (mqvpn_tun_set_addr(&p->tun, local_ip, peer_ip, 32) < 0) goto fail;
     if (mqvpn_tun_set_mtu(&p->tun, info->mtu) < 0) goto fail;
@@ -88,7 +89,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
             info->mtu);
 
     /* Set up routes, killswitch, DNS */
-    if (setup_routes(p) < 0) {
+    if (!p->no_routes && setup_routes(p) < 0) {
         LOG_ERR("route setup failed, aborting tunnel");
         goto fail;
     }
@@ -329,6 +330,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.tun.fd = -1;
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
+    ctx.route_via_server = cfg->route_via_server;
+    ctx.no_routes = cfg->no_routes;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {

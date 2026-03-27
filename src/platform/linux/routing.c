@@ -116,23 +116,38 @@ setup_routes(platform_ctx_t *p)
                 p->orig_iface);
     }
 
-    const char *const low[] = {"ip",  "route",     "replace", "0.0.0.0/1",
-                               "dev", p->tun.name, NULL};
-    const char *const high[] = {"ip",  "route",     "replace", "128.0.0.0/1",
-                                "dev", p->tun.name, NULL};
-    if (run_ip_cmd(low) < 0 || run_ip_cmd(high) < 0) {
-        LOG_WRN("failed to set catch-all routes via %s", p->tun.name);
-        const char *u1[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
-        const char *u2[] = {"ip",  "route",     "del", "128.0.0.0/1",
-                            "dev", p->tun.name, NULL};
-        (void)run_ip_cmd(u1);
-        (void)run_ip_cmd(u2);
-        if (p->orig_gateway[0]) {
-            const char *u3[] = {"ip",  ip_flag,         "route", "del",         host_cidr,
-                                "via", p->orig_gateway, "dev",   p->orig_iface, NULL};
-            (void)run_ip_cmd(u3);
+    if (p->route_via_server) {
+        const char *const dflt[] = {"ip",  "route",           "replace", "default",
+                                    "via", p->server_tunnel_ip, "dev", p->tun.name, NULL};
+        if (run_ip_cmd(dflt) < 0) {
+            LOG_WRN("failed to set default route via %s on %s", p->server_tunnel_ip,
+                    p->tun.name);
+            if (p->orig_gateway[0]) {
+                const char *u[] = {"ip",  ip_flag,         "route", "del",         host_cidr,
+                                   "via", p->orig_gateway, "dev",   p->orig_iface, NULL};
+                (void)run_ip_cmd(u);
+            }
+            return -1;
         }
-        return -1;
+    } else {
+        const char *const low[] = {"ip",  "route",     "replace", "0.0.0.0/1",
+                                   "dev", p->tun.name, NULL};
+        const char *const high[] = {"ip",  "route",     "replace", "128.0.0.0/1",
+                                    "dev", p->tun.name, NULL};
+        if (run_ip_cmd(low) < 0 || run_ip_cmd(high) < 0) {
+            LOG_WRN("failed to set catch-all routes via %s", p->tun.name);
+            const char *u1[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
+            const char *u2[] = {"ip",  "route",     "del", "128.0.0.0/1",
+                                "dev", p->tun.name, NULL};
+            (void)run_ip_cmd(u1);
+            (void)run_ip_cmd(u2);
+            if (p->orig_gateway[0]) {
+                const char *u3[] = {"ip",  ip_flag,         "route", "del",         host_cidr,
+                                    "via", p->orig_gateway, "dev",   p->orig_iface, NULL};
+                (void)run_ip_cmd(u3);
+            }
+            return -1;
+        }
     }
     p->routing_configured = 1;
 
@@ -166,10 +181,15 @@ cleanup_routes(platform_ctx_t *p)
         p->routing6_configured = 0;
     }
 
-    const char *d3[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
-    const char *d4[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
-    (void)run_ip_cmd(d3);
-    (void)run_ip_cmd(d4);
+    if (p->route_via_server) {
+        const char *d[] = {"ip", "route", "del", "default", "dev", p->tun.name, NULL};
+        (void)run_ip_cmd(d);
+    } else {
+        const char *d3[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
+        const char *d4[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
+        (void)run_ip_cmd(d3);
+        (void)run_ip_cmd(d4);
+    }
 
     if (p->orig_gateway[0]) {
         const char *fl = (p->server_addr.ss_family == AF_INET6) ? "-6" : "-4";

@@ -48,6 +48,9 @@ typedef struct {
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
     char server_ip_str[INET6_ADDRSTRLEN];
+    char server_tunnel_ip[INET_ADDRSTRLEN]; /* server-side tunnel IP (peer on TUN) */
+    int route_via_server;   /* 1=use default via server_tunnel_ip instead of /1 trick */
+    int no_routes;          /* 1=skip automatic route setup entirely */
     int server_port;
     int has_v6;
 

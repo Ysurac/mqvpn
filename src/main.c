@@ -135,9 +135,11 @@ main(int argc, char *argv[])
         {"scheduler",   required_argument, NULL, 'S'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
-        {"no-reconnect",    no_argument,      NULL, 'R'},
-        {"kill-switch",     no_argument,      NULL, 'K'},
-        {"control-port",    required_argument, NULL, 'X'},
+        {"no-reconnect",        no_argument,      NULL, 'R'},
+        {"kill-switch",         no_argument,      NULL, 'K'},
+        {"route-via-server",    no_argument,      NULL, 'w'},
+        {"no-routes",           no_argument,      NULL, 'W'},
+        {"control-port",        required_argument, NULL, 'X'},
         {"control-addr",    required_argument, NULL, 'x'},
         {"help",            no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
@@ -165,13 +167,15 @@ main(int argc, char *argv[])
     int n_paths = 0;
     const char *dns_servers[4];
     int         n_dns = 0;
-    int         no_reconnect = 0;
-    int         kill_switch  = -1;  /* -1 = not set by CLI */
+    int         no_reconnect      = 0;
+    int         kill_switch       = -1;  /* -1 = not set by CLI */
+    int         route_via_server  = -1;  /* -1 = not set by CLI */
+    int         no_routes         = -1;  /* -1 = not set by CLI */
     int         control_port = 0;
     const char *control_addr = NULL;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:d:S:M:L:X:x:h",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:d:S:M:L:X:x:wWh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -228,6 +232,8 @@ main(int argc, char *argv[])
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
+        case 'w': route_via_server = 1; break;
+        case 'W': no_routes = 1; break;
         case 'X': control_port = atoi(optarg); break;
         case 'x': control_addr = optarg; break;
         case 'L': log_level_str = optarg; break;
@@ -387,6 +393,9 @@ main(int argc, char *argv[])
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
+            .route_via_server = route_via_server >= 0 ? route_via_server
+                                                      : file_cfg.route_via_server,
+            .no_routes = no_routes >= 0 ? no_routes : file_cfg.no_routes,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];

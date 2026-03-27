@@ -326,6 +326,10 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val, in
             parse_dns_list(cfg, val);
         } else if (strcasecmp(key, "KillSwitch") == 0) {
             cfg->kill_switch = parse_bool(val);
+        } else if (strcasecmp(key, "RouteViaServer") == 0) {
+            cfg->route_via_server = parse_bool(val);
+        } else if (strcasecmp(key, "NoRoutes") == 0) {
+            cfg->no_routes = parse_bool(val);
         } else if (strcasecmp(key, "Reconnect") == 0) {
             cfg->reconnect = parse_bool(val);
         } else if (strcasecmp(key, "ReconnectInterval") == 0) {
@@ -470,6 +474,12 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "kill_switch");
     if (v && json_read_bool(v, &iv) == 0) cfg->kill_switch = iv;
+
+    v = json_find_key(json_text, "route_via_server");
+    if (v && json_read_bool(v, &iv) == 0) cfg->route_via_server = iv;
+
+    v = json_find_key(json_text, "no_routes");
+    if (v && json_read_bool(v, &iv) == 0) cfg->no_routes = iv;
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;
