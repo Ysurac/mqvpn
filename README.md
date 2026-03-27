@@ -43,6 +43,7 @@ sudo scripts/start_server.sh --subnet 10.0.0.0/24 --subnet6 fd00:abcd::/112
 > - `--insecure` skips TLS certificate verification (self-signed certs). For production, use a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`.
 > - Without `--path`, the client uses the default interface (single path). Multipath requires two or more `--path` flags.
 > - The server needs its listen port open for UDP (default: 443, configurable with `--listen`). All client traffic is routed through the tunnel (default route via TUN device).
+> - By default the client installs `0.0.0.0/1` + `128.0.0.0/1` routes via the TUN to override the system default without replacing it. Use `--route-via-server` to install a plain `default via <server tunnel IP>` route instead, or `--no-routes` to skip route setup entirely and manage routing yourself.
 > - Generate an auth key with `mqvpn --genkey`, or let `start_server.sh` generate one automatically.
 
 ## Configuration
@@ -79,6 +80,8 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
+# RouteViaServer = yes    # use "default via <server tunnel IP>" instead of 0/1+128/1 trick
+# NoRoutes = yes          # skip automatic route setup entirely (manage routes yourself)
 
 [Multipath]
 Scheduler = wlb
@@ -123,6 +126,8 @@ Client example:
     "reconnect": true,
     "reconnect_interval": 5,
     "kill_switch": false,
+    "route_via_server": false,
+    "no_routes": false,
     "scheduler": "wlb"
 }
 ```
@@ -155,16 +160,19 @@ sudo systemctl enable --now mqvpn-client@home
 
 ## Control API
 
-A running server can be managed at runtime over a TCP port using newline-delimited JSON.
+Both the server and the client can be managed at runtime over a TCP port using newline-delimited JSON.
 
 ### Enable
 
 ```bash
-# CLI
+# Server
 sudo mqvpn --mode server ... --control-port 9090
 
+# Client
+sudo mqvpn --mode client ... --control-port 9091
+
 # Bind to a specific address (default: 127.0.0.1)
-sudo mqvpn --mode server ... --control-port 9090 --control-addr 127.0.0.1
+sudo mqvpn --mode client ... --control-port 9091 --control-addr 127.0.0.1
 ```
 
 > **Security:** bind only to `127.0.0.1` (the default) unless the port is protected by a firewall or network policy. The control API has no authentication.
@@ -213,6 +221,37 @@ echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
 
 ```json
 {"ok":false,"error":"user not found"}
+```
+
+### Client commands
+
+#### Add a path
+
+```bash
+echo '{"cmd":"add_path","iface":"wlan0"}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true}
+```
+
+#### Remove a path
+
+```bash
+echo '{"cmd":"remove_path","iface":"wlan0"}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true}
+```
+
+Removing the last remaining path is rejected with an error.
+
+#### List paths
+
+```bash
+echo '{"cmd":"list_paths"}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true,"paths":["eth0","wlan0"]}
 ```
 
 ### From code (Python example)
@@ -342,6 +381,10 @@ mqvpn [--config PATH] --mode client|server [options]
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
   --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --no-reconnect         Exit on disconnect instead of reconnecting
+  --kill-switch          Block all traffic outside the tunnel
+  --route-via-server     Default route via server tunnel IP (instead of 0/1+128/1 trick)
+  --no-routes            Skip automatic route setup (manage routes manually)
   --control-port PORT    TCP port for JSON control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit

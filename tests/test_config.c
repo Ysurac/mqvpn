@@ -906,6 +906,131 @@ static void test_json_invalid_users_error(void)
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
 }
 
+/* ================================================================
+ *  RouteViaServer config tests
+ * ================================================================ */
+
+static void test_route_via_server_default_off(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.route_via_server, 0, "default route_via_server off");
+}
+
+static void test_route_via_server_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "RouteViaServer = true\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.route_via_server, 1, "route_via_server enabled from config");
+}
+
+static void test_route_via_server_config_false(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "RouteViaServer = false\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.route_via_server, 0, "route_via_server stays off when false");
+}
+
+/* ================================================================
+ *  NoRoutes config tests
+ * ================================================================ */
+
+static void test_no_routes_default_off(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.no_routes, 0, "default no_routes off");
+}
+
+static void test_no_routes_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "NoRoutes = yes\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.no_routes, 1, "no_routes enabled from config");
+}
+
+static void test_no_routes_config_false(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "NoRoutes = no\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.no_routes, 0, "no_routes stays off when no");
+}
+
+static void test_json_client_route_options(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"route_via_server\":true,"
+        "\"no_routes\":false"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json route options parse ok");
+    ASSERT_EQ_INT(cfg.route_via_server, 1, "json route_via_server true");
+    ASSERT_EQ_INT(cfg.no_routes, 0, "json no_routes false");
+}
+
+static void test_json_client_no_routes(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"no_routes\":true"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json no_routes parse ok");
+    ASSERT_EQ_INT(cfg.no_routes, 1, "json no_routes true");
+    ASSERT_EQ_INT(cfg.route_via_server, 0, "json route_via_server unset stays 0");
+}
+
 int main(void)
 {
     test_defaults();
@@ -955,6 +1080,18 @@ int main(void)
     test_json_client_config_load();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
+
+    /* route_via_server tests */
+    test_route_via_server_default_off();
+    test_route_via_server_config_parse();
+    test_route_via_server_config_false();
+
+    /* no_routes tests */
+    test_no_routes_default_off();
+    test_no_routes_config_parse();
+    test_no_routes_config_false();
+    test_json_client_route_options();
+    test_json_client_no_routes();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
