@@ -435,7 +435,7 @@ main(int argc, char *argv[])
             cfg.user_keys[i] = eff_user_keys[i];
         }
 #ifdef _WIN32
-        return win_platform_run_client(&cfg);
+        return win_platform_run_server(&cfg);
 #else
         return linux_platform_run_server(&cfg);
 #endif
