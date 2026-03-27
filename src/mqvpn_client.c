@@ -1181,15 +1181,19 @@ client_check_failover(mqvpn_client_t *c)
             }
         }
     } else {
-        /* Primary paths are up — stand down any active backup paths */
+        /* Primary paths are up — stand down any active backup paths.
+         * Set status = STANDBY before the close call: xqc_conn_close_path is async
+         * and cb_path_removed may fire after another re-entry of this function.
+         * The STANDBY guard prevents issuing a duplicate close for the same path. */
         for (int i = 0; i < c->n_paths; i++) {
             path_entry_t *p = &c->paths[i];
             if ((p->flags & MQVPN_PATH_FLAG_BACKUP) && p->in_use
+                    && p->status != MQVPN_PATH_STANDBY
                     && c->engine && c->conn) {
                 LOG_I(c, "failover: primary restored, standing down backup path[%d] iface=%s",
                       i, p->name);
+                p->status = MQVPN_PATH_STANDBY; /* guard re-entry before cb_path_removed fires */
                 xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
-                /* cb_path_removed will clear in_use and set status = STANDBY */
             }
         }
     }

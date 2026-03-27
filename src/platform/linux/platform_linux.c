@@ -446,7 +446,12 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
-    mqvpn_config_set_multipath(lib_cfg, (cfg->n_paths + cfg->n_backup_paths) > 1 ? 1 : 0);
+    /* Enable multipath when there are multiple primary paths, or when there is at
+     * least one backup path (even a single auto-detected primary + one backup needs
+     * multipath negotiation for failover to work; cfg->n_paths == 0 means one
+     * implicit primary is created below, so the total would be >= 2). */
+    mqvpn_config_set_multipath(lib_cfg,
+        (cfg->n_paths > 1 || cfg->n_backup_paths > 0) ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
