@@ -1132,6 +1132,19 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 
 /* ─── Multipath helpers ─── */
 
+/* Count primary (non-backup) paths that are currently active in xquic. */
+static int
+client_count_active_primaries(mqvpn_client_t *c)
+{
+    int n = 0;
+    for (int i = 0; i < c->n_paths; i++) {
+        path_entry_t *p = &c->paths[i];
+        if (!(p->flags & MQVPN_PATH_FLAG_BACKUP) && p->in_use)
+            n++;
+    }
+    return n;
+}
+
 /* Create an xquic path for a secondary path entry and mark it ACTIVE. */
 static void
 client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
@@ -1149,6 +1162,39 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
 }
 
+/*
+ * Promote backup paths when no primary is active, or stand them back down
+ * when a primary recovers.  Must be called after any path status change.
+ */
+static void
+client_check_failover(mqvpn_client_t *c)
+{
+    if (!c->multipath_ready || !c->config.multipath || !c->conn) return;
+
+    if (client_count_active_primaries(c) == 0) {
+        /* No active primary — activate all standby backup paths */
+        for (int i = 0; i < c->n_paths; i++) {
+            path_entry_t *p = &c->paths[i];
+            if ((p->flags & MQVPN_PATH_FLAG_BACKUP) && p->active && !p->in_use) {
+                LOG_I(c, "failover: activating backup path[%d] iface=%s", i, p->name);
+                client_activate_path(c, p, i);
+            }
+        }
+    } else {
+        /* Primary paths are up — stand down any active backup paths */
+        for (int i = 0; i < c->n_paths; i++) {
+            path_entry_t *p = &c->paths[i];
+            if ((p->flags & MQVPN_PATH_FLAG_BACKUP) && p->in_use
+                    && c->engine && c->conn) {
+                LOG_I(c, "failover: primary restored, standing down backup path[%d] iface=%s",
+                      i, p->name);
+                xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+                /* cb_path_removed will clear in_use and set status = STANDBY */
+            }
+        }
+    }
+}
+
 /* ─── Multipath callbacks ─── */
 
 static void
@@ -1164,8 +1210,18 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     for (int i = 1; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
         if (p->in_use || !p->active) continue;
+        if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
+            /* Keep backup paths in standby until all primaries fail */
+            p->status = MQVPN_PATH_STANDBY;
+            LOG_I(c, "path[%d] standby (backup): iface=%s", i, p->name);
+            if (c->cbs.path_event)
+                c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
+            continue;
+        }
         client_activate_path(c, p, i);
     }
+    /* Edge case: if every secondary is a backup path, promote them now */
+    client_check_failover(c);
 }
 
 static void
@@ -1177,12 +1233,20 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 
     path_entry_t *p = find_path_by_xqc_id(c, path_id);
     if (p) {
-        LOG_I(c, "path removed: path_id=%" PRIu64 " iface=%s", path_id, p->name);
         p->in_use = 0;
         p->xqc_path_id = 0;
-        p->status = MQVPN_PATH_CLOSED;
+        if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
+            /* Backup paths return to STANDBY so they can be re-activated later */
+            p->status = MQVPN_PATH_STANDBY;
+            LOG_I(c, "backup path standby: path_id=%" PRIu64 " iface=%s", path_id, p->name);
+        } else {
+            p->status = MQVPN_PATH_CLOSED;
+            LOG_I(c, "path removed: path_id=%" PRIu64 " iface=%s", path_id, p->name);
+        }
         if (c->cbs.path_event)
-            c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+            c->cbs.path_event(p->handle, p->status, c->user_ctx);
+        /* A primary just went down — promote backup paths if needed */
+        client_check_failover(c);
     }
 }
 
@@ -1498,9 +1562,19 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
         p->flags = desc->flags;
     }
 
-    /* If multipath is already negotiated, activate immediately */
+    /* If multipath is already negotiated, activate or stand by immediately */
     if (c->multipath_ready && c->config.multipath && c->conn) {
-        client_activate_path(c, p, idx);
+        if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
+            p->status = MQVPN_PATH_STANDBY;
+            if (c->cbs.path_event)
+                c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
+            /* Promote if no primary is currently active */
+            client_check_failover(c);
+        } else {
+            client_activate_path(c, p, idx);
+            /* New primary arrived — stand down any active backup paths */
+            client_check_failover(c);
+        }
     }
 
     return p->handle;
@@ -1720,6 +1794,7 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
         out[i].struct_size = sizeof(out[i]);
         out[i].handle = p->handle;
         out[i].status = p->status;
+        out[i].flags  = p->flags;
         memcpy(out[i].name, p->name, sizeof(out[i].name));
         out[i].bytes_tx = p->bytes_tx;
         out[i].bytes_rx = p->bytes_rx;

@@ -48,6 +48,8 @@ typedef struct mqvpn_config_s {
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
     int n_paths;
+    char backup_paths[MQVPN_CONFIG_MAX_PATHS][32]; /* failover-only interfaces */
+    int n_backup_paths;
     char scheduler[16];
 
     /* [Interface] — client reconnection */

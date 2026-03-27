@@ -29,6 +29,10 @@ sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --path eth0 --path wlan0 --insecure
 
+# Client (multipath + backup failover path)
+sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
+    --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --path eth0 --backup-path lte0 --insecure
+
 # Client (with DNS override)
 sudo ./build/mqvpn --mode client --server 203.0.113.1:443 \
     --auth-key mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4= --dns 1.1.1.1 --dns 8.8.8.8 --insecure
@@ -84,6 +88,7 @@ DNS = 1.1.1.1, 8.8.8.8
 Scheduler = wlb
 Path = eth0
 Path = wlan0
+# BackupPath = lte0   # failover-only: used only when all primary paths are down
 ```
 
 ### JSON config
@@ -120,6 +125,7 @@ Client example:
     "insecure": true,
     "dns": ["1.1.1.1", "8.8.8.8"],
     "paths": ["eth0", "wlan0"],
+    "backup_paths": ["lte0"],
     "reconnect": true,
     "reconnect_interval": 5,
     "kill_switch": false,
@@ -213,6 +219,43 @@ echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
 
 ```json
 {"ok":false,"error":"user not found"}
+```
+
+### Client commands
+
+#### Add a path
+
+```bash
+echo '{"cmd":"add_path","iface":"wlan0"}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true}
+```
+
+To add a backup (failover-only) path:
+
+```bash
+echo '{"cmd":"add_path","iface":"lte0","backup":true}' | nc 127.0.0.1 9091
+```
+
+#### Remove a path
+
+```bash
+echo '{"cmd":"remove_path","iface":"wlan0"}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true}
+```
+
+Removing the last remaining path is rejected with an error.
+
+#### List paths
+
+```bash
+echo '{"cmd":"list_paths"}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true,"paths":["eth0","wlan0"]}
 ```
 
 ### From code (Python example)
@@ -334,6 +377,7 @@ mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
+  --backup-path IFACE    Failover-only interface; used only when all primary paths are down (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)

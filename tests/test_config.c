@@ -906,6 +906,229 @@ static void test_json_invalid_users_error(void)
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
 }
 
+/* ================================================================
+ *  RouteViaServer config tests
+ * ================================================================ */
+
+static void test_route_via_server_default_off(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.route_via_server, 0, "default route_via_server off");
+}
+
+static void test_route_via_server_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "RouteViaServer = true\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.route_via_server, 1, "route_via_server enabled from config");
+}
+
+static void test_route_via_server_config_false(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "RouteViaServer = false\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.route_via_server, 0, "route_via_server stays off when false");
+}
+
+/* ================================================================
+ *  NoRoutes config tests
+ * ================================================================ */
+
+static void test_no_routes_default_off(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.no_routes, 0, "default no_routes off");
+}
+
+static void test_no_routes_config_parse(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "NoRoutes = yes\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.no_routes, 1, "no_routes enabled from config");
+}
+
+static void test_no_routes_config_false(void)
+{
+    const char *ini =
+        "[Interface]\n"
+        "NoRoutes = no\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.no_routes, 0, "no_routes stays off when no");
+}
+
+static void test_json_client_route_options(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"route_via_server\":true,"
+        "\"no_routes\":false"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json route options parse ok");
+    ASSERT_EQ_INT(cfg.route_via_server, 1, "json route_via_server true");
+    ASSERT_EQ_INT(cfg.no_routes, 0, "json no_routes false");
+}
+
+static void test_json_client_no_routes(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"no_routes\":true"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json no_routes parse ok");
+    ASSERT_EQ_INT(cfg.no_routes, 1, "json no_routes true");
+    ASSERT_EQ_INT(cfg.route_via_server, 0, "json route_via_server unset stays 0");
+}
+
+/* ================================================================
+ *  Backup path config tests
+ * ================================================================ */
+
+static void test_backup_path_default_empty(void)
+{
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.n_backup_paths, 0, "default n_backup_paths is 0");
+}
+
+static void test_backup_path_ini_parse(void)
+{
+    const char *ini =
+        "[Multipath]\n"
+        "Path = eth0\n"
+        "BackupPath = lte0\n"
+        "BackupPath = wlan0\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.n_paths, 1, "primary path parsed");
+    ASSERT_EQ_STR(cfg.paths[0], "eth0", "primary path[0]");
+    ASSERT_EQ_INT(cfg.n_backup_paths, 2, "2 backup paths parsed");
+    ASSERT_EQ_STR(cfg.backup_paths[0], "lte0", "backup_path[0]");
+    ASSERT_EQ_STR(cfg.backup_paths[1], "wlan0", "backup_path[1]");
+}
+
+static void test_backup_path_ini_max_cap(void)
+{
+    /* 5 backup paths → capped at MQVPN_CONFIG_MAX_PATHS (4) */
+    const char *ini =
+        "[Multipath]\n"
+        "BackupPath = b0\n"
+        "BackupPath = b1\n"
+        "BackupPath = b2\n"
+        "BackupPath = b3\n"
+        "BackupPath = b4\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "backup path cap no error");
+    ASSERT_EQ_INT(cfg.n_backup_paths, 4, "capped at 4 backup paths");
+    ASSERT_EQ_STR(cfg.backup_paths[3], "b3", "backup_path[3]");
+}
+
+static void test_backup_path_json_parse(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"paths\":[\"eth0\"],"
+        "\"backup_paths\":[\"lte0\",\"wlan0\"]"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json backup_paths parse ok");
+    ASSERT_EQ_INT(cfg.n_paths, 1, "json primary path count");
+    ASSERT_EQ_STR(cfg.paths[0], "eth0", "json primary path[0]");
+    ASSERT_EQ_INT(cfg.n_backup_paths, 2, "json backup_paths count");
+    ASSERT_EQ_STR(cfg.backup_paths[0], "lte0", "json backup_path[0]");
+    ASSERT_EQ_STR(cfg.backup_paths[1], "wlan0", "json backup_path[1]");
+}
+
+static void test_backup_path_json_empty_array(void)
+{
+    const char *json =
+        "{"
+        "\"mode\":\"client\","
+        "\"server_addr\":\"vpn.example.com:443\","
+        "\"backup_paths\":[]"
+        "}";
+
+    char *path = write_tmp(json);
+    mqvpn_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json empty backup_paths ok");
+    ASSERT_EQ_INT(cfg.n_backup_paths, 0, "json empty backup_paths count is 0");
+}
+
 int main(void)
 {
     test_defaults();
@@ -955,6 +1178,25 @@ int main(void)
     test_json_client_config_load();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
+
+    /* route_via_server tests */
+    test_route_via_server_default_off();
+    test_route_via_server_config_parse();
+    test_route_via_server_config_false();
+
+    /* no_routes tests */
+    test_no_routes_default_off();
+    test_no_routes_config_parse();
+    test_no_routes_config_false();
+    test_json_client_route_options();
+    test_json_client_no_routes();
+
+    /* backup path tests */
+    test_backup_path_default_empty();
+    test_backup_path_ini_parse();
+    test_backup_path_ini_max_cap();
+    test_backup_path_json_parse();
+    test_backup_path_json_empty_array();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

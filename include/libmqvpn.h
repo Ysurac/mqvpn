@@ -144,6 +144,7 @@ typedef struct {
     mqvpn_path_handle_t handle;
     mqvpn_path_status_t status;
     char name[16]; /* interface name */
+    uint32_t flags; /* MQVPN_PATH_FLAG_* bitmask (e.g. MQVPN_PATH_FLAG_BACKUP) */
     int srtt_ms;
     uint64_t bytes_tx;
     uint64_t bytes_rx;
@@ -163,8 +164,13 @@ typedef struct {
     uint8_t local_addr[128]; /* sockaddr storage */
     uint32_t local_addr_len;
     int64_t platform_net_id; /* Android: Network handle */
-    uint32_t flags;
+    uint32_t flags;          /* MQVPN_PATH_FLAG_* bitmask */
 } mqvpn_path_desc_t;
+
+/* Path descriptor flags */
+#define MQVPN_PATH_FLAG_BACKUP  (1u << 0)  /* standby/failover path: only used when all
+                                             * primary paths are unavailable, then put
+                                             * back to standby when a primary recovers */
 
 /* ─── Callback function types ─── */
 

@@ -131,6 +131,7 @@ main(int argc, char *argv[])
         {"user",        required_argument, NULL, 'u'},
         {"genkey",      no_argument,       NULL, 'G'},
         {"path",        required_argument, NULL, 'p'},
+        {"backup-path", required_argument, NULL, 'b'},
         {"dns",         required_argument, NULL, 'd'},
         {"scheduler",   required_argument, NULL, 'S'},
         {"max-clients", required_argument, NULL, 'M'},
@@ -165,6 +166,8 @@ main(int argc, char *argv[])
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
+    const char *backup_ifaces[MQVPN_MAX_PATH_IFACES];
+    int n_backup_paths = 0;
     const char *dns_servers[4];
     int         n_dns = 0;
     int         no_reconnect      = 0;
@@ -175,7 +178,7 @@ main(int argc, char *argv[])
     const char *control_addr = NULL;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:d:S:M:L:X:x:wWh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:M:L:X:x:wWh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -217,6 +220,14 @@ main(int argc, char *argv[])
                 path_ifaces[n_paths++] = optarg;
             } else {
                 fprintf(stderr, "error: max %d paths supported\n", MQVPN_MAX_PATH_IFACES);
+                return 1;
+            }
+            break;
+        case 'b':
+            if (n_backup_paths < MQVPN_MAX_PATH_IFACES) {
+                backup_ifaces[n_backup_paths++] = optarg;
+            } else {
+                fprintf(stderr, "error: max %d backup paths supported\n", MQVPN_MAX_PATH_IFACES);
                 return 1;
             }
             break;
@@ -354,6 +365,14 @@ main(int argc, char *argv[])
         }
     }
 
+    /* Backup paths: CLI backup paths override config backup paths entirely */
+    if (n_backup_paths == 0 && file_cfg.n_backup_paths > 0) {
+        n_backup_paths = file_cfg.n_backup_paths;
+        for (int i = 0; i < n_backup_paths; i++) {
+            backup_ifaces[i] = file_cfg.backup_paths[i];
+        }
+    }
+
     /* DNS: CLI servers override config DNS entirely */
     if (n_dns == 0 && file_cfg.n_dns > 0) {
         n_dns = file_cfg.n_dns;
@@ -387,6 +406,7 @@ main(int argc, char *argv[])
             .insecure = eff_insecure,
             .log_level = xqc_log_level,
             .n_paths = n_paths,
+            .n_backup_paths = n_backup_paths,
             .scheduler = scheduler,
             .auth_key = eff_auth_key,
             .n_dns = n_dns,
@@ -401,6 +421,9 @@ main(int argc, char *argv[])
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
+        }
+        for (int i = 0; i < n_backup_paths; i++) {
+            cfg.backup_ifaces[i] = backup_ifaces[i];
         }
         for (int i = 0; i < n_dns; i++) {
             cfg.dns_servers[i] = dns_servers[i];

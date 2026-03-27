@@ -10,5 +10,6 @@
   "reconnect": true,
   "reconnect_interval": 5,
   "scheduler": "wlb",
-  "paths": ["eth0", "wlan0"]
+  "paths": ["eth0", "wlan0"],
+  "backup_paths": []
 }

@@ -79,7 +79,7 @@ int setup_killswitch(platform_ctx_t *p);
 void cleanup_killswitch(platform_ctx_t *p);
 
 /* platform_linux.c — runtime path management */
-int platform_add_path(platform_ctx_t *p, const char *iface);
+int platform_add_path(platform_ctx_t *p, const char *iface, int backup);
 int platform_remove_path(platform_ctx_t *p, const char *iface);
 int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max);
 

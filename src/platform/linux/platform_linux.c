@@ -322,7 +322,7 @@ on_signal(evutil_socket_t sig, short what, void *arg)
  * ================================================================ */
 
 int
-platform_add_path(platform_ctx_t *p, const char *iface)
+platform_add_path(platform_ctx_t *p, const char *iface, int backup)
 {
     if (!p || !iface || iface[0] == '\0') return -1;
     if (p->path_mgr.n_paths >= MQVPN_MAX_PATHS) return -1;
@@ -334,6 +334,7 @@ platform_add_path(platform_ctx_t *p, const char *iface)
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
     desc.fd = mp->fd;
+    desc.flags = backup ? MQVPN_PATH_FLAG_BACKUP : 0;
     snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
     if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
         memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
@@ -445,7 +446,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
-    mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
+    mqvpn_config_set_multipath(lib_cfg, (cfg->n_paths + cfg->n_backup_paths) > 1 ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
@@ -506,7 +507,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         mqvpn_path_mgr_add(&ctx.path_mgr, NULL, &ctx.server_addr);
     }
 
-    /* Register paths with library and create socket events */
+    /* Register primary paths with library and create socket events */
     for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
         mqvpn_path_t *mp = &ctx.path_mgr.paths[i];
         mqvpn_path_desc_t desc = {0};
@@ -527,6 +528,40 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         ctx.ev_udp[i] =
             event_new(ctx.eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, &ctx);
         event_add(ctx.ev_udp[i], NULL);
+    }
+
+    /* Register backup (failover) paths */
+    for (int i = 0; i < cfg->n_backup_paths; i++) {
+        int idx = mqvpn_path_mgr_add(&ctx.path_mgr, cfg->backup_ifaces[i],
+                                     &ctx.server_addr);
+        if (idx < 0) {
+            LOG_WRN("backup path %s: socket creation failed, skipping",
+                    cfg->backup_ifaces[i]);
+            continue;
+        }
+        mqvpn_path_t *mp = &ctx.path_mgr.paths[idx];
+        mqvpn_path_desc_t desc = {0};
+        desc.struct_size = sizeof(desc);
+        desc.fd = mp->fd;
+        desc.flags = MQVPN_PATH_FLAG_BACKUP;
+        snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
+        if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
+            memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
+            desc.local_addr_len = mp->local_addrlen;
+        }
+
+        ctx.lib_path_handles[idx] = mqvpn_client_add_path_fd(ctx.client, mp->fd, &desc);
+        if (ctx.lib_path_handles[idx] < 0) {
+            LOG_WRN("backup path %s: library registration failed, skipping",
+                    cfg->backup_ifaces[i]);
+            mqvpn_path_mgr_remove_at(&ctx.path_mgr, idx);
+            continue;
+        }
+
+        ctx.ev_udp[idx] =
+            event_new(ctx.eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, &ctx);
+        event_add(ctx.ev_udp[idx], NULL);
+        LOG_INF("backup path registered: %s", cfg->backup_ifaces[i]);
     }
 
     /* Signal handlers */

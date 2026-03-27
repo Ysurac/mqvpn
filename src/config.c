@@ -388,6 +388,15 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val, in
                 LOG_WRN("%s:%d: max %d paths supported, ignoring '%s'", path, lineno,
                         MQVPN_CONFIG_MAX_PATHS, val);
             }
+        } else if (strcasecmp(key, "BackupPath") == 0) {
+            if (cfg->n_backup_paths < MQVPN_CONFIG_MAX_PATHS) {
+                snprintf(cfg->backup_paths[cfg->n_backup_paths],
+                         sizeof(cfg->backup_paths[0]), "%s", val);
+                cfg->n_backup_paths++;
+            } else {
+                LOG_WRN("%s:%d: max %d backup paths supported, ignoring '%s'", path,
+                        lineno, MQVPN_CONFIG_MAX_PATHS, val);
+            }
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Multipath]", path, lineno, key);
         }
@@ -502,6 +511,20 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
             copy_str(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]),
                      path_buf[i]);
             cfg->n_paths++;
+        }
+    }
+
+    char backup_path_buf[MQVPN_CONFIG_MAX_PATHS][64];
+    int n_backup_paths = 0;
+    v = json_find_key(json_text, "backup_paths");
+    if (v && json_read_string_array(v, backup_path_buf, MQVPN_CONFIG_MAX_PATHS,
+                                    &n_backup_paths) == 0) {
+        cfg->n_backup_paths = 0;
+        for (int i = 0; i < n_backup_paths; i++) {
+            copy_str(cfg->backup_paths[cfg->n_backup_paths],
+                     sizeof(cfg->backup_paths[cfg->n_backup_paths]),
+                     backup_path_buf[i]);
+            cfg->n_backup_paths++;
         }
     }
 

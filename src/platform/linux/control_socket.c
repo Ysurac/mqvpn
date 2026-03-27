@@ -168,7 +168,10 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         if (!iv || jstr(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"iface required\"}");
-        if (platform_add_path(cli_ctx, iface) < 0)
+        int backup = 0;
+        const char *bv = jfind(req, "backup");
+        if (bv && (*bv == 't' || *bv == '1')) backup = 1;
+        if (platform_add_path(cli_ctx, iface, backup) < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"add_path failed\"}");
         return snprintf(resp, resp_len, "{\"ok\":true}");

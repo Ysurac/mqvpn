@@ -684,6 +684,187 @@ TEST(client_on_socket_recv_null)
               MQVPN_ERR_INVALID_ARG);
 }
 
+TEST(client_remove_first_path_keeps_second)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t d0 = {0}, d1 = {0};
+    d0.fd = 10; snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    d1.fd = 11; snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    /* Remove first path */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
+
+    /* Second path must still be accessible */
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].handle, h1);
+    ASSERT_STR_EQ(info[0].name, "wlan0");
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_remove_path_then_add)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    /* Fill up to max */
+    mqvpn_path_handle_t handles[4];
+    for (int i = 0; i < 4; i++) {
+        handles[i] = mqvpn_client_add_path_fd(c, 20 + i, NULL);
+        ASSERT_NE(handles[i], (mqvpn_path_handle_t)-1);
+    }
+    /* At max — adding another should fail */
+    ASSERT_EQ(mqvpn_client_add_path_fd(c, 99, NULL), (mqvpn_path_handle_t)-1);
+
+    /* Remove one, then add should succeed */
+    ASSERT_EQ(mqvpn_client_remove_path(c, handles[0]), MQVPN_OK);
+    mqvpn_path_handle_t h_new = mqvpn_client_add_path_fd(c, 30, NULL);
+    ASSERT_NE(h_new, (mqvpn_path_handle_t)-1);
+
+    /* Total should be 4 again */
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 4);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_remove_path_invalid_handle)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_client_add_path_fd(c, 42, NULL);
+
+    ASSERT_EQ(mqvpn_client_remove_path(c, 9999), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_client_remove_path(NULL, 0), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_client_destroy(c);
+}
+
+/* ── Backup path flag ── */
+
+TEST(path_backup_flag_stored)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    mqvpn_path_desc_t desc = {0};
+    desc.fd    = 50;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    snprintf(desc.iface, sizeof(desc.iface), "lte0");
+
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 50, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* get_paths must reflect the backup flag */
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].flags & MQVPN_PATH_FLAG_BACKUP, (uint32_t)MQVPN_PATH_FLAG_BACKUP);
+    ASSERT_STR_EQ(info[0].name, "lte0");
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_primary_flag_clear)
+{
+    /* A path added without the backup flag must not have MQVPN_PATH_FLAG_BACKUP set */
+    mqvpn_client_t *c = make_test_client();
+
+    mqvpn_path_desc_t desc = {0};
+    desc.fd = 51;
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    /* desc.flags left as 0 */
+
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 51, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].flags & MQVPN_PATH_FLAG_BACKUP, (uint32_t)0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_backup_status_pending_before_connect)
+{
+    /* Before connect, multipath is not negotiated.
+     * Backup paths should sit in PENDING (same as any path at this stage). */
+    mqvpn_client_t *c = make_test_client();
+
+    mqvpn_path_desc_t desc = {0};
+    desc.fd    = 52;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    snprintf(desc.iface, sizeof(desc.iface), "lte0");
+
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 52, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_backup_mixed_with_primary)
+{
+    /* Mix of primary and backup paths — flags must be independent per path */
+    mqvpn_client_t *c = make_test_client();
+
+    mqvpn_path_desc_t d_primary = {0}, d_backup = {0};
+    d_primary.fd = 60;
+    snprintf(d_primary.iface, sizeof(d_primary.iface), "eth0");
+
+    d_backup.fd    = 61;
+    d_backup.flags = MQVPN_PATH_FLAG_BACKUP;
+    snprintf(d_backup.iface, sizeof(d_backup.iface), "lte0");
+
+    mqvpn_path_handle_t hp = mqvpn_client_add_path_fd(c, 60, &d_primary);
+    mqvpn_path_handle_t hb = mqvpn_client_add_path_fd(c, 61, &d_backup);
+    ASSERT_NE(hp, (mqvpn_path_handle_t)-1);
+    ASSERT_NE(hb, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
+    ASSERT_EQ(n, 2);
+
+    /* Find each path by handle and check its flag */
+    int primary_ok = 0, backup_ok = 0;
+    for (int i = 0; i < n; i++) {
+        if (info[i].handle == hp) {
+            ASSERT_EQ(info[i].flags & MQVPN_PATH_FLAG_BACKUP, (uint32_t)0);
+            primary_ok = 1;
+        } else if (info[i].handle == hb) {
+            ASSERT_EQ(info[i].flags & MQVPN_PATH_FLAG_BACKUP,
+                      (uint32_t)MQVPN_PATH_FLAG_BACKUP);
+            backup_ok = 1;
+        }
+    }
+    ASSERT_EQ(primary_ok, 1);
+    ASSERT_EQ(backup_ok, 1);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(path_backup_flag_value)
+{
+    /* Constant must be exactly bit 0 */
+    ASSERT_EQ(MQVPN_PATH_FLAG_BACKUP, (uint32_t)1);
+}
+
 /* ── Key generation ── */
 
 TEST(generate_key)
@@ -763,6 +944,13 @@ int main(void)
     run_get_paths_null_safety();
     run_client_remove_path();
     run_client_add_path_max();
+
+    /* Backup path flag tests */
+    run_path_backup_flag_stored();
+    run_path_primary_flag_clear();
+    run_path_backup_status_pending_before_connect();
+    run_path_backup_mixed_with_primary();
+    run_path_backup_flag_value();
 
     /* TUN control tests */
     run_client_set_tun_active();

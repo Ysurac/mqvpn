@@ -13,6 +13,8 @@ typedef struct mqvpn_client_cfg_s {
     int log_level;                                  /* xquic log level */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
     int n_paths;                /* number of path interfaces (0 = single-path) */
+    const char *backup_ifaces[MQVPN_MAX_PATH_IFACES]; /* failover-only interfaces */
+    int n_backup_paths;         /* number of backup interfaces */
     int scheduler;              /* 0=minrtt, 1=wlb (default) */
     const char *auth_key;       /* PSK for server authentication (NULL = no auth) */
     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
