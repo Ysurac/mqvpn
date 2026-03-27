@@ -48,6 +48,10 @@ mqvpn_path_t *mqvpn_path_mgr_find_by_path_id(mqvpn_path_mgr_t *mgr, uint64_t pat
 /* Get socket fd for path by xquic path_id. Returns primary fd if not found. */
 int mqvpn_path_mgr_get_fd(mqvpn_path_mgr_t *mgr, uint64_t path_id);
 
+/* Remove path at index idx: closes its socket and compacts the array.
+ * Returns 0 on success, -1 if idx is out of range. */
+int mqvpn_path_mgr_remove_at(mqvpn_path_mgr_t *mgr, int idx);
+
 /* Cleanup: close all sockets */
 void mqvpn_path_mgr_destroy(mqvpn_path_mgr_t *mgr);
 

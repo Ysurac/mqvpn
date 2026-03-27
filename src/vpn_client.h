@@ -22,6 +22,8 @@ typedef struct mqvpn_client_cfg_s {
     int kill_switch;            /* 1=block traffic outside tunnel (default 0) */
     int route_via_server;       /* 1=default via server tunnel IP instead of /1 trick (default 0) */
     int no_routes;              /* 1=skip automatic route setup entirely (default 0) */
+    int control_port;           /* TCP port for JSON control API (0 = disabled) */
+    const char *control_addr;   /* bind address for control API (NULL = "127.0.0.1") */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

@@ -318,6 +318,88 @@ on_signal(evutil_socket_t sig, short what, void *arg)
 }
 
 /* ================================================================
+ *  Runtime path management (called from control API)
+ * ================================================================ */
+
+int
+platform_add_path(platform_ctx_t *p, const char *iface)
+{
+    if (!p || !iface || iface[0] == '\0') return -1;
+    if (p->path_mgr.n_paths >= MQVPN_MAX_PATHS) return -1;
+
+    int idx = mqvpn_path_mgr_add(&p->path_mgr, iface, &p->server_addr);
+    if (idx < 0) return -1;
+
+    mqvpn_path_t *mp = &p->path_mgr.paths[idx];
+    mqvpn_path_desc_t desc = {0};
+    desc.struct_size = sizeof(desc);
+    desc.fd = mp->fd;
+    snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
+    if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
+        memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
+        desc.local_addr_len = mp->local_addrlen;
+    }
+
+    p->lib_path_handles[idx] = mqvpn_client_add_path_fd(p->client, mp->fd, &desc);
+    if (p->lib_path_handles[idx] < 0) {
+        mqvpn_path_mgr_remove_at(&p->path_mgr, idx);
+        return -1;
+    }
+
+    p->ev_udp[idx] = event_new(p->eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, p);
+    if (!p->ev_udp[idx]) {
+        mqvpn_client_remove_path(p->client, p->lib_path_handles[idx]);
+        mqvpn_path_mgr_remove_at(&p->path_mgr, idx);
+        return -1;
+    }
+    event_add(p->ev_udp[idx], NULL);
+    LOG_INF("path added: %s", iface);
+    return 0;
+}
+
+int
+platform_remove_path(platform_ctx_t *p, const char *iface)
+{
+    if (!p || !iface || iface[0] == '\0') return -1;
+    if (p->path_mgr.n_paths <= 1) return -1; /* refuse to remove last path */
+
+    int idx = -1;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) { idx = i; break; }
+    }
+    if (idx < 0) return -1;
+
+    /* Tear down libevent + library before closing fd */
+    if (p->ev_udp[idx]) {
+        event_del(p->ev_udp[idx]);
+        event_free(p->ev_udp[idx]);
+    }
+    mqvpn_client_remove_path(p->client, p->lib_path_handles[idx]);
+
+    /* Compact ev_udp and lib_path_handles in parallel with path_mgr */
+    for (int i = idx; i < p->path_mgr.n_paths - 1; i++) {
+        p->ev_udp[i]          = p->ev_udp[i + 1];
+        p->lib_path_handles[i] = p->lib_path_handles[i + 1];
+    }
+    p->ev_udp[p->path_mgr.n_paths - 1]           = NULL;
+    p->lib_path_handles[p->path_mgr.n_paths - 1]  = -1;
+
+    mqvpn_path_mgr_remove_at(&p->path_mgr, idx); /* closes fd, compacts paths[] */
+    LOG_INF("path removed: %s", iface);
+    return 0;
+}
+
+int
+platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
+{
+    if (!p || !names || max <= 0) return 0;
+    int n = p->path_mgr.n_paths < max ? p->path_mgr.n_paths : max;
+    for (int i = 0; i < n; i++)
+        snprintf(names[i], IFNAMSIZ, "%s", p->path_mgr.paths[i].iface);
+    return n;
+}
+
+/* ================================================================
  *  Main entry point: linux_platform_run_client
  * ================================================================ */
 
@@ -456,6 +538,14 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
 
+    /* Control API (optional) */
+    if (cfg->control_port > 0) {
+        ctx.ctrl = ctrl_socket_create(ctx.eb, cfg->control_addr,
+                                      cfg->control_port, NULL, &ctx);
+        if (!ctx.ctrl)
+            LOG_WRN("client control API setup failed — continuing without it");
+    }
+
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
         LOG_ERR("client connect failed");
@@ -470,6 +560,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = 0;
 
 cleanup:
+    ctrl_socket_destroy(ctx.ctrl);
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
     cleanup_routes(&ctx);
@@ -855,7 +946,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     /* Control API (optional) */
     if (cfg->control_port > 0) {
         sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr,
-                                     cfg->control_port, sp.server);
+                                     cfg->control_port, sp.server, NULL);
         if (!sp.ctrl)
             LOG_WRN("control API setup failed — continuing without it");
     }

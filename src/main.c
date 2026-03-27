@@ -396,6 +396,8 @@ main(int argc, char *argv[])
             .route_via_server = route_via_server >= 0 ? route_via_server
                                                       : file_cfg.route_via_server,
             .no_routes = no_routes >= 0 ? no_routes : file_cfg.no_routes,
+            .control_port = control_port,
+            .control_addr = control_addr,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];

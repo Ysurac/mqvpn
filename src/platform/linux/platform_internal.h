@@ -12,6 +12,7 @@
 #include "tun.h"
 #include "dns.h"
 #include "path_mgr.h"
+#include "control_socket.h"
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -62,6 +63,9 @@ typedef struct {
     int killswitch_enabled;
     char ks_comment[64];
 
+    /* Control API */
+    ctrl_socket_t *ctrl;
+
     /* Shutdown */
     int shutting_down;
 } platform_ctx_t;
@@ -73,5 +77,10 @@ void cleanup_routes(platform_ctx_t *p);
 /* killswitch.c */
 int setup_killswitch(platform_ctx_t *p);
 void cleanup_killswitch(platform_ctx_t *p);
+
+/* platform_linux.c — runtime path management */
+int platform_add_path(platform_ctx_t *p, const char *iface);
+int platform_remove_path(platform_ctx_t *p, const char *iface);
+int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max);
 
 #endif /* MQVPN_PLATFORM_INTERNAL_H */

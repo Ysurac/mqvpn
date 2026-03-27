@@ -161,6 +161,30 @@ mqvpn_path_mgr_get_fd(mqvpn_path_mgr_t *mgr, uint64_t path_id)
     return -1;
 }
 
+int
+mqvpn_path_mgr_remove_at(mqvpn_path_mgr_t *mgr, int idx)
+{
+    if (idx < 0 || idx >= mgr->n_paths) return -1;
+
+    if (mgr->paths[idx].fd >= 0) {
+#ifdef _WIN32
+        closesocket((SOCKET)mgr->paths[idx].fd);
+#else
+        close(mgr->paths[idx].fd);
+#endif
+        mgr->paths[idx].fd = -1;
+    }
+
+    /* Compact array */
+    for (int i = idx; i < mgr->n_paths - 1; i++)
+        mgr->paths[i] = mgr->paths[i + 1];
+
+    memset(&mgr->paths[mgr->n_paths - 1], 0, sizeof(mqvpn_path_t));
+    mgr->paths[mgr->n_paths - 1].fd = -1;
+    mgr->n_paths--;
+    return 0;
+}
+
 void
 mqvpn_path_mgr_destroy(mqvpn_path_mgr_t *mgr)
 {

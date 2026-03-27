@@ -16,6 +16,7 @@
  */
 
 #include "control_socket.h"
+#include "platform_internal.h"
 #include "log.h"
 
 #include <stdlib.h>
@@ -91,12 +92,14 @@ struct ctrl_socket_s {
     struct event      *ev_accept;
     struct event_base *eb;
     mqvpn_server_t    *server;
+    platform_ctx_t    *cli_ctx;
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
 
 static int
-dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
+         platform_ctx_t *cli_ctx)
 {
     char cmd[32] = {0};
     const char *v = jfind(req, "cmd");
@@ -156,6 +159,51 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
                         "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 "}",
                         nc, st.bytes_tx, st.bytes_rx);
 
+    } else if (strcmp(cmd, "add_path") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char iface[IFNAMSIZ] = {0};
+        const char *iv = jfind(req, "iface");
+        if (!iv || jstr(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"iface required\"}");
+        if (platform_add_path(cli_ctx, iface) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"add_path failed\"}");
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+
+    } else if (strcmp(cmd, "remove_path") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char iface[IFNAMSIZ] = {0};
+        const char *iv = jfind(req, "iface");
+        if (!iv || jstr(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"iface required\"}");
+        if (platform_remove_path(cli_ctx, iface) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"path not found or last path\"}");
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+
+    } else if (strcmp(cmd, "list_paths") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char names[MQVPN_MAX_PATHS][IFNAMSIZ];
+        int n = platform_list_paths(cli_ctx, names, MQVPN_MAX_PATHS);
+        char arr[MQVPN_MAX_PATHS * (IFNAMSIZ + 3) + 4];
+        int pos = 0;
+        arr[pos++] = '[';
+        for (int i = 0; i < n; i++) {
+            if (i > 0) arr[pos++] = ',';
+            pos += snprintf(arr + pos, sizeof(arr) - (size_t)pos, "\"%s\"", names[i]);
+        }
+        arr[pos++] = ']';
+        arr[pos]   = '\0';
+        return snprintf(resp, resp_len, "{\"ok\":true,\"paths\":%s}", arr);
+
     } else {
         return snprintf(resp, resp_len,
                         "{\"ok\":false,\"error\":\"unknown cmd\"}");
@@ -209,7 +257,8 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     conn->req[conn->req_len] = '\0';
 
     char resp[CTRL_MAX_RESP];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
+    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server,
+                        conn->cs->cli_ctx);
     if (rlen > 0) {
         resp[rlen]     = '\n';
         resp[rlen + 1] = '\0';
@@ -253,17 +302,18 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
 ctrl_socket_t *
 ctrl_socket_create(struct event_base *eb, const char *addr, int port,
-                   mqvpn_server_t *server)
+                   mqvpn_server_t *server, void *cli_ctx)
 {
-    if (!eb || port <= 0 || port > 65535 || !server) return NULL;
+    if (!eb || port <= 0 || port > 65535 || (!server && !cli_ctx)) return NULL;
 
     if (!addr || addr[0] == '\0')
         addr = "127.0.0.1";
 
     ctrl_socket_t *cs = calloc(1, sizeof(*cs));
     if (!cs) return NULL;
-    cs->eb     = eb;
-    cs->server = server;
+    cs->eb      = eb;
+    cs->server  = server;
+    cs->cli_ctx = (platform_ctx_t *)cli_ctx;
 
     /* Determine address family */
     struct sockaddr_in  sin4;
