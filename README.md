@@ -372,6 +372,8 @@ mqvpn [--config PATH] --mode client|server [options]
 
 Apache-2.0
 
+Copyright (c) 2026 mp0rta
+
 ## Acknowledgments
 
 - [XQUIC](https://github.com/alibaba/xquic) by Alibaba
