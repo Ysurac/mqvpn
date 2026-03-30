@@ -9,6 +9,8 @@
   "kill_switch": false,
   "reconnect": true,
   "reconnect_interval": 5,
+  "route_via_server": false,
+  "no_routes": false,
   "scheduler": "wlb",
   "paths": ["eth0", "wlan0"],
   "backup_paths": []

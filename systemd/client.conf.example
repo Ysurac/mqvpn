@@ -16,6 +16,8 @@ LogLevel = info
 # KillSwitch = false
 # Reconnect = true
 # ReconnectInterval = 5
+# RouteViaServer = false   # add a host route to the server IP before setting the default route
+# NoRoutes = false         # skip all automatic route setup (manage routes manually)
 
 [Multipath]
 Scheduler = wlb

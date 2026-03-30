@@ -78,6 +78,20 @@ mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out)
     return -1;
 }
 
+int
+mqvpn_addr_pool_alloc_at(mqvpn_addr_pool_t *pool, uint32_t offset, struct in_addr *out)
+{
+    if (offset < 2 || offset > pool->pool_size || pool->used[offset])
+        return -1;
+    pool->used[offset] = 1;
+    uint32_t base_h = ntohl(pool->base.s_addr);
+    out->s_addr = htonl(base_h + offset);
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, out, str, sizeof(str));
+    LOG_INF("addr_pool: allocated (pinned) %s", str);
+    return 0;
+}
+
 void
 mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr)
 {

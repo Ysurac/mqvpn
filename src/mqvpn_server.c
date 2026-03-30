@@ -63,6 +63,7 @@ struct svr_conn_s {
     socklen_t peer_addrlen;
 
     /* MASQUE session */
+    char username[64]; /* authenticated user name, or empty for global key */
     uint64_t masque_stream_id;
     struct in_addr assigned_ip;
     struct in6_addr assigned_ip6;
@@ -105,6 +106,13 @@ struct mqvpn_server_s {
     svr_conn_t *sessions[MQVPN_ADDR_POOL_MAX + 1];
     int n_sessions;
     int max_clients;
+
+    /* IP lease table: remembers the last IP offset for each named user so
+     * they receive the same address on reconnect. */
+    struct {
+        char username[64];
+        uint32_t offset; /* 0 = unused slot */
+    } leases[MQVPN_CONFIG_MAX_USERS];
 
     /* Backpressure */
     int tun_paused;
@@ -902,6 +910,26 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
             if (s->cbs.on_client_disconnected)
                 s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED, s->user_ctx);
         }
+        /* Save lease so the user gets the same IP on reconnect */
+        if (conn->username[0]) {
+            uint32_t offset = ntohl(conn->assigned_ip.s_addr)
+                              - ntohl(s->pool.base.s_addr);
+            int saved = 0;
+            for (int i = 0; i < MQVPN_CONFIG_MAX_USERS; i++) {
+                if (s->leases[i].offset == 0 ||
+                    strcmp(s->leases[i].username, conn->username) == 0) {
+                    snprintf(s->leases[i].username,
+                             sizeof(s->leases[i].username),
+                             "%s", conn->username);
+                    s->leases[i].offset = offset;
+                    saved = 1;
+                    break;
+                }
+            }
+            if (!saved)
+                LOG_W(s, "lease table full, could not save lease for '%s'",
+                      conn->username);
+        }
         mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     }
 
@@ -969,11 +997,28 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     stream->header_sent = 1;
     conn->masque_stream_id = xqc_h3_stream_id(h3_request);
 
-    /* 2. Allocate client IP */
+    /* 2. Allocate client IP — restore previous lease for named users */
+    if (conn->username[0]) {
+        for (int i = 0; i < MQVPN_CONFIG_MAX_USERS; i++) {
+            if (s->leases[i].offset == 0) continue;
+            if (strcmp(s->leases[i].username, conn->username) != 0) continue;
+            if (mqvpn_addr_pool_alloc_at(&s->pool, s->leases[i].offset,
+                                         &conn->assigned_ip) == 0) {
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
+                LOG_I(s, "restored leased IP %s for user '%s'",
+                      ip_str, conn->username);
+                goto ip_assigned;
+            }
+            /* Lease exists but offset is taken — fall through to normal alloc */
+            break;
+        }
+    }
     if (mqvpn_addr_pool_alloc(&s->pool, &conn->assigned_ip) < 0) {
         LOG_E(s, "IP pool exhausted");
         return -1;
     }
+ip_assigned:;
 
     /* 3. ADDRESS_ASSIGN capsule */
     uint8_t addr_payload[64];
@@ -1229,6 +1274,9 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                                                   expected_key,
                                                   strlen(expected_key)) == 0) {
                             authed = 1;
+                            snprintf(stream->conn->username,
+                                     sizeof(stream->conn->username),
+                                     "%s", s->config.user_names[i]);
                         }
                     }
                 }

@@ -83,6 +83,8 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
+# RouteViaServer = false   # add a host route to the server IP before setting the default route
+# NoRoutes = false         # skip all automatic route setup (manage routes manually)
 
 [Multipath]
 Scheduler = wlb
@@ -129,6 +131,8 @@ Client example:
     "reconnect": true,
     "reconnect_interval": 5,
     "kill_switch": false,
+    "route_via_server": false,
+    "no_routes": false,
     "scheduler": "wlb"
 }
 ```
@@ -386,6 +390,8 @@ mqvpn [--config PATH] --mode client|server [options]
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
   --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --route-via-server     Add host route to server IP before setting default route (client)
+  --no-routes            Skip all automatic route setup; manage routes manually (client)
   --control-port PORT    TCP port for JSON control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit

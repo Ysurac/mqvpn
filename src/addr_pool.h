@@ -34,6 +34,11 @@ int mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6);
 /* Allocate next available IP. Returns 0 on success, -1 if exhausted. */
 int mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out);
 
+/* Allocate a specific offset (2..pool_size). Returns 0 on success,
+ * -1 if the offset is out of range or already in use. */
+int mqvpn_addr_pool_alloc_at(mqvpn_addr_pool_t *pool, uint32_t offset,
+                              struct in_addr *out);
+
 /* Release a previously allocated IP back to the pool. */
 void mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr);
 
