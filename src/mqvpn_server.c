@@ -112,7 +112,7 @@ struct mqvpn_server_s {
     struct {
         char username[64];
         uint32_t offset; /* 0 = unused slot */
-    } leases[MQVPN_CONFIG_MAX_USERS];
+    } leases[MQVPN_MAX_USERS];
 
     /* Backpressure */
     int tun_paused;
@@ -915,7 +915,7 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
             uint32_t offset = ntohl(conn->assigned_ip.s_addr)
                               - ntohl(s->pool.base.s_addr);
             int saved = 0;
-            for (int i = 0; i < MQVPN_CONFIG_MAX_USERS; i++) {
+            for (int i = 0; i < MQVPN_MAX_USERS; i++) {
                 if (s->leases[i].offset == 0 ||
                     strcmp(s->leases[i].username, conn->username) == 0) {
                     snprintf(s->leases[i].username,
@@ -999,7 +999,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 
     /* 2. Allocate client IP — restore previous lease for named users */
     if (conn->username[0]) {
-        for (int i = 0; i < MQVPN_CONFIG_MAX_USERS; i++) {
+        for (int i = 0; i < MQVPN_MAX_USERS; i++) {
             if (s->leases[i].offset == 0) continue;
             if (strcmp(s->leases[i].username, conn->username) != 0) continue;
             if (mqvpn_addr_pool_alloc_at(&s->pool, s->leases[i].offset,
