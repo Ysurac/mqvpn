@@ -71,6 +71,10 @@ User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
+
+[Control]
+# Port = 9090          # enable JSON control API on this TCP port
+# Addr = 127.0.0.1    # bind address (default: 127.0.0.1, loopback only)
 ```
 
 ```ini
@@ -91,6 +95,10 @@ Scheduler = wlb
 Path = eth0
 Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
+
+[Control]
+# Port = 9091          # enable JSON control API on this TCP port
+# Addr = 127.0.0.1    # bind address (default: 127.0.0.1, loopback only)
 ```
 
 ### JSON config
@@ -113,7 +121,9 @@ Server example:
         "bob:bob-secret"
     ],
     "max_clients": 64,
-    "scheduler": "wlb"
+    "scheduler": "wlb",
+    "control_port": 9090,
+    "control_addr": "127.0.0.1"
 }
 ```
 
@@ -133,7 +143,9 @@ Client example:
     "kill_switch": false,
     "route_via_server": false,
     "no_routes": false,
-    "scheduler": "wlb"
+    "scheduler": "wlb",
+    "control_port": 0,
+    "control_addr": "127.0.0.1"
 }
 ```
 
@@ -165,16 +177,24 @@ sudo systemctl enable --now mqvpn-client@home
 
 ## Control API
 
-A running server can be managed at runtime over a TCP port using newline-delimited JSON.
+Both the server and the client can be managed at runtime over a TCP port using newline-delimited JSON.
 
 ### Enable
 
 ```bash
-# CLI
+# Server — CLI
 sudo mqvpn --mode server ... --control-port 9090
 
-# Bind to a specific address (default: 127.0.0.1)
-sudo mqvpn --mode server ... --control-port 9090 --control-addr 127.0.0.1
+# Server — config file ([Control] section)
+# Port = 9090
+# Addr = 127.0.0.1
+
+# Client — CLI
+sudo mqvpn --mode client ... --control-port 9091
+
+# Client — config file ([Control] section)
+# Port = 9091
+# Addr = 127.0.0.1
 ```
 
 > **Security:** bind only to `127.0.0.1` (the default) unless the port is protected by a firewall or network policy. The control API has no authentication.

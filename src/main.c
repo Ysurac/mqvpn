@@ -420,8 +420,9 @@ main(int argc, char *argv[])
             .route_via_server = route_via_server >= 0 ? route_via_server
                                                       : file_cfg.route_via_server,
             .no_routes = no_routes >= 0 ? no_routes : file_cfg.no_routes,
-            .control_port = control_port,
-            .control_addr = control_addr,
+            .control_port = control_port ? control_port : file_cfg.control_port,
+            .control_addr = control_addr ? control_addr
+                          : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -465,8 +466,9 @@ main(int argc, char *argv[])
             .auth_key       = eff_auth_key,
             .n_users        = eff_n_users,
             .max_clients    = eff_max_clients,
-            .control_addr   = control_addr,
-            .control_port   = control_port,
+            .control_port   = control_port ? control_port : file_cfg.control_port,
+            .control_addr   = control_addr ? control_addr
+                            : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

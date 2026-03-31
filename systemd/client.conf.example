@@ -19,6 +19,10 @@ LogLevel = info
 # RouteViaServer = false   # add a host route to the server IP before setting the default route
 # NoRoutes = false         # skip all automatic route setup (manage routes manually)
 
+[Control]
+# Port = 9091          # enable JSON control API on this TCP port
+# Addr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
+
 [Multipath]
 Scheduler = wlb
 # Path = eth0

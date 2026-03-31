@@ -13,5 +13,7 @@
     "bob:<BOB_PSK_HERE>"
   ],
   "max_clients": 64,
-  "scheduler": "wlb"
+  "scheduler": "wlb",
+  "control_port": 0,
+  "control_addr": "127.0.0.1"
 }

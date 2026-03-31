@@ -59,6 +59,10 @@ typedef struct mqvpn_config_s {
     int route_via_server;   /* 1=default via server tunnel IP, 0=0/1+128/1 trick (default) */
     int no_routes;          /* 1=skip automatic route setup entirely, 0=auto (default) */
 
+    /* [Control] — server */
+    int control_port;           /* TCP port for JSON control API (0 = disabled) */
+    char control_addr[64];      /* bind address for control API (default "127.0.0.1") */
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_config_t;

@@ -13,5 +13,7 @@
   "no_routes": false,
   "scheduler": "wlb",
   "paths": ["eth0", "wlan0"],
-  "backup_paths": []
+  "backup_paths": [],
+  "control_port": 0,
+  "control_addr": "127.0.0.1"
 }

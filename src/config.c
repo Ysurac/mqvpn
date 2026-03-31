@@ -55,6 +55,7 @@ enum {
     SEC_TLS,
     SEC_AUTH,
     SEC_MULTIPATH,
+    SEC_CONTROL,
 };
 
 static int
@@ -65,6 +66,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "TLS") == 0) return SEC_TLS;
     if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
+    if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
     return -1;
 }
 
@@ -402,6 +404,17 @@ handle_kv(mqvpn_config_t *cfg, int section, const char *key, const char *val, in
         }
         break;
 
+    case SEC_CONTROL:
+        if (strcasecmp(key, "Port") == 0 || strcasecmp(key, "ControlPort") == 0) {
+            int v = atoi(val);
+            if (v > 0) cfg->control_port = v;
+        } else if (strcasecmp(key, "Addr") == 0 || strcasecmp(key, "ControlAddr") == 0) {
+            snprintf(cfg->control_addr, sizeof(cfg->control_addr), "%s", val);
+        } else {
+            LOG_WRN("%s:%d: unknown key '%s' in [Control]", path, lineno, key);
+        }
+        break;
+
     default:
         LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key);
         break;
@@ -489,6 +502,14 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "no_routes");
     if (v && json_read_bool(v, &iv) == 0) cfg->no_routes = iv;
+
+    v = json_find_key(json_text, "control_port");
+    if (v && json_read_int(v, &iv) == 0 && iv > 0) cfg->control_port = iv;
+
+    char ctrl_addr_buf[64];
+    v = json_find_key(json_text, "control_addr");
+    if (v && json_read_string(v, ctrl_addr_buf, sizeof(ctrl_addr_buf)) == 0 && ctrl_addr_buf[0])
+        snprintf(cfg->control_addr, sizeof(cfg->control_addr), "%s", ctrl_addr_buf);
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;

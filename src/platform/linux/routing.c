@@ -17,13 +17,26 @@
 #include <errno.h>
 #include <sys/wait.h>
 
+/* Try known absolute paths for the 'ip' binary before falling back to PATH.
+ * On some distributions /usr/sbin is not in root's PATH under sudo. */
+static void
+exec_ip(char *const argv[])
+{
+    static const char *const paths[] = {
+        "/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip", NULL
+    };
+    for (int i = 0; paths[i]; i++)
+        execv(paths[i], argv);
+    execvp("ip", argv); /* last resort: search PATH */
+}
+
 static int
 run_ip_cmd(const char *const argv[])
 {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        execvp("ip", (char *const *)argv);
+        exec_ip((char *const *)argv);
         _exit(127);
     }
     int status = 0;
@@ -52,21 +65,36 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
-        execvp("ip", (char *const *)((af == AF_INET6) ? a6 : a4));
+        exec_ip((char *const *)((af == AF_INET6) ? a6 : a4));
         _exit(127);
     }
 
     close(fds[1]);
+    /* Read until EOF — a single read() call may not capture all output. */
     char out[1024];
-    ssize_t nread = read(fds[0], out, sizeof(out) - 1);
+    size_t total = 0;
+    ssize_t n;
+    while (total < sizeof(out) - 1 &&
+           (n = read(fds[0], out + total, sizeof(out) - 1 - total)) > 0)
+        total += (size_t)n;
     close(fds[0]);
 
     int status = 0;
     while (waitpid(pid, &status, 0) < 0)
         if (errno != EINTR) return -1;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || nread <= 0) return -1;
 
-    out[nread] = '\0';
+    out[total] = '\0';
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0) {
+        LOG_WRN("ip route get %s: exit=%d output='%s'",
+                server_ip,
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                out);
+        return -1;
+    }
+
+    LOG_DBG("ip route get %s: %s", server_ip, out);
+
     gateway[0] = '\0';
     iface[0] = '\0';
 
@@ -81,6 +109,8 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
             if (tok) snprintf(iface, if_len, "%s", tok);
         }
     }
+    if (!iface[0])
+        LOG_WRN("ip route get %s: no 'dev' token in output: '%s'", server_ip, out);
     return iface[0] ? 0 : -1;
 }
 
