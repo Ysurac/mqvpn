@@ -51,7 +51,7 @@ jobs:
             golang-go ninja-build perl
 
       - name: Build Debian packages
-        run: dpkg-buildpackage -us -uc -b -j$(nproc)
+        run: dpkg-buildpackage -us -uc -b -j$(nproc) -Zxz
 
       - name: Collect packages
         run: |
@@ -69,8 +69,8 @@ jobs:
   release:
     name: Create GitHub Release
     needs: build-deb
-    # Run on tag pushes, or when manually requested.
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true
+    # Run on every push (any branch/tag), or when manually requested.
+    if: github.event_name == 'push' || inputs.create_release == true
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,7 +97,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME:-$(git describe --tags --abbrev=0)}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            SAFE_REF="${GITHUB_REF_NAME//\//-}"
+            TAG="${SAFE_REF}-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          fi
           gh release create "$TAG" \
             --title "mqvpn $TAG" \
             --generate-notes \

@@ -65,3 +65,7 @@ override_dh_auto_install:
 override_dh_auto_test:
 	# Unit tests require a build dir; run if available.
 	if [ -d $(B) ]; then cd $(B) && ctest --output-on-failure || true; fi
+
+override_dh_builddeb:
+	# Keep .deb members broadly compatible with older dpkg versions.
+	dh_builddeb -- -Zxz
