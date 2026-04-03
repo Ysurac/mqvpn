@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <net/if.h>
 
 /* Try known absolute paths for the 'ip' binary before falling back to PATH.
  * On some distributions /usr/sbin is not in root's PATH under sudo. */
@@ -45,11 +46,9 @@ run_ip_cmd(const char *const argv[])
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
-/* oif: if non-NULL, force "ip route get … oif <oif>" to constrain the lookup
- * to a specific output interface. Pass NULL for an unconstrained lookup. */
 static int
 discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_len,
-               char *iface, size_t if_len, const char *oif)
+               char *iface, size_t if_len)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
@@ -62,17 +61,12 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     }
 
     if (pid == 0) {
-        const char *v = (af == AF_INET6) ? "-6" : "-4";
-        const char *argv[16];
-        int i = 0;
-        argv[i++] = "ip"; argv[i++] = v;
-        argv[i++] = "route"; argv[i++] = "get"; argv[i++] = server_ip;
-        if (oif) { argv[i++] = "oif"; argv[i++] = oif; }
-        argv[i] = NULL;
+        const char *const a4[] = {"ip", "-4", "route", "get", server_ip, NULL};
+        const char *const a6[] = {"ip", "-6", "route", "get", server_ip, NULL};
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
-        exec_ip((char *const *)argv);
+        exec_ip((char *const *)((af == AF_INET6) ? a6 : a4));
         _exit(127);
     }
 
@@ -121,6 +115,90 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     return iface[0] ? 0 : -1;
 }
 
+/* Read the main routing table directly (not policy-routing-aware) via
+ * "ip route show <server_ip>" and find the nexthop whose dev matches
+ * want_iface.  Returns 1 on success (gateway/iface filled), 0 on failure. */
+static int
+discover_route_from_show(const char *server_ip, sa_family_t af,
+                         char *gateway, size_t gw_len,
+                         char *iface,   size_t if_len,
+                         const char *want_iface)
+{
+    int fds[2];
+    if (pipe(fds) < 0) return 0;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(fds[0]); close(fds[1]); return 0; }
+
+    if (pid == 0) {
+        const char *v = (af == AF_INET6) ? "-6" : "-4";
+        const char *argv[] = {"ip", v, "route", "show", server_ip, NULL};
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
+        close(fds[1]);
+        exec_ip((char *const *)argv);
+        _exit(127);
+    }
+
+    close(fds[1]);
+    char out[2048];
+    size_t total = 0;
+    ssize_t n;
+    while (total < sizeof(out) - 1 &&
+           (n = read(fds[0], out + total, sizeof(out) - 1 - total)) > 0)
+        total += (size_t)n;
+    close(fds[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0)
+        if (errno != EINTR) return 0;
+
+    out[total] = '\0';
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0) return 0;
+
+    LOG_DBG("ip route show %s: %s", server_ip, out);
+
+    /* Walk nexthop blocks.  Each nexthop starts with the keyword "nexthop"
+     * followed by "via <gw> dev <iface> ...".  We pick the one whose dev
+     * matches want_iface.  Also handle single-path entries (no "nexthop"
+     * keyword) by scanning the whole line. */
+    char found_gw[INET6_ADDRSTRLEN] = {0};
+    char found_dev[IFNAMSIZ]        = {0};
+    char cur_gw[INET6_ADDRSTRLEN]   = {0};
+    char cur_dev[IFNAMSIZ]          = {0};
+
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(out, " \t\r\n", &saveptr); tok;
+         tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
+        if (strcmp(tok, "nexthop") == 0) {
+            /* Commit previous nexthop if it matched */
+            if (cur_dev[0] && strcmp(cur_dev, want_iface) == 0) {
+                snprintf(found_gw,  sizeof(found_gw),  "%s", cur_gw);
+                snprintf(found_dev, sizeof(found_dev), "%s", cur_dev);
+                break;
+            }
+            cur_gw[0] = cur_dev[0] = '\0';
+        } else if (strcmp(tok, "via") == 0) {
+            tok = strtok_r(NULL, " \t\r\n", &saveptr);
+            if (tok) snprintf(cur_gw, sizeof(cur_gw), "%s", tok);
+        } else if (strcmp(tok, "dev") == 0) {
+            tok = strtok_r(NULL, " \t\r\n", &saveptr);
+            if (tok) snprintf(cur_dev, sizeof(cur_dev), "%s", tok);
+        }
+    }
+    /* Check the last nexthop block (or single-path entry) */
+    if (!found_dev[0] && cur_dev[0] && strcmp(cur_dev, want_iface) == 0) {
+        snprintf(found_gw,  sizeof(found_gw),  "%s", cur_gw);
+        snprintf(found_dev, sizeof(found_dev), "%s", cur_dev);
+    }
+
+    if (!found_dev[0]) return 0;
+
+    snprintf(gateway, gw_len, "%s", found_gw);
+    snprintf(iface,   if_len,  "%s", found_dev);
+    return 1;
+}
+
 int
 setup_routes(platform_ctx_t *p)
 {
@@ -129,16 +207,27 @@ setup_routes(platform_ctx_t *p)
     mqvpn_sa_ntop(&p->server_addr, p->server_ip_str, sizeof(p->server_ip_str));
 
     if (discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
-                       p->orig_iface, sizeof(p->orig_iface), NULL) < 0) {
-        /* Fallback: force route lookup via the first configured multipath interface */
-        const char *first_iface = (p->path_mgr.n_paths > 0) ? p->path_mgr.paths[0].iface : NULL;
-        if (!first_iface ||
-            discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
-                           p->orig_iface, sizeof(p->orig_iface), first_iface) < 0) {
+                       p->orig_iface, sizeof(p->orig_iface)) < 0) {
+        /* Fallback: "ip route get" is policy-routing-aware and may follow a
+         * different table than the main one (OpenMPTCProuter uses ip rules
+         * heavily).  Use "ip route show" which reads the main table directly,
+         * then pick the nexthop for the first configured multipath interface. */
+        const char *first_iface = (p->path_mgr.n_paths > 0 &&
+                                   p->path_mgr.paths[0].iface[0])
+                                  ? p->path_mgr.paths[0].iface : NULL;
+        int fallback_ok = 0;
+        if (first_iface) {
+            fallback_ok = discover_route_from_show(p->server_ip_str, af,
+                                                   p->orig_gateway, sizeof(p->orig_gateway),
+                                                   p->orig_iface,   sizeof(p->orig_iface),
+                                                   first_iface);
+        }
+        if (!fallback_ok) {
             LOG_WRN("could not determine original iface for %s", p->server_ip_str);
             return -1;
         }
-        LOG_INF("route lookup fallback via first path %s: gw=%s", first_iface, p->orig_gateway);
+        LOG_INF("route lookup fallback via first path %s: gw=%s",
+                first_iface, p->orig_gateway);
     }
 
     char host_cidr[INET6_ADDRSTRLEN + 5];
