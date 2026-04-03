@@ -161,6 +161,15 @@ setup_routes(platform_ctx_t *p)
     }
 
     if (p->route_via_server) {
+        /* Remove any stale /1 catch-all routes left by a previous session that
+         * ran without route_via_server (e.g. crash or config change). */
+        const char *const del_low[]  = {"ip", "route", "del", "0.0.0.0/1",
+                                        "dev", p->tun.name, NULL};
+        const char *const del_high[] = {"ip", "route", "del", "128.0.0.0/1",
+                                        "dev", p->tun.name, NULL};
+        (void)run_ip_cmd(del_low);
+        (void)run_ip_cmd(del_high);
+
         const char *const dflt[] = {"ip",  "route",           "replace", "default",
                                     "via", p->server_tunnel_ip, "dev", p->tun.name, NULL};
         if (run_ip_cmd(dflt) < 0) {
@@ -225,15 +234,14 @@ cleanup_routes(platform_ctx_t *p)
         p->routing6_configured = 0;
     }
 
-    if (p->route_via_server) {
-        const char *d[] = {"ip", "route", "del", "default", "dev", p->tun.name, NULL};
-        (void)run_ip_cmd(d);
-    } else {
-        const char *d3[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
-        const char *d4[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
-        (void)run_ip_cmd(d3);
-        (void)run_ip_cmd(d4);
-    }
+    /* Always attempt to remove all possible route types so that stale routes
+     * from a previous session (crash or config change) are fully cleaned up. */
+    const char *dd[]  = {"ip", "route", "del", "default",    "dev", p->tun.name, NULL};
+    const char *d3[]  = {"ip", "route", "del", "0.0.0.0/1",  "dev", p->tun.name, NULL};
+    const char *d4[]  = {"ip", "route", "del", "128.0.0.0/1","dev", p->tun.name, NULL};
+    (void)run_ip_cmd(dd);
+    (void)run_ip_cmd(d3);
+    (void)run_ip_cmd(d4);
 
     if (p->orig_gateway[0]) {
         const char *fl = (p->server_addr.ss_family == AF_INET6) ? "-6" : "-4";
