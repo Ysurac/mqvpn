@@ -117,7 +117,9 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
 
 /* Read the main routing table directly (not policy-routing-aware) via
  * "ip route show <server_ip>" and find the nexthop whose dev matches
- * want_iface.  Returns 1 on success (gateway/iface filled), 0 on failure. */
+ * want_iface (preferred).  If want_iface is NULL or not present in the
+ * nexthops, falls back to the first nexthop found.
+ * Returns 1 on success (gateway/iface filled), 0 on failure. */
 static int
 discover_route_from_show(const char *server_ip, sa_family_t af,
                          char *gateway, size_t gw_len,
@@ -159,11 +161,14 @@ discover_route_from_show(const char *server_ip, sa_family_t af,
     LOG_DBG("ip route show %s: %s", server_ip, out);
 
     /* Walk nexthop blocks.  Each nexthop starts with the keyword "nexthop"
-     * followed by "via <gw> dev <iface> ...".  We pick the one whose dev
-     * matches want_iface.  Also handle single-path entries (no "nexthop"
-     * keyword) by scanning the whole line. */
-    char found_gw[INET6_ADDRSTRLEN] = {0};
-    char found_dev[IFNAMSIZ]        = {0};
+     * followed by "via <gw> dev <iface> ...".
+     * We prefer the nexthop whose dev matches want_iface; if that is not
+     * found we fall back to the first nexthop encountered.  Single-path
+     * entries (no "nexthop" keyword) are handled by scanning the whole line. */
+    char pref_gw[INET6_ADDRSTRLEN]  = {0}; /* nexthop matching want_iface */
+    char pref_dev[IFNAMSIZ]         = {0};
+    char first_gw[INET6_ADDRSTRLEN] = {0}; /* first nexthop seen (fallback) */
+    char first_dev[IFNAMSIZ]        = {0};
     char cur_gw[INET6_ADDRSTRLEN]   = {0};
     char cur_dev[IFNAMSIZ]          = {0};
 
@@ -171,11 +176,16 @@ discover_route_from_show(const char *server_ip, sa_family_t af,
     for (char *tok = strtok_r(out, " \t\r\n", &saveptr); tok;
          tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
         if (strcmp(tok, "nexthop") == 0) {
-            /* Commit previous nexthop if it matched */
-            if (cur_dev[0] && strcmp(cur_dev, want_iface) == 0) {
-                snprintf(found_gw,  sizeof(found_gw),  "%s", cur_gw);
-                snprintf(found_dev, sizeof(found_dev), "%s", cur_dev);
-                break;
+            /* Commit the nexthop we just finished parsing */
+            if (cur_dev[0]) {
+                if (!first_dev[0]) {
+                    snprintf(first_gw,  sizeof(first_gw),  "%s", cur_gw);
+                    snprintf(first_dev, sizeof(first_dev), "%s", cur_dev);
+                }
+                if (!pref_dev[0] && want_iface && strcmp(cur_dev, want_iface) == 0) {
+                    snprintf(pref_gw,  sizeof(pref_gw),  "%s", cur_gw);
+                    snprintf(pref_dev, sizeof(pref_dev), "%s", cur_dev);
+                }
             }
             cur_gw[0] = cur_dev[0] = '\0';
         } else if (strcmp(tok, "via") == 0) {
@@ -186,16 +196,26 @@ discover_route_from_show(const char *server_ip, sa_family_t af,
             if (tok) snprintf(cur_dev, sizeof(cur_dev), "%s", tok);
         }
     }
-    /* Check the last nexthop block (or single-path entry) */
-    if (!found_dev[0] && cur_dev[0] && strcmp(cur_dev, want_iface) == 0) {
-        snprintf(found_gw,  sizeof(found_gw),  "%s", cur_gw);
-        snprintf(found_dev, sizeof(found_dev), "%s", cur_dev);
+    /* Commit the last nexthop block (or single-path entry) */
+    if (cur_dev[0]) {
+        if (!first_dev[0]) {
+            snprintf(first_gw,  sizeof(first_gw),  "%s", cur_gw);
+            snprintf(first_dev, sizeof(first_dev), "%s", cur_dev);
+        }
+        if (!pref_dev[0] && want_iface && strcmp(cur_dev, want_iface) == 0) {
+            snprintf(pref_gw,  sizeof(pref_gw),  "%s", cur_gw);
+            snprintf(pref_dev, sizeof(pref_dev), "%s", cur_dev);
+        }
     }
 
-    if (!found_dev[0]) return 0;
+    /* Use preferred match; fall back to first nexthop if not found */
+    const char *use_gw  = pref_dev[0] ? pref_gw  : first_gw;
+    const char *use_dev = pref_dev[0] ? pref_dev : first_dev;
 
-    snprintf(gateway, gw_len, "%s", found_gw);
-    snprintf(iface,   if_len,  "%s", found_dev);
+    if (!use_dev[0]) return 0;
+
+    snprintf(gateway, gw_len, "%s", use_gw);
+    snprintf(iface,   if_len,  "%s", use_dev);
     return 1;
 }
 
