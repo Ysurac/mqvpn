@@ -45,9 +45,11 @@ run_ip_cmd(const char *const argv[])
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
+/* oif: if non-NULL, force "ip route get … oif <oif>" to constrain the lookup
+ * to a specific output interface. Pass NULL for an unconstrained lookup. */
 static int
 discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_len,
-               char *iface, size_t if_len)
+               char *iface, size_t if_len, const char *oif)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
@@ -60,12 +62,17 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     }
 
     if (pid == 0) {
-        const char *const a4[] = {"ip", "-4", "route", "get", server_ip, NULL};
-        const char *const a6[] = {"ip", "-6", "route", "get", server_ip, NULL};
+        const char *v = (af == AF_INET6) ? "-6" : "-4";
+        const char *argv[16];
+        int i = 0;
+        argv[i++] = "ip"; argv[i++] = v;
+        argv[i++] = "route"; argv[i++] = "get"; argv[i++] = server_ip;
+        if (oif) { argv[i++] = "oif"; argv[i++] = oif; }
+        argv[i] = NULL;
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
-        exec_ip((char *const *)((af == AF_INET6) ? a6 : a4));
+        exec_ip((char *const *)argv);
         _exit(127);
     }
 
@@ -122,9 +129,16 @@ setup_routes(platform_ctx_t *p)
     mqvpn_sa_ntop(&p->server_addr, p->server_ip_str, sizeof(p->server_ip_str));
 
     if (discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
-                       p->orig_iface, sizeof(p->orig_iface)) < 0) {
-        LOG_WRN("could not determine original iface for %s", p->server_ip_str);
-        return -1;
+                       p->orig_iface, sizeof(p->orig_iface), NULL) < 0) {
+        /* Fallback: force route lookup via the first configured multipath interface */
+        const char *first_iface = (p->path_mgr.n_paths > 0) ? p->path_mgr.paths[0].iface : NULL;
+        if (!first_iface ||
+            discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
+                           p->orig_iface, sizeof(p->orig_iface), first_iface) < 0) {
+            LOG_WRN("could not determine original iface for %s", p->server_ip_str);
+            return -1;
+        }
+        LOG_INF("route lookup fallback via first path %s: gw=%s", first_iface, p->orig_gateway);
     }
 
     char host_cidr[INET6_ADDRSTRLEN + 5];
