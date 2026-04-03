@@ -18,6 +18,9 @@
 #include <sys/wait.h>
 #include <net/if.h>
 
+#define ROUTE_DISCOVER_MAX_ATTEMPTS 6
+#define ROUTE_DISCOVER_RETRY_DELAY_SEC 1
+
 /* Try known absolute paths for the 'ip' binary before falling back to PATH.
  * On some distributions /usr/sbin is not in root's PATH under sudo. */
 static void
@@ -226,28 +229,61 @@ setup_routes(platform_ctx_t *p)
     int prefix = mqvpn_sa_host_prefix(&p->server_addr);
     mqvpn_sa_ntop(&p->server_addr, p->server_ip_str, sizeof(p->server_ip_str));
 
-    if (discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
-                       p->orig_iface, sizeof(p->orig_iface)) < 0) {
-        /* Fallback: "ip route get" is policy-routing-aware and may follow a
-         * different table than the main one (OpenMPTCProuter uses ip rules
-         * heavily).  Use "ip route show" which reads the main table directly,
-         * then pick the nexthop for the first configured multipath interface. */
+    {
+        /* On OpenMPTCProuter, policy rules/routes can appear shortly after
+         * process startup. Retry route discovery before giving up. */
         const char *first_iface = (p->path_mgr.n_paths > 0 &&
                                    p->path_mgr.paths[0].iface[0])
                                   ? p->path_mgr.paths[0].iface : NULL;
-        int fallback_ok = 0;
-        if (first_iface) {
-            fallback_ok = discover_route_from_show(p->server_ip_str, af,
-                                                   p->orig_gateway, sizeof(p->orig_gateway),
-                                                   p->orig_iface,   sizeof(p->orig_iface),
-                                                   first_iface);
+        int route_ok = 0;
+
+        for (int attempt = 1; attempt <= ROUTE_DISCOVER_MAX_ATTEMPTS; attempt++) {
+            if (discover_route(p->server_ip_str, af,
+                               p->orig_gateway, sizeof(p->orig_gateway),
+                               p->orig_iface,   sizeof(p->orig_iface)) == 0) {
+                route_ok = 1;
+                break;
+            }
+
+            if (discover_route_from_show(p->server_ip_str, af,
+                                         p->orig_gateway, sizeof(p->orig_gateway),
+                                         p->orig_iface,   sizeof(p->orig_iface),
+                                         first_iface)) {
+                if (first_iface && strcmp(p->orig_iface, first_iface) == 0)
+                    LOG_INF("route lookup fallback via first path %s: gw=%s",
+                            first_iface, p->orig_gateway);
+                else
+                    LOG_INF("route lookup fallback via first nexthop %s: gw=%s",
+                            p->orig_iface, p->orig_gateway);
+                route_ok = 1;
+                break;
+            }
+
+            if (attempt < ROUTE_DISCOVER_MAX_ATTEMPTS) {
+                LOG_WRN("route discovery attempt %d/%d failed for %s, retrying in %ds",
+                        attempt, ROUTE_DISCOVER_MAX_ATTEMPTS,
+                        p->server_ip_str, ROUTE_DISCOVER_RETRY_DELAY_SEC);
+                sleep(ROUTE_DISCOVER_RETRY_DELAY_SEC);
+            }
         }
-        if (!fallback_ok) {
-            LOG_WRN("could not determine original iface for %s", p->server_ip_str);
-            return -1;
+
+        if (!route_ok) {
+            if (first_iface) {
+                /* Last-resort fail-open mode: continue using the first
+                 * configured multipath interface even without a discovered
+                 * gateway. This avoids hard startup failure on systems where
+                 * policy routes are transiently unavailable. */
+                p->orig_gateway[0] = '\0';
+                snprintf(p->orig_iface, sizeof(p->orig_iface), "%s", first_iface);
+                LOG_WRN("could not determine original route for %s; "
+                        "falling back to first path iface %s",
+                        p->server_ip_str, p->orig_iface);
+            } else {
+                LOG_WRN("could not determine original iface for %s",
+                        p->server_ip_str);
+                return -1;
+            }
         }
-        LOG_INF("route lookup fallback via first path %s: gw=%s",
-                first_iface, p->orig_gateway);
     }
 
     char host_cidr[INET6_ADDRSTRLEN + 5];
