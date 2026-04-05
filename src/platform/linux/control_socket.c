@@ -140,8 +140,13 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
         users[pos++] = '[';
         for (int i = 0; i < n_users; i++) {
             if (i > 0) users[pos++] = ',';
-            pos += snprintf(users + pos, sizeof(users) - (size_t)pos,
-                            "\"%s\"", unames[i]);
+            /* Clamp pos to prevent underflow on sizeof(users) - pos */
+            int w = snprintf(users + pos, sizeof(users) - (size_t)pos,
+                             "\"%s\"", unames[i]);
+            if (w > 0 && (size_t)(pos + w) < sizeof(users))
+                pos += w;
+            else
+                break;  /* truncated — stop appending */
         }
         users[pos++] = ']';
         users[pos]   = '\0';
@@ -198,10 +203,17 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
             } else if (!memchr(conn->req, '\n', conn->req_len)) {
                 continue;  /* newline-terminated form: wait for more */
             }
-        } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-            /* EOF or error */
+        } else if (n == 0) {
+            break;  /* EOF — process whatever we have */
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;  /* wait for more data */
         } else {
-            return;  /* EAGAIN — wait for more data */
+            /* read error — close connection */
+            event_del(conn->ev);
+            event_free(conn->ev);
+            close(fd);
+            free(conn);
+            return;
         }
         break;
     }
