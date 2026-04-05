@@ -33,13 +33,15 @@ Without any `--path` flags or `Path` entries, mqvpn uses the default interface (
 
 The scheduler decides how to distribute packets across paths. mqvpn supports two schedulers:
 
-### WLB (Weighted Loss-Based) — Default
+### WLB (Weighted Load Balancing) — Default
 
-WLB dynamically adjusts traffic distribution based on each path's measured loss rate and capacity. It aims to maximize aggregate throughput.
+WLB combines path weighting and flow-aware scheduling for QUIC datagrams:
 
-- Adapts to changing network conditions in real-time
-- Handles asymmetric paths well (e.g., 300 Mbps wired + 80 Mbps wireless)
-- Outperforms MinRTT by ~21% in benchmarks
+- Estimates each path's throughput from live metrics (loss, RTT, cwnd) and uses the result as a traffic distribution ratio
+- Uses deficit-based WRR to distribute traffic across active paths
+- Pins inner TCP flows (by flow hash) to a path to reduce reordering in VPN tunnels
+- Uses soft pinning when the pinned path is temporarily cwnd-blocked (spillover without permanent re-pin)
+- Falls back to MinRTT for non-datagram/control packets and when no active schedulable path is available
 
 ```bash
 --scheduler wlb
@@ -67,21 +69,21 @@ MinRTT sends each packet on the path with the lowest current RTT. It is simpler 
 
 ## Dynamic Path Management
 
-Paths can be added or removed while the VPN is running. This is useful for mobile scenarios where network interfaces come and go (e.g., connecting to WiFi while on LTE).
+At the libmqvpn API level, paths can be added or removed while the VPN is running. This is useful for mobile scenarios where network interfaces come and go (e.g., connecting to WiFi while on LTE).
 
 At the library level, the platform uses `mqvpn_client_add_path_fd()` to add a new UDP socket as a path, and the path manager handles the lifecycle automatically. When a path is removed (interface goes down), traffic seamlessly shifts to the remaining paths.
 
-On the CLI, paths are specified at startup with `--path` flags. The client monitors the specified interfaces and automatically handles path availability changes.
+In the standard CLI, paths are specified at startup with `--path` flags (runtime interface monitoring for automatic add/remove is not implemented yet). With multiple paths registered at startup, failover still shifts traffic to remaining paths when one path fails.
 
 ## Path Weighting
 
-The WLB scheduler automatically weights paths based on measured loss rate and available capacity. You do not need to configure weights manually — the scheduler adapts in real-time.
+WLB automatically updates path weights from live transport metrics. You do not need to configure weights manually.
 
 How it works:
-- Each path's **loss rate** is continuously measured from QUIC ACK feedback
-- Paths with lower loss receive proportionally more traffic
-- **Capacity estimation** uses the QUIC congestion window to gauge each path's throughput potential
-- The scheduler rebalances every few RTTs, adapting to changing conditions
+- **Loss, RTT, and cwnd** are used to estimate each path's throughput, which becomes its traffic distribution weight
+- Deficit WRR uses those weights to assign packets/flows across available paths
+- Existing TCP flow pins are reused, and stale pins are evicted on idle/loss/path failure
+- Weights and deficits are refreshed at round boundaries and on path recovery events
 
 This means asymmetric paths (e.g., 300 Mbps wired + 80 Mbps wireless) are utilized efficiently without any manual tuning.
 

@@ -4,7 +4,7 @@
 
 ### 必要なもの
 
-- CMake 3.22+
+- CMake 3.10+
 - GCC または Clang（C11）
 - libevent 2.x
 
@@ -51,10 +51,10 @@ make -j$(nproc)
 ### テスト
 
 ```bash
-cd build && ctest --output-on-failure       # C ライブラリユニットテスト
-sudo scripts/ci_e2e/run_test.sh             # E2E（netns、root 権限必要）
-sudo scripts/run_multipath_test.sh          # マルチパスフェイルオーバー
-cd android && ./gradlew test                # Android SDK ユニットテスト
+ctest --test-dir build --output-on-failure  # C ライブラリユニットテスト
+sudo ./scripts/ci_e2e/run_test.sh           # E2E（netns、root 権限必要）
+sudo ./scripts/run_multipath_test.sh        # マルチパスフェイルオーバー
+(cd android && ./gradlew test)              # Android SDK ユニットテスト
 ```
 
 ## Windows (MSVC x64)
@@ -77,7 +77,16 @@ Windows ではクライアントのみサポートされています。サーバ
 
 ### Wintun
 
-TUN デバイスは [Wintun](https://www.wintun.net/) によって提供されます。`wintun.dll` は実行時にロードされるため、ビルド時には不要です。mqvpn を実行する前に、`wintun.dll` を実行ファイルと同じディレクトリか PATH に配置してください。
+TUN デバイスは [Wintun](https://www.wintun.net/) によって提供されます。`wintun.dll` は Windows 実行時の**必須依存**です。
+
+mqvpn 実行前に、`wintun.dll` を必ず配置してください：
+
+1. Wintun 公式サイトから配布パッケージをダウンロードする
+2. 展開し、x64 用の `wintun.dll` を mqvpn 実行ファイルのあるディレクトリ（例: `build\Release\`）に配置する  
+   または `PATH` に含まれるディレクトリへ配置する
+3. `build\Release\wintun.dll` の存在、または `where wintun.dll` で参照できることを確認する
+
+`wintun.dll` は実行時に動的ロードされるため、ビルド自体は通りますが、DLL がない状態では mqvpn クライアントは起動できません。
 
 ### ビルド手順
 
@@ -139,9 +148,37 @@ cmake --build . --config Release
 
 ## Android
 
+### 前提条件
+
+- [Android SDK](https://developer.android.com/studio)（SDK コマンドラインツール、および Gradle が利用する platform/build-tools を含む）
+- [Android NDK](https://developer.android.com/ndk/downloads)（NDK r27d 以降推奨）
+- JDK 17
+- CMake と Ninja（または GNU Make）
+- サブモジュール込みのチェックアウト（`--recurse-submodules`）
+- `third_party/xquic/third_party/boringssl` に BoringSSL ソースがあること
+
+### ビルド
+
 ```bash
-scripts/build_android.sh --abi arm64-v8a    # C ライブラリのクロスコンパイル
-cd android && ./gradlew assembleDebug       # SDK + デモアプリのビルド
+# 事前にシェルのプロファイル（例: ~/.bashrc）で設定
+export ANDROID_HOME=/path/to/android-sdk
+export ANDROID_NDK_HOME=/path/to/android-ndk
+export ANDROID_NDK="$ANDROID_NDK_HOME"
+
+# サブモジュールを取得
+git submodule update --init --recursive
+
+# BoringSSL ソースの準備
+git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
+
+# ネイティブライブラリをクロスコンパイル（arm64-v8a）
+scripts/build_android.sh --abi arm64-v8a
+
+# SDK モジュール + デモアプリをビルド
+(cd android && ./gradlew assembleDebug --no-daemon --stacktrace)
+
+# Android ユニットテスト
+(cd android && ./gradlew test --no-daemon --stacktrace)
 ```
 
 ### モジュール構成

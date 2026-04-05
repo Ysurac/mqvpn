@@ -18,7 +18,7 @@ features:
     details: Keep connections alive across path changes while combining multiple paths for better performance and stability.
   - icon: 🖥️
     title: Multi-Platform
-    details: Available across Linux, Windows, and Android/Kotlin integrations.
+    details: Available across Linux, Windows, and Android.
   - icon: 🏗️
     title: Built on QUIC + MASQUE
     details: A modern VPN architecture built on open Internet standards.

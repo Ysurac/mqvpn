@@ -5,7 +5,7 @@ mqvpn is a multipath QUIC VPN that uses MASQUE CONNECT-IP (RFC 9484) for standar
 ## Prerequisites
 
 - Linux (kernel 3.x+ with TUN support)
-- CMake 3.22+
+- CMake 3.10+
 - GCC or Clang (C11)
 - libevent 2.x
 
@@ -83,20 +83,30 @@ Or let `start_server.sh` generate one automatically.
 ## CLI Reference
 
 ```
-mqvpn [--config PATH] --mode client|server [options]
+mqvpn --config PATH
+mqvpn --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
+  --tun-name NAME        TUN device name (default: mqvpn0)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
+  --cert PATH            TLS certificate (server)
+  --key PATH             TLS private key (server)
   --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --max-clients N        Max concurrent clients (server, default: 64)
+  --log-level LVL        Log level (debug|info|warn|error)
+  --no-reconnect         Disable automatic reconnection (client)
+  --kill-switch          Block traffic outside the VPN tunnel (client)
   --genkey               Generate PSK and exit
   --help                 Show all options
 ```
+
+When `--config` is provided, `--mode` is inferred from the config file. CLI arguments override config values.
 
 ## Next Steps
 

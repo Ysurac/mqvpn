@@ -4,7 +4,7 @@
 
 ### Requirements
 
-- CMake 3.22+
+- CMake 3.10+
 - GCC or Clang (C11)
 - libevent 2.x
 
@@ -51,10 +51,10 @@ make -j$(nproc)
 ### Testing
 
 ```bash
-cd build && ctest --output-on-failure       # C library unit tests
-sudo scripts/ci_e2e/run_test.sh             # E2E (netns, requires root)
-sudo scripts/run_multipath_test.sh          # multipath failover
-cd android && ./gradlew test                # Android SDK unit tests
+ctest --test-dir build --output-on-failure  # C library unit tests
+sudo ./scripts/ci_e2e/run_test.sh           # E2E (netns, requires root)
+sudo ./scripts/run_multipath_test.sh        # multipath failover
+(cd android && ./gradlew test)              # Android SDK unit tests
 ```
 
 ## Windows (MSVC x64)
@@ -77,7 +77,15 @@ Only the client is supported on Windows. The server is Linux-only.
 
 ### Wintun
 
-The TUN device is provided by [Wintun](https://www.wintun.net/). The `wintun.dll` is loaded at runtime, so it is not required at build time. Place `wintun.dll` next to the executable or in your PATH before running mqvpn.
+The TUN device is provided by [Wintun](https://www.wintun.net/). `wintun.dll` is a **required runtime dependency** on Windows.
+
+You must install/provide `wintun.dll` before running mqvpn:
+
+1. Download the official Wintun release package from the Wintun website.
+2. Extract it and copy the x64 `wintun.dll` to the mqvpn executable directory (for example, `build\Release\`), or place it in a directory included in `PATH`.
+3. Verify it is discoverable (`build\Release\wintun.dll` exists, or `where wintun.dll` resolves it).
+
+`wintun.dll` is loaded dynamically at runtime, so build succeeds without it, but mqvpn client startup fails if it is missing.
 
 ### Build Steps
 
@@ -139,9 +147,37 @@ The binary is at `build\Release\mqvpn.exe`.
 
 ## Android
 
+### Prerequisites
+
+- [Android SDK](https://developer.android.com/studio) (including SDK command-line tools and the platform/build-tools required by Gradle)
+- [Android NDK](https://developer.android.com/ndk/downloads) (NDK r27d or newer recommended)
+- JDK 17
+- CMake and Ninja (or GNU Make)
+- Git checkout with submodules (`--recurse-submodules`)
+- BoringSSL source at `third_party/xquic/third_party/boringssl`
+
+### Build
+
 ```bash
-scripts/build_android.sh --abi arm64-v8a    # cross-compile C libs
-cd android && ./gradlew assembleDebug       # build SDK + demo app
+# Set these in your shell profile (for example, ~/.bashrc)
+export ANDROID_HOME=/path/to/android-sdk
+export ANDROID_NDK_HOME=/path/to/android-ndk
+export ANDROID_NDK="$ANDROID_NDK_HOME"
+
+# Ensure submodules are present
+git submodule update --init --recursive
+
+# Prepare BoringSSL source
+git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
+
+# Cross-compile native libraries (arm64-v8a)
+scripts/build_android.sh --abi arm64-v8a
+
+# Build Android SDK modules + demo app
+(cd android && ./gradlew assembleDebug --no-daemon --stacktrace)
+
+# Run Android unit tests
+(cd android && ./gradlew test --no-daemon --stacktrace)
 ```
 
 ### Module Structure

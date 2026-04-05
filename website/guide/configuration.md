@@ -94,6 +94,12 @@ See [Multipath](./multipath) for scheduler details.
 
 ## systemd
 
+When using the systemd units, install the binary and unit files first (one-time setup):
+
+```bash
+sudo cmake --install build --prefix /usr/local
+```
+
 ### Server
 
 ```bash

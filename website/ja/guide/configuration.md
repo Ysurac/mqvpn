@@ -94,6 +94,12 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 
 ## systemd
 
+systemd ユニットを使う場合、先にバイナリとユニットをインストールします（初回のみ）：
+
+```bash
+sudo cmake --install build --prefix /usr/local
+```
+
 ### サーバー
 
 ```bash
@@ -104,7 +110,7 @@ sudo systemctl enable --now mqvpn-server
 
 ### クライアント（テンプレートユニット）
 
-クライアントはテンプレートユニットを使用します。インスタンス名が設定ファイルに対応します：
+クライアントはテンプレートユニットを使用します。インスタンス名が設定ファイル名に対応します：
 
 ```bash
 sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf

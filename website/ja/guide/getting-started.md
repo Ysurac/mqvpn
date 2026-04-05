@@ -1,11 +1,11 @@
 # はじめに
 
-mqvpn は MASQUE CONNECT-IP (RFC 9484) を使用した標準準拠の IP トンネリングを Multipath QUIC 上で実現するマルチパス QUIC VPN です。
+mqvpn は MASQUE CONNECT-IP (RFC 9484) を使用し、Multipath QUIC 上で標準準拠の IP トンネリングを実現するマルチパス QUIC VPN です。
 
 ## 前提条件
 
 - Linux（カーネル 3.x 以降、TUN サポートあり）
-- CMake 3.22+
+- CMake 3.10+
 - GCC または Clang（C11）
 - libevent 2.x
 
@@ -30,7 +30,7 @@ sudo scripts/start_server.sh
 `start_server.sh` は自己署名証明書を生成し、NAT/フォワーディングを設定してサーバーを起動します。
 
 ::: warning
-サーバーはリッスンポートを UDP で開放する必要があります（デフォルト: 443、`--listen` で変更可能）。クライアントのすべてのトラフィックはトンネル経由でルーティングされます（TUN デバイスによるデフォルトルート）。
+サーバーは UDP で待受ポートを開放する必要があります（デフォルト: 443、`--listen` で変更可能）。クライアントのすべてのトラフィックはトンネル経由でルーティングされます（TUN デバイスによるデフォルトルート）。
 :::
 
 デュアルスタック（IPv4 + IPv6）の場合：
@@ -83,20 +83,30 @@ mqvpn --genkey
 ## CLI リファレンス
 
 ```
-mqvpn [--config PATH] --mode client|server [options]
+mqvpn --config PATH
+mqvpn --mode client|server [options]
 
   --server IP:PORT       サーバーアドレス（クライアント）
   --path IFACE           マルチパスインターフェース（複数指定可）
   --auth-key KEY         PSK 認証
   --dns ADDR             DNS サーバー（複数指定可）
   --insecure             信頼されていない証明書を受け入れる（テスト用）
+  --tun-name NAME        TUN デバイス名（デフォルト: mqvpn0）
   --listen BIND:PORT     リッスンアドレス（サーバー、デフォルト: 0.0.0.0:443）
   --subnet CIDR          クライアント IPv4 プール（サーバー）
   --subnet6 CIDR         クライアント IPv6 プール（サーバー）
+  --cert PATH            TLS 証明書（サーバー）
+  --key PATH             TLS 秘密鍵（サーバー）
   --scheduler minrtt|wlb マルチパススケジューラ（デフォルト: wlb）
+  --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
+  --log-level LVL        ログレベル（debug|info|warn|error）
+  --no-reconnect         自動再接続を無効化（クライアント）
+  --kill-switch          VPN 外への通信を遮断（クライアント）
   --genkey               PSK を生成して終了
   --help                 すべてのオプションを表示
 ```
+
+`--config` を指定した場合、`--mode` は設定ファイル内容から自動判定されます。CLI 引数は設定ファイルの値を上書きします。
 
 ## 次のステップ
 
