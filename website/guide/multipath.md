@@ -108,6 +108,10 @@ This means asymmetric paths (e.g., 300 Mbps wired + 80 Mbps wireless) are utiliz
 
 Each path is a separate UDP socket bound to a specific network interface. Multipath QUIC manages the paths at the QUIC layer — the server sees a single QUIC connection with multiple paths.
 
+## Benchmarks
+
+For failover and bandwidth aggregation measurements in a simulated dual-path environment (300 Mbps + 80 Mbps with netem), see the [benchmark report](https://github.com/mp0rta/mqvpn/blob/main/docs/benchmarks_netns.md).
+
 ## Protocol Standards
 
 | Protocol | Spec |
