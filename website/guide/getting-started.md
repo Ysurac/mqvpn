@@ -7,7 +7,7 @@ mqvpn is a multipath QUIC VPN that uses MASQUE CONNECT-IP (RFC 9484) for standar
 - Linux (kernel 3.x+ with TUN support)
 - Git
 - CMake 3.10+
-- Make (or Ninja)
+- GNU Make
 - GCC or Clang (C11)
 - libevent 2.x
 - Network access for the first build (BoringSSL is cloned from GitHub)
