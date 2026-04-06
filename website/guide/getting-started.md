@@ -5,9 +5,12 @@ mqvpn is a multipath QUIC VPN that uses MASQUE CONNECT-IP (RFC 9484) for standar
 ## Prerequisites
 
 - Linux (kernel 3.x+ with TUN support)
+- Git
 - CMake 3.10+
+- Make (or Ninja)
 - GCC or Clang (C11)
 - libevent 2.x
+- Network access for the first build (BoringSSL is cloned from GitHub)
 
 ## Quick Start
 
@@ -86,7 +89,7 @@ Or let `start_server.sh` generate one automatically.
 mqvpn --config PATH
 mqvpn --mode client|server [options]
 
-  --server IP:PORT       Server address (client)
+  --server HOST:PORT     Server address (client, e.g. `[2001:db8::1]:443` for IPv6)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Per-user PSK (repeatable, server)

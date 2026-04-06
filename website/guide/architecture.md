@@ -30,7 +30,7 @@ The library does not embed a platform event loop or device management. It is dri
 
 ### Why Sans-I/O?
 
-- **Portability** — Each platform provides its own event loop (libevent, Android Handler, GCD, IOCP). The library doesn't force a threading model.
+- **Portability** — Each platform provides its own event loop (libevent on Linux, IOCP on Windows, Android Handler on mobile -- or GCD, kqueue, etc. for future ports). The library doesn't force a threading model.
 - **Testability** — The `tick()` function drives state transitions synchronously, making unit tests deterministic with no timing issues.
 - **Power efficiency** — The platform controls when to wake the CPU. The library reports idle state via `interest.is_idle`.
 - **Dependency separation** — The library itself does not own an event loop implementation; the platform layer owns libevent and OS-specific dependencies (including pthreads on Linux).
@@ -98,7 +98,7 @@ All callbacks fire on the same thread that called `tick()` — no synchronizatio
 | Client engine | `mqvpn_client.c` | QUIC connection, MASQUE CONNECT-IP, state machine |
 | Server engine | `mqvpn_server.c` | Multi-client handling, address assignment |
 | Config builder | `mqvpn_config.c` | Opaque config with setter functions, ABI-safe |
-| Path manager | `path_mgr.c` | UDP path lifecycle, add/remove/probe |
+| Path manager | `path_mgr.c` | UDP path lifecycle, creation and teardown |
 | Flow scheduler | `flow_sched.c` | WLB and MinRTT packet scheduling |
 | Address pool | `addr_pool.c` | Server-side IP address allocation |
 | Auth | `auth.c` | PSK authentication over TLS 1.3 |

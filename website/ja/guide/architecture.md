@@ -30,7 +30,7 @@ mqvpn は **[sans-I/O](https://sans-io.readthedocs.io/) C ライブラリ**（`l
 
 ### なぜ Sans-I/O か？
 
-- **移植性** — 各プラットフォームが独自のイベントループ（libevent、Android Handler、GCD、IOCP）を提供します。ライブラリはスレッドモデルを強制しません。
+- **移植性** — 各プラットフォームが独自のイベントループ（Linux では libevent、Windows では IOCP、Android では Handler — 将来的には GCD や kqueue なども）を提供します。ライブラリはスレッドモデルを強制しません。
 - **テスト容易性** — `tick()` 関数が状態遷移を同期的に駆動するため、ユニットテストがタイミング問題なく決定的に実行できます。
 - **省電力** — プラットフォームが CPU のウェイクアップタイミングを制御します。ライブラリは `interest.is_idle` でアイドル状態を報告します。
 - **依存の分離** — ライブラリ自体はイベントループ実装を持たず、プラットフォーム層が libevent や OS 依存ライブラリ（Linux では pthread など）を扱います。
@@ -98,7 +98,7 @@ while (running) {
 | クライアントエンジン | `mqvpn_client.c` | QUIC 接続、MASQUE CONNECT-IP、ステートマシン |
 | サーバーエンジン | `mqvpn_server.c` | マルチクライアント処理、アドレス割り当て |
 | Config ビルダー | `mqvpn_config.c` | Opaque な設定構造、setter 関数、ABI 互換性 |
-| パスマネージャ | `path_mgr.c` | UDP パスのライフサイクル管理、追加/削除/プローブ |
+| パスマネージャ | `path_mgr.c` | UDP パスのライフサイクル管理、作成と破棄 |
 | フロースケジューラ | `flow_sched.c` | WLB および MinRTT パケットスケジューリング |
 | アドレスプール | `addr_pool.c` | サーバー側 IP アドレス割り当て |
 | 認証 | `auth.c` | TLS 1.3 上の PSK 認証 |

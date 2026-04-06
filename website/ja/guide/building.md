@@ -4,9 +4,15 @@
 
 ### 必要なもの
 
+- Git
 - CMake 3.10+
+- Make（GNU Make）
 - GCC または Clang（C11）
 - libevent 2.x
+
+::: info
+初回ビルド時に BoringSSL のソースを GitHub からクローンするため、インターネット接続が必要です。
+:::
 
 ### クイックビルド
 

@@ -15,7 +15,7 @@ hero:
 features:
   - icon: 🔄
     title: Resilient Multipath Connectivity
-    details: Keep connections alive across path changes while combining multiple paths for better performance and stability.
+    details: Minimize disruption during path changes while combining multiple paths for better performance and stability.
   - icon: 🖥️
     title: Multi-Platform
     details: Available on Linux (client and server), with Windows (client) and Android/Kotlin support.

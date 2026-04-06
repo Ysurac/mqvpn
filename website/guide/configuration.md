@@ -1,6 +1,6 @@
 # Configuration
 
-mqvpn supports both INI and JSON config files. The format is detected automatically from the file extension (`.conf` for INI, `.json` for JSON). CLI arguments override config values.
+mqvpn supports both INI and JSON config files. If the file content starts with `{`, it is parsed as JSON; otherwise as INI. CLI arguments override config values.
 
 ## INI Format
 
@@ -98,6 +98,8 @@ The server can authenticate multiple users, each with their own PSK. In JSON con
 
 When both `auth_key` (global key) and `users` are set, clients can authenticate with either. To restrict access to named users only, remove `auth_key` from the config.
 
+Removing a user (via config change or the Control API) only prevents new connections. Existing sessions remain active until they disconnect or the server restarts.
+
 ## Running with Config Files
 
 ```bash
@@ -111,14 +113,14 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Address` | Server address (`IP:PORT`) | Required |
+| `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `Insecure` | Skip TLS certificate verification | `false` |
 
 ### `[Interface]`
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Listen` | Listen address (server only) | `0.0.0.0:443` |
+| `Listen` | Listen address (`HOST:PORT`, server only) | `0.0.0.0:443` |
 | `Subnet` | Client IPv4 pool (server only) | `10.0.0.0/24` |
 | `Subnet6` | Client IPv6 pool (server only) | — |
 | `TunName` | TUN device name | `mqvpn0` |
@@ -139,7 +141,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Key` | Pre-shared key (base64, generate with `mqvpn --genkey`) | Required |
+| `Key` | Pre-shared key (base64, generate with `mqvpn --genkey`) | Required unless `User` is set |
 | `User` | Per-user PSK in `NAME:KEY` format (repeatable) | — |
 | `MaxClients` | Maximum concurrent clients (server only) | `64` |
 
@@ -203,8 +205,8 @@ sudo cmake --install build --prefix /usr/local
 ### Server
 
 ```bash
-sudo cp systemd/server.json.example /etc/mqvpn/server.json
-# Edit /etc/mqvpn/server.json with your settings
+sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
+# Edit /etc/mqvpn/server.conf with your settings
 sudo systemctl enable --now mqvpn-server
 ```
 
@@ -213,7 +215,11 @@ sudo systemctl enable --now mqvpn-server
 The client uses a template unit — the instance name maps to the config file:
 
 ```bash
-sudo cp systemd/client.json.example /etc/mqvpn/client-home.json
+sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
 sudo systemctl enable --now mqvpn-client@home
-# This reads /etc/mqvpn/client-home.json
+# This reads /etc/mqvpn/client-home.conf
 ```
+
+::: tip
+The default unit files expect INI `.conf` files. If you prefer JSON, update the `ExecStart` line in the unit file to point to your `.json` config path.
+:::

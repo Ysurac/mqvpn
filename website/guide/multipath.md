@@ -2,8 +2,8 @@
 
 mqvpn uses [Multipath QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) to send traffic over multiple network paths simultaneously. This enables:
 
-- **Seamless failover** — If one path goes down, traffic continues on the remaining paths with zero downtime.
-- **Bandwidth aggregation** — Combine bandwidth from multiple interfaces (e.g., WiFi + LTE).
+- **Seamless failover** — If one path goes down, traffic continues on the remaining paths to minimize disruption during path changes.
+- **Bandwidth aggregation** — Combine bandwidth from multiple interfaces (e.g., WiFi + LTE). Aggregation works best with multiple concurrent flows; single TCP flows may see limited benefit due to flow pinning (see [WLB](#wlb-weighted-load-balancing-default)).
 
 ## Setting Up Multipath
 

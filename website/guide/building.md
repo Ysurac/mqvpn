@@ -4,9 +4,12 @@
 
 ### Requirements
 
+- Git
 - CMake 3.10+
+- Make (or Ninja)
 - GCC or Clang (C11)
 - libevent 2.x
+- Network access for the first build (BoringSSL is cloned from GitHub)
 
 ### Quick Build
 

@@ -1,6 +1,6 @@
 # 設定
 
-mqvpn は INI と JSON の両方の設定ファイルに対応しています。ファイルの拡張子（`.conf` で INI、`.json` で JSON）から形式を自動判別します。CLI 引数は設定ファイルの値を上書きします。
+mqvpn は INI と JSON の両方の設定ファイルに対応しています。ファイルの内容が `{` で始まる場合は JSON、それ以外は INI として解析されます。CLI 引数は設定ファイルの値を上書きします。
 
 ## INI 形式
 
@@ -98,6 +98,10 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 
 `auth_key`（グローバルキー）と `users` を両方設定した場合、クライアントはどちらでも認証可能です。名前付きユーザーのみに制限するには、`auth_key` を設定から削除してください。
 
+::: info
+ユーザーを削除しても既存のセッションは切断されません。削除は新規接続にのみ反映され、既存セッションは切断またはサーバー再起動まで維持されます。
+:::
+
 ## 設定ファイルでの実行
 
 ```bash
@@ -111,7 +115,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Address` | サーバーアドレス（`IP:PORT`） | 必須 |
+| `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `Insecure` | TLS 証明書検証をスキップ | `false` |
 
 ### `[Interface]`
@@ -139,7 +143,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Key` | 事前共有鍵（base64、`mqvpn --genkey` で生成） | 必須 |
+| `Key` | 事前共有鍵（base64、`mqvpn --genkey` で生成） | `User` 未設定時は必須 |
 | `User` | ユーザー個別の PSK（`NAME:KEY` 形式、複数指定可） | — |
 | `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
 
@@ -178,6 +182,10 @@ echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 909
 echo '{"cmd":"remove_user","name":"carol"}' | nc 127.0.0.1 9090
 ```
 
+::: warning
+ユーザーを削除しても既存のセッションは切断されません。削除は新規接続にのみ反映され、既存セッションは切断またはサーバー再起動まで維持されます。
+:::
+
 ユーザー一覧の取得：
 
 ```bash
@@ -203,8 +211,8 @@ sudo cmake --install build --prefix /usr/local
 ### サーバー
 
 ```bash
-sudo cp systemd/server.json.example /etc/mqvpn/server.json
-# /etc/mqvpn/server.json を編集
+sudo cp systemd/server.conf.example /etc/mqvpn/server.conf
+# /etc/mqvpn/server.conf を編集
 sudo systemctl enable --now mqvpn-server
 ```
 
@@ -213,7 +221,11 @@ sudo systemctl enable --now mqvpn-server
 クライアントはテンプレートユニットを使用します。インスタンス名が設定ファイル名に対応します：
 
 ```bash
-sudo cp systemd/client.json.example /etc/mqvpn/client-home.json
+sudo cp systemd/client.conf.example /etc/mqvpn/client-home.conf
 sudo systemctl enable --now mqvpn-client@home
-# /etc/mqvpn/client-home.json を読み込みます
+# /etc/mqvpn/client-home.conf を読み込みます
 ```
+
+::: tip
+デフォルトのユニットファイルは `.conf`（INI 形式）を読み込みます。JSON 形式を使用する場合は、ユニットファイルの `ExecStart` を編集して設定ファイルのパスを `.json` に変更してください。
+:::
