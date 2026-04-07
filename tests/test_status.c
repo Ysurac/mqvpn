@@ -149,32 +149,32 @@ TEST(format_size_mega)
 TEST(jfind_simple)
 {
     const char *json = "{\"name\":\"alice\",\"age\":30}";
-    const char *v = jfind(json, "name");
+    const char *v = json_find_key(json, "name");
     assert(v != NULL);
     char out[32];
-    ASSERT_EQ(jstr(v, out, sizeof(out)), 0);
+    ASSERT_EQ(json_read_string(v, out, sizeof(out)), 0);
     ASSERT_STR_EQ(out, "alice");
 }
 
 TEST(jfind_int)
 {
     const char *json = "{\"count\":42}";
-    ASSERT_EQ(jint(jfind(json, "count")), 42);
+    ASSERT_EQ(json_read_int64(json_find_key(json, "count")), 42);
 }
 
 TEST(jfind_missing)
 {
     const char *json = "{\"name\":\"alice\"}";
-    assert(jfind(json, "missing") == NULL);
+    assert(json_find_key(json, "missing") == NULL);
 }
 
 TEST(jfind_nested_value)
 {
-    /* jfind does flat search, so it finds "key" inside nested obj too */
+    /* json_find_key does flat search, so it finds "key" inside nested obj too */
     const char *json = "{\"user\":{\"key\":\"val\"},\"key\":\"top\"}";
-    const char *v = jfind(json, "key");
+    const char *v = json_find_key(json, "key");
     char out[32];
-    ASSERT_EQ(jstr(v, out, sizeof(out)), 0);
+    ASSERT_EQ(json_read_string(v, out, sizeof(out)), 0);
     /* Flat search finds first occurrence */
     ASSERT_STR_EQ(out, "val");
 }
@@ -182,12 +182,12 @@ TEST(jfind_nested_value)
 TEST(jstr_null)
 {
     char out[32];
-    ASSERT_EQ(jstr(NULL, out, sizeof(out)), -1);
+    ASSERT_EQ(json_read_string(NULL, out, sizeof(out)), -1);
 }
 
 TEST(jint_null)
 {
-    ASSERT_EQ(jint(NULL), 0);
+    ASSERT_EQ(json_read_int64(NULL), 0);
 }
 
 /* ── skip_json_value tests ── */
