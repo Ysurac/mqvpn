@@ -2,6 +2,7 @@
  * status.c — mqvpn --status: query control API and display server status
  */
 #include "status.h"
+#include "json_mini.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,60 +19,8 @@
 
 #define STATUS_BUF_SIZE 32768
 
-/* ── Minimal JSON helpers ── */
-
-static const char *
-skip_ws(const char *p)
-{
-    while (*p && isspace((unsigned char)*p)) p++;
-    return p;
-}
-
-static const char *
-jfind(const char *json, const char *key)
-{
-    size_t klen = strlen(key);
-    const char *p = json;
-    while ((p = strchr(p, '"')) != NULL) {
-        const char *k = p + 1, *e = k;
-        while (*e && *e != '"') { if (*e == '\\' && e[1]) e++; e++; }
-        if (*e != '"') return NULL;
-        if ((size_t)(e - k) == klen && strncmp(k, key, klen) == 0) {
-            const char *c = e + 1;
-            while (*c && isspace((unsigned char)*c)) c++;
-            if (*c == ':') {
-                c++;
-                while (*c && isspace((unsigned char)*c)) c++;
-                return c;
-            }
-        }
-        p = e + 1;
-    }
-    return NULL;
-}
-
-static int
-jstr(const char *p, char *out, size_t out_len)
-{
-    if (!p || *p != '"' || !out || out_len == 0) return -1;
-    p++;
-    size_t j = 0;
-    while (*p && *p != '"') {
-        if (*p == '\\' && p[1]) p++;
-        if (j + 1 < out_len) out[j++] = *p;
-        p++;
-    }
-    if (*p != '"') return -1;
-    out[j] = '\0';
-    return 0;
-}
-
-static int64_t
-jint(const char *p)
-{
-    if (!p) return 0;
-    return strtoll(p, NULL, 10);
-}
+/* JSON helpers (json_find_key, json_read_string, json_read_int64,
+ * json_skip_ws) are provided by json_mini.h */
 
 /* ── Human-readable formatting ── */
 
@@ -120,7 +69,7 @@ format_size(uint64_t bytes, char *buf, size_t len)
 static const char *
 skip_json_value(const char *p)
 {
-    p = skip_ws(p);
+    p = json_skip_ws(p);
     if (*p == '"') {
         p++;
         while (*p && *p != '"') { if (*p == '\\' && p[1]) p++; p++; }
@@ -158,14 +107,14 @@ print_client(const char *obj)
     char user[64] = {0}, endpoint[64] = {0};
     const char *v;
 
-    v = jfind(obj, "user");
-    if (v) jstr(v, user, sizeof(user));
-    v = jfind(obj, "endpoint");
-    if (v) jstr(v, endpoint, sizeof(endpoint));
+    v = json_find_key(obj, "user");
+    if (v) json_read_string(v, user, sizeof(user));
+    v = json_find_key(obj, "endpoint");
+    if (v) json_read_string(v, endpoint, sizeof(endpoint));
 
-    uint64_t conn_sec = (uint64_t)jint(jfind(obj, "connected_sec"));
-    uint64_t bytes_tx = (uint64_t)jint(jfind(obj, "bytes_tx"));
-    uint64_t bytes_rx = (uint64_t)jint(jfind(obj, "bytes_rx"));
+    uint64_t conn_sec = (uint64_t)json_read_int64(json_find_key(obj, "connected_sec"));
+    uint64_t bytes_tx = (uint64_t)json_read_int64(json_find_key(obj, "bytes_tx"));
+    uint64_t bytes_rx = (uint64_t)json_read_int64(json_find_key(obj, "bytes_rx"));
 
     char dur[32], tx[32], rx[32];
     format_duration(conn_sec, dur, sizeof(dur));
@@ -178,9 +127,9 @@ print_client(const char *obj)
     printf("  transfer: %s received, %s sent\n", rx, tx);
 
     /* Print paths */
-    v = jfind(obj, "paths");
+    v = json_find_key(obj, "paths");
     if (!v || *v != '[') return;
-    const char *p = skip_ws(v + 1);
+    const char *p = json_skip_ws(v + 1);
     int idx = 0;
 
     while (*p && *p != ']') {
@@ -194,10 +143,10 @@ print_client(const char *obj)
             memcpy(path_obj, p, plen);
             path_obj[plen] = '\0';
 
-            int64_t srtt = jint(jfind(path_obj, "srtt_ms"));
-            int64_t min_rtt = jint(jfind(path_obj, "min_rtt_ms"));
-            uint64_t cwnd = (uint64_t)jint(jfind(path_obj, "cwnd"));
-            int state = (int)jint(jfind(path_obj, "state"));
+            int64_t srtt = json_read_int64(json_find_key(path_obj, "srtt_ms"));
+            int64_t min_rtt = json_read_int64(json_find_key(path_obj, "min_rtt_ms"));
+            uint64_t cwnd = (uint64_t)json_read_int64(json_find_key(path_obj, "cwnd"));
+            int state = (int)json_read_int64(json_find_key(path_obj, "state"));
 
             char cwnd_str[16];
             format_size(cwnd, cwnd_str, sizeof(cwnd_str));
@@ -217,7 +166,7 @@ print_client(const char *obj)
             idx++;
         }
         if (*p == ',') p++;
-        p = skip_ws(p);
+        p = json_skip_ws(p);
     }
 }
 
@@ -303,21 +252,21 @@ run_status(const char *addr, int port)
     fd = -1;
 
     /* Parse and display */
-    const char *ok = jfind(buf, "ok");
+    const char *ok = json_find_key(buf, "ok");
     if (!ok || strncmp(ok, "true", 4) != 0) {
-        const char *err = jfind(buf, "error");
+        const char *err = json_find_key(buf, "error");
         char errmsg[128] = "unknown error";
-        if (err) jstr(err, errmsg, sizeof(errmsg));
+        if (err) json_read_string(err, errmsg, sizeof(errmsg));
         fprintf(stderr, "error: %s\n", errmsg);
         goto cleanup;
     }
 
-    int n_clients = (int)jint(jfind(buf, "n_clients"));
+    int n_clients = (int)json_read_int64(json_find_key(buf, "n_clients"));
     printf("mqvpn server  clients: %d\n", n_clients);
 
-    const char *clients = jfind(buf, "clients");
+    const char *clients = json_find_key(buf, "clients");
     if (clients && *clients == '[') {
-        const char *p = skip_ws(clients + 1);
+        const char *p = json_skip_ws(clients + 1);
         while (*p && *p != ']') {
             if (*p == '{') {
                 const char *end = skip_json_value(p);
@@ -334,7 +283,7 @@ run_status(const char *addr, int port)
                 p = end;
             }
             if (*p == ',') p++;
-            p = skip_ws(p);
+            p = json_skip_ws(p);
         }
     }
 

@@ -17,6 +17,7 @@
  */
 
 #include "control_socket.h"
+#include "json_mini.h"
 #include "log.h"
 
 #include <stdlib.h>
@@ -37,46 +38,8 @@
 #define CTRL_MAX_CONNS 8         /* max concurrent control connections */
 #define CTRL_READ_TIMEOUT_SEC 5  /* close idle connections after 5s */
 
-/* ── Minimal JSON helpers (same fixed escape logic as config.c) ─────────── */
-
-static const char *
-jfind(const char *json, const char *key)
-{
-    size_t klen = strlen(key);
-    const char *p = json;
-    while ((p = strchr(p, '"')) != NULL) {
-        const char *k = p + 1, *e = k;
-        while (*e && *e != '"') { if (*e == '\\' && e[1]) e++; e++; }
-        if (*e != '"') return NULL;
-        if ((size_t)(e - k) == klen && strncmp(k, key, klen) == 0) {
-            const char *c = e + 1;
-            while (*c && isspace((unsigned char)*c)) c++;
-            if (*c == ':') {
-                c++;
-                while (*c && isspace((unsigned char)*c)) c++;
-                return c;
-            }
-        }
-        p = e + 1;
-    }
-    return NULL;
-}
-
-static int
-jstr(const char *p, char *out, size_t out_len)
-{
-    if (!p || *p != '"' || !out || out_len == 0) return -1;
-    p++;
-    size_t j = 0;
-    while (*p && *p != '"') {
-        if (*p == '\\' && p[1]) p++;
-        if (j + 1 < out_len) out[j++] = *p;
-        p++;
-    }
-    if (*p != '"') return -1;
-    out[j] = '\0';
-    return 0;
-}
+/* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
+ * are provided by json_mini.h */
 
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
@@ -104,16 +67,16 @@ static int
 dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 {
     char cmd[32] = {0};
-    const char *v = jfind(req, "cmd");
-    if (!v || jstr(v, cmd, sizeof(cmd)) < 0)
+    const char *v = json_find_key(req, "cmd");
+    if (!v || json_read_string(v, cmd, sizeof(cmd)) < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
 
     if (strcmp(cmd, "add_user") == 0) {
         char name[64] = {0}, key[256] = {0};
-        const char *nv = jfind(req, "name");
-        const char *kv = jfind(req, "key");
-        if (!nv || jstr(nv, name, sizeof(name)) < 0 ||
-            !kv || jstr(kv, key,  sizeof(key))  < 0)
+        const char *nv = json_find_key(req, "name");
+        const char *kv = json_find_key(req, "key");
+        if (!nv || json_read_string(nv, name, sizeof(name)) < 0 ||
+            !kv || json_read_string(kv, key,  sizeof(key))  < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"name and key required\"}");
 
@@ -125,8 +88,8 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 
     } else if (strcmp(cmd, "remove_user") == 0) {
         char name[64] = {0};
-        const char *nv = jfind(req, "name");
-        if (!nv || jstr(nv, name, sizeof(name)) < 0)
+        const char *nv = json_find_key(req, "name");
+        if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"name required\"}");
 
