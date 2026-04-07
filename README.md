@@ -9,7 +9,7 @@ Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.o
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
 - **Android SDK** — Kotlin SDK via JNI. Apps implement `onCreateTun()` and `onVpnStateChanged()`.
 - **PSK auth** — Pre-shared key over TLS 1.3.
-- **DNS override** — Prevents DNS leak by routing queries through the tunnel.
+- **DNS override** — Prevents DNS leaks. Uses `resolvectl` on systemd-resolved systems, falls back to resolv.conf.
 
 ## Quick Start
 
@@ -329,7 +329,7 @@ Asymmetric dual-path (300M/10ms + 80M/30ms) via network namespaces. Full report:
 
 ## Building
 
-Requirements: Linux, CMake 3.22+, GCC/Clang (C11), libevent 2.x
+Requirements: Linux, CMake 3.10+, GCC/Clang (C11), libevent 2.x
 
 ```bash
 ./build.sh            # builds BoringSSL, xquic, and mqvpn
@@ -424,7 +424,8 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.2.0 — Reconnection, kill switch, IPv6, ICMP PTB, systemd service
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
 - [ ] Per-client token auth
-- [ ] resolvectl / netlink API
+- [x] resolvectl DNS support (with resolv.conf fallback)
+- [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
 - [ ] Interop testing (masque-go, QUICHE)
 
@@ -438,9 +439,17 @@ mqvpn [--config PATH] --mode client|server [options]
 | Multipath QUIC | [draft-ietf-quic-multipath](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/) |
 | HTTP/3 | [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114) |
 
+## Disclaimer
+
+mqvpn is licensed under the Apache License 2.0 and is provided **"AS IS"**, without warranties or conditions of any kind.
+
+Use of mqvpn is at your own risk. Users are solely responsible for validating its suitability, security, and operational safety, especially in production or commercial environments.
+
 ## License
 
 Apache-2.0
+
+Copyright (c) 2026 mp0rta
 
 ## Acknowledgments
 
