@@ -102,6 +102,15 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     gateway[0] = '\0';
     iface[0] = '\0';
 
+    /* Multipath routes output contains "nexthop" keywords which break the
+     * simple via/dev token parser.  Detect this and bail out so the caller
+     * can fall back to discover_route_from_show() which handles multipath. */
+    if (strstr(out, "nexthop")) {
+        LOG_DBG("ip route get %s: multipath route detected, deferring to show",
+                server_ip);
+        return -1;
+    }
+
     char *saveptr = NULL;
     for (char *tok = strtok_r(out, " \t\r\n", &saveptr); tok;
          tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
