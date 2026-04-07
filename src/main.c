@@ -48,8 +48,11 @@ usage(const char *prog)
         "  --no-reconnect            Disable automatic reconnection (client mode)\n"
         "  --kill-switch             Block traffic outside the VPN tunnel (client mode)\n"
         "  --route-via-server        Add a host route to the server IP before setting\n"
+        "  --routeviaserver         Alias for --route-via-server\n"
+        "  --routesviaserver        Alias for --route-via-server\n"
         "                            the default route through the tunnel (client mode)\n"
         "  --no-routes               Skip all automatic route setup; manage routes\n"
+        "  --noroutes               Alias for --no-routes\n"
         "                            manually (client mode)\n"
         "  --control-port PORT       TCP port for JSON control API (server mode)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
@@ -143,7 +146,10 @@ main(int argc, char *argv[])
         {"no-reconnect",        no_argument,      NULL, 'R'},
         {"kill-switch",         no_argument,      NULL, 'K'},
         {"route-via-server",    no_argument,      NULL, 'w'},
+        {"routeviaserver",      no_argument,      NULL, 'w'},
+        {"routesviaserver",     no_argument,      NULL, 'w'},
         {"no-routes",           no_argument,      NULL, 'W'},
+        {"noroutes",            no_argument,      NULL, 'W'},
         {"control-port",        required_argument, NULL, 'X'},
         {"control-addr",    required_argument, NULL, 'x'},
         {"help",            no_argument,       NULL, 'h'},

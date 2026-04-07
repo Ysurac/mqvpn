@@ -361,9 +361,11 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->insecure = iv;
     }
 
+    int multipath_explicitly_set = 0;
     v = json_find_key(json_text, "multipath");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
         cfg->multipath = iv;
+        multipath_explicitly_set = 1;
     }
 
     v = json_find_key(json_text, "reconnect_enable");
@@ -381,14 +383,16 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->killswitch_hint = iv;
     }
 
-    /* "paths" sets the multipath flag; individual interface names are not stored
-     * in the opaque config — callers must configure interface binding separately
-     * via the platform layer. */
+    /* "paths" auto-enables multipath only if it wasn't explicitly set.
+     * Individual interface names are not stored in the opaque config —
+     * callers must configure interface binding separately via the platform layer. */
     char arr_paths[MQVPN_MAX_PATHS][32];
     int n_paths = 0;
     v = json_find_key(json_text, "paths");
     if (v && json_read_string_array(v, arr_paths, MQVPN_MAX_PATHS, &n_paths) == MQVPN_OK) {
-        cfg->multipath = n_paths > 1 ? 1 : cfg->multipath;
+        if (!multipath_explicitly_set && n_paths > 1) {
+            cfg->multipath = 1;
+        }
     }
 
     v = json_find_key(json_text, "users");
