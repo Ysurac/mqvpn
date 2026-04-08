@@ -4,6 +4,10 @@
  * Part of libmqvpn. No platform I/O — all I/O via callbacks.
  */
 
+#ifndef _WIN32
+#  define _POSIX_C_SOURCE 200112L
+#endif
+
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 
@@ -74,7 +78,6 @@ struct svr_conn_s {
     uint64_t dgram_acked_cnt;
 
     /* Auth identity (set on CONNECT-IP auth success) */
-    char username[64];
     uint64_t connected_at_us;
 };
 
