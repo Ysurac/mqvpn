@@ -177,7 +177,7 @@ now_ms_mono(void)
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
 
@@ -919,8 +919,6 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
         }
         /* Save lease so the user gets the same IP on reconnect */
         if (conn->username[0]) {
-            uint32_t offset = ntohl(conn->assigned_ip.s_addr)
-                              - ntohl(s->pool.base.s_addr);
             int saved = 0;
             for (int i = 0; i < MQVPN_MAX_USERS; i++) {
                 if (s->leases[i].offset == 0 ||
