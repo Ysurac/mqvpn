@@ -17,6 +17,7 @@
  */
 
 #include "control_socket.h"
+#include "platform_internal.h"
 #include "json_mini.h"
 #include "log.h"
 
