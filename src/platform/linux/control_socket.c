@@ -138,12 +138,12 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"not supported in server mode\"}");
         char iface[IFNAMSIZ] = {0};
-        const char *iv = jfind(req, "iface");
-        if (!iv || jstr(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+        const char *iv = json_find_key(req, "iface");
+        if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"iface required\"}");
         int backup = 0;
-        const char *bv = jfind(req, "backup");
+        const char *bv = json_find_key(req, "backup");
         if (bv && (*bv == 't' || *bv == '1')) backup = 1;
         if (platform_add_path(cli_ctx, iface, backup) < 0)
             return snprintf(resp, resp_len,
@@ -155,8 +155,8 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"not supported in server mode\"}");
         char iface[IFNAMSIZ] = {0};
-        const char *iv = jfind(req, "iface");
-        if (!iv || jstr(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+        const char *iv = json_find_key(req, "iface");
+        if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"iface required\"}");
         if (platform_remove_path(cli_ctx, iface) < 0)
