@@ -473,7 +473,7 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
                                     &n_backup_paths) == 0) {
         cfg->n_backup_paths = 0;
         for (int i = 0; i < n_backup_paths; i++) {
-            copy_str(cfg->backup_paths[cfg->n_backup_paths],
+            mqvpn_copy_str(cfg->backup_paths[cfg->n_backup_paths],
                      sizeof(cfg->backup_paths[cfg->n_backup_paths]),
                      backup_path_buf[i]);
             cfg->n_backup_paths++;
