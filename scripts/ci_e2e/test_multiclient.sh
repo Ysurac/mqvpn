@@ -11,6 +11,8 @@
 
 set -e
 
+source "$(dirname "$0")/sanitizer_check.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN="${1:-${SCRIPT_DIR}/../../build/mqvpn}"
 
@@ -38,13 +40,16 @@ CLIENT1_PID=""
 CLIENT2_PID=""
 CLIENT3_PID=""
 CLIENT_BAD_PID=""
+SANITIZER_FAIL=0
 
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    for pid in $CLIENT_BAD_PID $CLIENT3_PID $CLIENT2_PID $CLIENT1_PID $SERVER_PID; do
-        kill "$pid" 2>/dev/null || true
-    done
+    stop_and_check_sanitizer "$CLIENT_BAD_PID" "client-bad" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$CLIENT3_PID" "client3" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$CLIENT2_PID" "client2" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$CLIENT1_PID" "client1" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$SERVER_PID" "server" || SANITIZER_FAIL=1
     sleep 1
     for ns in mc-client1 mc-client2 mc-client3 mc-client-bad mc-server; do
         ip netns del "$ns" 2>/dev/null || true
@@ -53,6 +58,10 @@ cleanup() {
         ip link del "$link" 2>/dev/null || true
     done
     rm -rf "$WORK_DIR"
+    if [ "$SANITIZER_FAIL" -ne 0 ]; then
+        echo "FAIL: sanitizer errors detected"
+        exit 1
+    fi
 }
 trap cleanup EXIT
 

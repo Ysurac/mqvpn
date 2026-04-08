@@ -15,6 +15,8 @@
 
 set -e
 
+source "$(dirname "$0")/sanitizer_check.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN="${1:-${SCRIPT_DIR}/../../build/mqvpn}"
 
@@ -42,12 +44,13 @@ IPTABLES_COMMENT="mqvpn-nat-test:$$"
 
 SERVER_PID=""
 CLIENT_PID=""
+SANITIZER_FAIL=0
 
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null || true
-    [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
+    stop_and_check_sanitizer "$CLIENT_PID" "client" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$SERVER_PID" "server" || SANITIZER_FAIL=1
     sleep 1
     # Remove iptables rules from server namespace (best-effort)
     ip netns exec vpn-server iptables -t nat -D POSTROUTING -s "$SUBNET" -o veth-wan-s -j MASQUERADE \
@@ -63,6 +66,10 @@ cleanup() {
     ip link del veth-c 2>/dev/null || true
     ip link del veth-wan-s 2>/dev/null || true
     rm -rf "$WORK_DIR"
+    if [ "$SANITIZER_FAIL" -ne 0 ]; then
+        echo "FAIL: sanitizer errors detected"
+        exit 1
+    fi
 }
 trap cleanup EXIT
 

@@ -6,6 +6,12 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # ---------- Options ----------
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")
+option(ENABLE_SANITIZERS "Enable ASan + UBSan" OFF)
+
+if(ENABLE_SANITIZERS)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -Werror)
+    add_link_options(-fsanitize=address,undefined)
+endif()
 
 # ---------- xquic ----------
 # xquic has its own complex build system (SSL dependency, etc).
