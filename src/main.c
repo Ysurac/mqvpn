@@ -1,5 +1,6 @@
 #include "log.h"
 #include "config.h"
+#include "json_mini.h"
 #include "auth.h"
 #include "vpn_client.h"
 #include "vpn_server.h"
@@ -10,6 +11,7 @@
 #  include <winsock2.h>
 #else
 #  include "platform_linux.h"
+#  include "status.h"
 #endif
 
 #include <stdio.h>
@@ -56,6 +58,7 @@ usage(const char *prog)
         "                            manually (client mode)\n"
         "  --control-port PORT       TCP port for JSON control API (server mode)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
+        "  --status                  Query server status via control API and exit\n"
         "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -100,17 +103,7 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
     return 0;
 }
 
-static void
-copy_str(char *dst, size_t dst_len, const char *src)
-{
-    if (!dst || dst_len == 0) return;
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    strncpy(dst, src, dst_len - 1);
-    dst[dst_len - 1] = '\0';
-}
+/* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
 
 int
 main(int argc, char *argv[])
@@ -152,6 +145,7 @@ main(int argc, char *argv[])
         {"noroutes",            no_argument,      NULL, 'W'},
         {"control-port",        required_argument, NULL, 'X'},
         {"control-addr",    required_argument, NULL, 'x'},
+        {"status",          no_argument,       NULL, 'T'},
         {"help",            no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -186,6 +180,7 @@ main(int argc, char *argv[])
     int         no_routes         = -1;  /* -1 = not set by CLI */
     int         control_port = 0;
     const char *control_addr = NULL;
+    int         status_mode  = 0;
 
     int opt;
     while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:M:L:X:x:wWh",
@@ -215,8 +210,8 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
-            copy_str(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]), pair);
-            copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]), sep + 1);
+            mqvpn_copy_str(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]), pair);
+            mqvpn_copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]), sep + 1);
             if (cli_user_names[n_cli_users][0] == '\0' || cli_user_keys[n_cli_users][0] == '\0') {
                 fprintf(stderr, "error: --user must be NAME:KEY\n");
                 return 1;
@@ -257,6 +252,7 @@ main(int argc, char *argv[])
         case 'W': no_routes = 1; break;
         case 'X': control_port = atoi(optarg); break;
         case 'x': control_addr = optarg; break;
+        case 'T': status_mode = 1; break;
         case 'L': log_level_str = optarg; break;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 1;
@@ -267,6 +263,17 @@ main(int argc, char *argv[])
     if (genkey) {
         return mqvpn_auth_genkey() < 0 ? 1 : 0;
     }
+
+#ifndef _WIN32
+    /* --status: query control API and exit */
+    if (status_mode) {
+        if (control_port <= 0) {
+            fprintf(stderr, "error: --status requires --control-port\n");
+            return 1;
+        }
+        return run_status(control_addr, control_port);
+    }
+#endif
 
     /* Load config file (if given), then apply CLI overrides */
     mqvpn_config_t file_cfg;

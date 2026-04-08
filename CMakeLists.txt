@@ -94,8 +94,8 @@ else()
         HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/crypto /usr/local/lib /usr/local/babassl/lib)
 endif()
 
-# ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
-add_library(mqvpn_lib STATIC
+# ---------- libmqvpn source files (shared between static and shared targets) ----------
+set(MQVPN_LIB_SOURCES
     src/mqvpn_config.c
     src/mqvpn_client.c
     src/mqvpn_server.c
@@ -105,6 +105,9 @@ add_library(mqvpn_lib STATIC
     src/auth.c
     src/log.c
 )
+
+# ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
+add_library(mqvpn_lib STATIC ${MQVPN_LIB_SOURCES})
 if(WIN32)
     set_target_properties(mqvpn_lib PROPERTIES OUTPUT_NAME mqvpn_lib)
 else()
@@ -177,16 +180,7 @@ endif()
 else() # NOT WIN32 — Linux
 
 # Shared library variant
-add_library(mqvpn_shared SHARED
-    src/mqvpn_config.c
-    src/mqvpn_client.c
-    src/mqvpn_server.c
-    src/mqvpn_util.c
-    src/flow_sched.c
-    src/addr_pool.c
-    src/auth.c
-    src/log.c
-)
+add_library(mqvpn_shared SHARED ${MQVPN_LIB_SOURCES})
 set_target_properties(mqvpn_shared PROPERTIES
     OUTPUT_NAME mqvpn
     SOVERSION 0
@@ -204,6 +198,7 @@ add_executable(mqvpn
     src/main.c
     src/platform/linux/platform_linux.c
     src/platform/linux/control_socket.c
+    src/platform/linux/status.c
     src/platform/linux/routing.c
     src/platform/linux/killswitch.c
     src/platform/linux/tun.c
@@ -243,8 +238,9 @@ if(BUILD_TESTING)
     add_executable(test_session tests/test_session.c src/addr_pool.c src/log.c)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
+    add_executable(test_status tests/test_status.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status)
         target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/linux)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})

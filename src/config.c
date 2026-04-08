@@ -2,6 +2,7 @@
  * config.c — INI/JSON configuration file parser for mqvpn
  */
 #include "config.h"
+#include "json_mini.h"
 #include "log.h"
 
 #include <stdio.h>
@@ -28,17 +29,7 @@ trim(char *s)
     return s;
 }
 
-static void
-copy_str(char *dst, size_t dst_len, const char *src)
-{
-    if (!dst || dst_len == 0) return;
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    strncpy(dst, src, dst_len - 1);
-    dst[dst_len - 1] = '\0';
-}
+/* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
 
 /* Parse boolean: "true"/"yes"/"1" → 1, else 0 */
 static int
@@ -156,76 +147,8 @@ parse_user_pair(mqvpn_config_t *cfg, const char *val, int lineno, const char *pa
     add_user_entry(cfg, name, key, lineno, path);
 }
 
-static const char *json_skip_ws(const char *p)
-{
-    while (*p && isspace((unsigned char)*p)) p++;
-    return p;
-}
-
-static const char *json_find_key(const char *json, const char *key)
-{
-    size_t key_len = strlen(key);
-    const char *p = json;
-
-    while ((p = strchr(p, '"')) != NULL) {
-        const char *k = p + 1;
-        const char *e = k;
-        while (*e && *e != '"') {
-            if (*e == '\\' && e[1]) e++;
-            e++;
-        }
-        if (*e != '"') return NULL;
-
-        if ((size_t)(e - k) == key_len && strncmp(k, key, key_len) == 0) {
-            const char *c = json_skip_ws(e + 1);
-            if (*c == ':') {
-                return json_skip_ws(c + 1);
-            }
-        }
-        p = e + 1;
-    }
-    return NULL;
-}
-
-static int json_read_string(const char *p, char *out, size_t out_len)
-{
-    if (!p || !out || out_len == 0 || *p != '"') return -1;
-    p++;
-
-    size_t j = 0;
-    while (*p && *p != '"') {
-        if (*p == '\\' && p[1]) p++;
-        if (j + 1 < out_len) out[j++] = *p;
-        p++;
-    }
-    if (*p != '"') return -1;
-    out[j] = '\0';
-    return 0;
-}
-
-static int json_read_bool(const char *p, int *out)
-{
-    if (!p || !out) return -1;
-    if (strncmp(p, "true", 4) == 0) {
-        *out = 1;
-        return 0;
-    }
-    if (strncmp(p, "false", 5) == 0) {
-        *out = 0;
-        return 0;
-    }
-    return -1;
-}
-
-static int json_read_int(const char *p, int *out)
-{
-    if (!p || !out) return -1;
-    char *end = NULL;
-    long v = strtol(p, &end, 10);
-    if (end == p) return -1;
-    *out = (int)v;
-    return 0;
-}
+/* json_skip_ws, json_find_key, json_read_string, json_read_bool,
+ * json_read_int are provided by json_mini.h */
 
 static int json_read_string_array(const char *p,
                                   char out[][64],
@@ -274,8 +197,8 @@ static int json_read_users(mqvpn_config_t *cfg, const char *p)
             char *sep = strchr(pair, ':');
             if (!sep) return -1;
             *sep = '\0';
-            copy_str(name, sizeof(name), pair);
-            copy_str(key, sizeof(key), sep + 1);
+            mqvpn_copy_str(name, sizeof(name), pair);
+            mqvpn_copy_str(key, sizeof(key), sep + 1);
 
             const char *e = p + 1;
             while (*e && *e != '"') {
@@ -446,55 +369,55 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "tun_name");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        copy_str(cfg->tun_name, sizeof(cfg->tun_name), s32);
+        mqvpn_copy_str(cfg->tun_name, sizeof(cfg->tun_name), s32);
 
     v = json_find_key(json_text, "log_level");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        copy_str(cfg->log_level, sizeof(cfg->log_level), s32);
+        mqvpn_copy_str(cfg->log_level, sizeof(cfg->log_level), s32);
 
     v = json_find_key(json_text, "listen");
     if (v && json_read_string(v, s280, sizeof(s280)) == 0) {
-        copy_str(cfg->listen, sizeof(cfg->listen), s280);
+        mqvpn_copy_str(cfg->listen, sizeof(cfg->listen), s280);
         cfg->is_server = 1;
     }
 
     v = json_find_key(json_text, "subnet");
     if (v && json_read_string(v, s64, sizeof(s64)) == 0)
-        copy_str(cfg->subnet, sizeof(cfg->subnet), s64);
+        mqvpn_copy_str(cfg->subnet, sizeof(cfg->subnet), s64);
 
     v = json_find_key(json_text, "subnet6");
     if (v && json_read_string(v, s64, sizeof(s64)) == 0)
-        copy_str(cfg->subnet6, sizeof(cfg->subnet6), s64);
+        mqvpn_copy_str(cfg->subnet6, sizeof(cfg->subnet6), s64);
 
     v = json_find_key(json_text, "server_addr");
     if (v && json_read_string(v, s280, sizeof(s280)) == 0)
-        copy_str(cfg->server_addr, sizeof(cfg->server_addr), s280);
+        mqvpn_copy_str(cfg->server_addr, sizeof(cfg->server_addr), s280);
 
     v = json_find_key(json_text, "insecure");
     if (v && json_read_bool(v, &iv) == 0) cfg->insecure = iv;
 
     v = json_find_key(json_text, "auth_key");
     if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        copy_str(cfg->auth_key, sizeof(cfg->auth_key), s256);
+        mqvpn_copy_str(cfg->auth_key, sizeof(cfg->auth_key), s256);
 
     v = json_find_key(json_text, "server_auth_key");
     if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        copy_str(cfg->server_auth_key, sizeof(cfg->server_auth_key), s256);
+        mqvpn_copy_str(cfg->server_auth_key, sizeof(cfg->server_auth_key), s256);
 
     v = json_find_key(json_text, "cert_file");
     if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        copy_str(cfg->cert_file, sizeof(cfg->cert_file), s256);
+        mqvpn_copy_str(cfg->cert_file, sizeof(cfg->cert_file), s256);
 
     v = json_find_key(json_text, "key_file");
     if (v && json_read_string(v, s256, sizeof(s256)) == 0)
-        copy_str(cfg->key_file, sizeof(cfg->key_file), s256);
+        mqvpn_copy_str(cfg->key_file, sizeof(cfg->key_file), s256);
 
     v = json_find_key(json_text, "max_clients");
     if (v && json_read_int(v, &iv) == 0) cfg->max_clients = iv > 0 ? iv : 64;
 
     v = json_find_key(json_text, "scheduler");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
-        copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
+        mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
 
     v = json_find_key(json_text, "reconnect");
     if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;
@@ -525,7 +448,7 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
     if (v && json_read_string_array(v, dns_buf, MQVPN_CONFIG_MAX_DNS, &n_dns) == 0) {
         cfg->n_dns = 0;
         for (int i = 0; i < n_dns; i++) {
-            copy_str(cfg->dns_servers[cfg->n_dns], sizeof(cfg->dns_servers[cfg->n_dns]),
+            mqvpn_copy_str(cfg->dns_servers[cfg->n_dns], sizeof(cfg->dns_servers[cfg->n_dns]),
                      dns_buf[i]);
             cfg->n_dns++;
         }
@@ -537,7 +460,7 @@ mqvpn_config_load_json_filecfg(mqvpn_config_t *cfg, const char *json_text)
     if (v && json_read_string_array(v, path_buf, MQVPN_CONFIG_MAX_PATHS, &n_paths) == 0) {
         cfg->n_paths = 0;
         for (int i = 0; i < n_paths; i++) {
-            copy_str(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]),
+            mqvpn_copy_str(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]),
                      path_buf[i]);
             cfg->n_paths++;
         }
