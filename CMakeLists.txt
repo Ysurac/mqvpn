@@ -129,6 +129,18 @@ endif()
 # Everything below requires libevent and a platform layer — skip for Android
 if(NOT ANDROID_CROSS_COMPILE)
 
+# ---------- Git commit ----------
+execute_process(
+    COMMAND git -C "${CMAKE_SOURCE_DIR}" describe --always --dirty
+    OUTPUT_VARIABLE MQVPN_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT MQVPN_GIT_COMMIT)
+    set(MQVPN_GIT_COMMIT "unknown")
+endif()
+message(STATUS "Git commit: ${MQVPN_GIT_COMMIT}")
+
 if(WIN32)
 
 # ---------- Wintun SDK (header only — DLL loaded at runtime) ----------
@@ -279,5 +291,7 @@ install(PROGRAMS scripts/mqvpn-server-nat.sh
         DESTINATION lib/mqvpn)
 
 endif() # WIN32 / Linux
+
+target_compile_definitions(mqvpn PRIVATE MQVPN_GIT_COMMIT="${MQVPN_GIT_COMMIT}")
 
 endif() # NOT ANDROID_CROSS_COMPILE

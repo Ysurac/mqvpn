@@ -19,9 +19,14 @@
 #include <string.h>
 #include <getopt.h>
 
+#ifndef MQVPN_GIT_COMMIT
+#  define MQVPN_GIT_COMMIT "unknown"
+#endif
+
 static void
 usage(const char *prog)
 {
+    fprintf(stderr, "mqvpn (commit %s)\n\n", MQVPN_GIT_COMMIT);
     fprintf(
         stderr,
         "Usage:\n"
