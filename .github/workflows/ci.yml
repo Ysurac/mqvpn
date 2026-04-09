@@ -215,6 +215,7 @@ jobs:
           mkdir -p build && cd build
           CC=clang CXX=clang++ cmake \
             -DBUILD_SHARED_LIBS=0 \
+            -DBUILD_TESTING=OFF \
             -DCMAKE_C_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins" \
             -DCMAKE_CXX_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins" ..
           make -j$(nproc) ssl crypto
