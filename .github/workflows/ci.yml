@@ -64,6 +64,175 @@ jobs:
             build/cmake_install.cmake
           retention-days: 1
 
+  sanitizer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libevent-dev golang iptables clang
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL (clang)
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic (clang)
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (clang + ASan + UBSan)
+        run: |
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DENABLE_SANITIZERS=ON \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Unit tests (sanitizer)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: cd build && ctest --output-on-failure
+
+      - name: E2E smoke test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_test.sh
+
+      - name: E2E multi-client test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/test_multiclient.sh
+
+      - name: E2E NAT test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_nat_test.sh
+
+      - name: E2E kill switch test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_killswitch_test.sh
+
+      - name: E2E reconnect test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_reconnect_test.sh
+
+      - name: E2E IPv6 transport test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_ipv6_transport_test.sh
+
+      - name: E2E IPv6 data plane test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_ipv6_dataplane_test.sh
+
+      - name: E2E IPv6 multipath test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_ipv6_multipath_test.sh
+
+      - name: E2E IPv6 full multipath test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_ipv6_full_multipath_test.sh
+
+  msan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake golang iptables clang
+
+      - name: Build libevent from source (MSan)
+        run: |
+          git clone --depth 1 --branch release-2.1.12-stable https://github.com/libevent/libevent.git /tmp/libevent
+          cd /tmp/libevent && mkdir build && cd build
+          CC=clang cmake -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins" \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DEVENT__DISABLE_OPENSSL=ON \
+                -DEVENT__DISABLE_BENCHMARK=ON \
+                -DEVENT__DISABLE_TESTS=ON \
+                -DEVENT__DISABLE_SAMPLES=ON \
+                -DCMAKE_INSTALL_PREFIX=/tmp/libevent-msan ..
+          make -j$(nproc) && make install
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL (clang + MSan)
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          CC=clang CXX=clang++ cmake \
+            -DBUILD_SHARED_LIBS=0 \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_C_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-error=frame-larger-than" \
+            -DCMAKE_CXX_FLAGS="-fPIC -fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-error=frame-larger-than" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic (clang + MSan)
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins -Wno-unknown-warning-option" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (clang + MSan)
+        run: |
+          mkdir -p build && cd build
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DENABLE_MSAN=ON \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build \
+                -DCMAKE_PREFIX_PATH=/tmp/libevent-msan ..
+          make -j$(nproc)
+
+      - name: Unit tests (MSan)
+        env:
+          MSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: cd build && ctest --output-on-failure
+
   netns-tests:
     needs: build
     runs-on: ubuntu-latest

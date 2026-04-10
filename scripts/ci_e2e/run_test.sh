@@ -8,6 +8,8 @@
 
 set -e
 
+source "$(dirname "$0")/sanitizer_check.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN=""
 LOG_LEVEL="debug"
@@ -41,18 +43,23 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -days 365 -nodes -subj "/CN=mqvpn-test" 2>/dev/null
 
 CLIENT_STRICT_PID=""
+SANITIZER_FAIL=0
 
 cleanup() {
     echo ""
     echo "Cleaning up..."
-    kill "$CLIENT_STRICT_PID" 2>/dev/null || true
-    kill "$SERVER_PID" 2>/dev/null || true
-    kill "$CLIENT_PID" 2>/dev/null || true
+    stop_and_check_sanitizer "$CLIENT_STRICT_PID" "client-strict" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$SERVER_PID" "server" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$CLIENT_PID" "client" || SANITIZER_FAIL=1
     sleep 1
     ip netns del vpn-server 2>/dev/null || true
     ip netns del vpn-client 2>/dev/null || true
     ip link del veth-c 2>/dev/null || true
     rm -rf "$WORK_DIR"
+    if [ "$SANITIZER_FAIL" -ne 0 ]; then
+        echo "FAIL: sanitizer errors detected"
+        exit 1
+    fi
 }
 trap cleanup EXIT
 
