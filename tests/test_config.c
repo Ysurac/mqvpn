@@ -912,7 +912,7 @@ static void test_json_invalid_users_error(void)
 
 static void test_route_via_server_default_off(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_INT(cfg.route_via_server, 0, "default route_via_server off");
@@ -925,7 +925,7 @@ static void test_route_via_server_config_parse(void)
         "RouteViaServer = true\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -940,7 +940,7 @@ static void test_route_via_server_config_false(void)
         "RouteViaServer = false\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -954,7 +954,7 @@ static void test_route_via_server_config_false(void)
 
 static void test_no_routes_default_off(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_INT(cfg.no_routes, 0, "default no_routes off");
@@ -967,7 +967,7 @@ static void test_no_routes_config_parse(void)
         "NoRoutes = yes\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -982,7 +982,7 @@ static void test_no_routes_config_false(void)
         "NoRoutes = no\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -1001,7 +1001,7 @@ static void test_json_client_route_options(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -1021,7 +1021,7 @@ static void test_json_client_no_routes(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -1037,7 +1037,7 @@ static void test_json_client_no_routes(void)
 
 static void test_backup_path_default_empty(void)
 {
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
 
     ASSERT_EQ_INT(cfg.n_backup_paths, 0, "default n_backup_paths is 0");
@@ -1052,7 +1052,7 @@ static void test_backup_path_ini_parse(void)
         "BackupPath = wlan0\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -1076,7 +1076,7 @@ static void test_backup_path_ini_max_cap(void)
         "BackupPath = b4\n";
 
     char *path = write_tmp(ini);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -1097,7 +1097,7 @@ static void test_backup_path_json_parse(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
@@ -1120,7 +1120,7 @@ static void test_backup_path_json_empty_array(void)
         "}";
 
     char *path = write_tmp(json);
-    mqvpn_config_t cfg;
+    mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
