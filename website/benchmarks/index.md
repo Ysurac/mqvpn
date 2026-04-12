@@ -28,11 +28,11 @@ const latestUdp = computed(() => weekly.udpSchedulerRows.value[0] || null)
 
 # Benchmarks
 
-Automated benchmark results from CI. Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.
+<p class="page-desc">Automated benchmark results from CI.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.</p>
 
 ## Per-commit Results
 
-Benchmarks run on every push to main.
+<p class="section-desc">Benchmarks run on every push to main.</p>
 
 <div v-if="push.loading.value">Loading...</div>
 <div v-else-if="push.error.value" style="color: red;">{{ push.error.value }}</div>
@@ -77,7 +77,7 @@ Benchmarks run on every push to main.
 
 ## Weekly Results
 
-Extended benchmarks run every Sunday at 3:00 UTC.
+<p class="section-desc">Extended benchmarks run every Sunday at 3:00 UTC.</p>
 
 <div v-if="weekly.loading.value">Loading...</div>
 <div v-else-if="weekly.error.value && !weekly.error.value.includes('404')" style="color: red;">{{ weekly.error.value }}</div>
@@ -120,6 +120,16 @@ Extended benchmarks run every Sunday at 3:00 UTC.
 </template>
 
 <style scoped>
+.page-desc {
+  font-size: 0.9em;
+  color: var(--vp-c-text-2);
+  margin-top: -8px;
+}
+.section-desc {
+  font-size: 0.85em;
+  color: var(--vp-c-text-3);
+  margin-top: -8px;
+}
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

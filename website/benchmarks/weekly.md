@@ -46,7 +46,7 @@ const filteredUdpRows = computed(() => {
 
 # Weekly Benchmarks
 
-Extended benchmark suite run every Sunday at 3:00 UTC. Includes all per-commit tests plus additional scenario-based tests.
+<p class="page-desc">Extended benchmark suite run every Sunday at 3:00 UTC.<br>Includes all per-commit tests plus additional scenario-based tests.</p>
 
 <div v-if="loading">Loading...</div>
 <div v-else-if="error && !error.includes('404')" style="color: red;">Error: {{ error }}</div>
@@ -127,7 +127,7 @@ Extended benchmark suite run every Sunday at 3:00 UTC. Includes all per-commit t
 
 ## Multipath Scheduler Scenarios
 
-Compares WLB and MinRTT schedulers across 8 network scenarios with different delay/bandwidth/loss profiles.
+<p class="section-desc">Compares WLB and MinRTT schedulers across 8 network scenarios with different delay/bandwidth/loss profiles.</p>
 
 <div v-if="multipathSchedulerRows.length === 0">No data.</div>
 <table v-else>
@@ -153,7 +153,7 @@ Compares WLB and MinRTT schedulers across 8 network scenarios with different del
 
 ## Flow Scaling
 
-Measures throughput as the number of parallel TCP streams increases.
+<p class="section-desc">Measures throughput as the number of parallel TCP streams increases.</p>
 
 <div v-if="flowScalingRows.length === 0">No data.</div>
 <template v-else>
@@ -173,7 +173,7 @@ Measures throughput as the number of parallel TCP streams increases.
 
 ## UDP Scheduler
 
-Tests UDP performance across different network scenarios. Measures throughput, jitter, and packet loss.
+<p class="section-desc">Tests UDP performance across different network scenarios. Measures throughput, jitter, and packet loss.</p>
 
 <div v-if="udpSchedulerRows.length === 0">No data.</div>
 <template v-else>
@@ -192,7 +192,7 @@ Tests UDP performance across different network scenarios. Measures throughput, j
 
 ## NTN Satellite
 
-Tests multipath performance over Non-Terrestrial Network (satellite) link profiles based on 3GPP NTN specs and real-world Starlink measurements.
+<p class="section-desc">Tests multipath performance over Non-Terrestrial Network (satellite) link profiles based on 3GPP NTN specs and real-world Starlink measurements.</p>
 
 <div v-if="ntnRows.length === 0">No data.</div>
 <table v-else>
@@ -219,6 +219,16 @@ Tests multipath performance over Non-Terrestrial Network (satellite) link profil
 </template>
 
 <style scoped>
+.page-desc {
+  font-size: 0.9em;
+  color: var(--vp-c-text-2);
+  margin-top: -8px;
+}
+.section-desc {
+  font-size: 0.85em;
+  color: var(--vp-c-text-3);
+  margin-top: -8px;
+}
 table {
   border-collapse: collapse;
   width: 100%;

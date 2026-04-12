@@ -22,8 +22,7 @@ const filteredAggregateRows = computed(() => {
 
 # Per-commit Benchmarks
 
-Benchmarks run on every push to main. Latest 10 results.
-Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.
+<p class="page-desc">Benchmarks run on every push to main. Latest 10 results.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.</p>
 
 <div v-if="loading">Loading...</div>
 <div v-else-if="error" style="color: red;">Error: {{ error }}</div>
@@ -31,7 +30,7 @@ Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.
 
 ## VPN Throughput (Mbps, no emulation)
 
-Measures mqvpn throughput over veth pairs without bandwidth/delay emulation.
+<p class="section-desc">Measures mqvpn throughput over veth pairs without bandwidth/delay emulation.</p>
 
 <div v-if="rawRows.length === 0">No data yet.</div>
 <table v-else>
@@ -137,6 +136,16 @@ Measures mqvpn throughput over veth pairs without bandwidth/delay emulation.
 </template>
 
 <style scoped>
+.page-desc {
+  font-size: 0.9em;
+  color: var(--vp-c-text-2);
+  margin-top: -8px;
+}
+.section-desc {
+  font-size: 0.85em;
+  color: var(--vp-c-text-3);
+  margin-top: -8px;
+}
 table {
   border-collapse: collapse;
   width: 100%;

@@ -43,7 +43,7 @@ const filteredUdpRows = computed(() => {
 
 # 週次ベンチマーク
 
-毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。コミットごとのテストに加え、シナリオベースのテストを含みます。
+<p class="page-desc">毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。<br>コミットごとのテストに加え、シナリオベースのテストを含みます。</p>
 
 <div v-if="loading">読み込み中...</div>
 <div v-else-if="error && !error.includes('404')" style="color: red;">エラー: {{ error }}</div>
@@ -100,7 +100,7 @@ const filteredUdpRows = computed(() => {
 
 ## マルチパススケジューラシナリオ
 
-遅延・帯域・損失の異なる 8 つのネットワークシナリオで WLB と MinRTT スケジューラを比較。
+<p class="section-desc">遅延・帯域・損失の異なる 8 つのネットワークシナリオで WLB と MinRTT スケジューラを比較。</p>
 
 <div v-if="multipathSchedulerRows.length === 0">データなし。</div>
 <table v-else>
@@ -116,7 +116,7 @@ const filteredUdpRows = computed(() => {
 
 ## フロースケーリング
 
-並列 TCP ストリーム数を増やしたときのスループットを計測。
+<p class="section-desc">並列 TCP ストリーム数を増やしたときのスループットを計測。</p>
 
 <div v-if="flowScalingRows.length === 0">データなし。</div>
 <template v-else>
@@ -136,7 +136,7 @@ const filteredUdpRows = computed(() => {
 
 ## UDP スケジューラ
 
-異なるネットワークシナリオでの UDP パフォーマンス。スループット、ジッタ、パケットロスを計測。
+<p class="section-desc">異なるネットワークシナリオでの UDP パフォーマンス。スループット、ジッタ、パケットロスを計測。</p>
 
 <div v-if="udpSchedulerRows.length === 0">データなし。</div>
 <template v-else>
@@ -155,7 +155,7 @@ const filteredUdpRows = computed(() => {
 
 ## NTN 衛星
 
-3GPP NTN 仕様と Starlink 実測データに基づく衛星リンクプロファイルでのマルチパス性能テスト。
+<p class="section-desc">3GPP NTN 仕様と Starlink 実測データに基づく衛星リンクプロファイルでのマルチパス性能テスト。</p>
 
 <div v-if="ntnRows.length === 0">データなし。</div>
 <table v-else>
@@ -172,6 +172,16 @@ const filteredUdpRows = computed(() => {
 </template>
 
 <style scoped>
+.page-desc {
+  font-size: 0.9em;
+  color: var(--vp-c-text-2);
+  margin-top: -8px;
+}
+.section-desc {
+  font-size: 0.85em;
+  color: var(--vp-c-text-3);
+  margin-top: -8px;
+}
 table {
   border-collapse: collapse;
   width: 100%;

@@ -22,8 +22,7 @@ const filteredAggregateRows = computed(() => {
 
 # コミットごとのベンチマーク
 
-main へのプッシュごとに実行。最新 10 件の結果。
-環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04
+<p class="page-desc">main へのプッシュごとに実行。最新 10 件の結果。<br>環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04</p>
 
 <div v-if="loading">読み込み中...</div>
 <div v-else-if="error" style="color: red;">エラー: {{ error }}</div>
@@ -31,7 +30,7 @@ main へのプッシュごとに実行。最新 10 件の結果。
 
 ## VPN スループット（Mbps、エミュレーションなし）
 
-帯域/遅延エミュレーションなしの veth ペアで mqvpn のスループットを計測。
+<p class="section-desc">帯域/遅延エミュレーションなしの veth ペアで mqvpn のスループットを計測。</p>
 
 <div v-if="rawRows.length === 0">データがありません。</div>
 <table v-else>
@@ -137,6 +136,16 @@ main へのプッシュごとに実行。最新 10 件の結果。
 </template>
 
 <style scoped>
+.page-desc {
+  font-size: 0.9em;
+  color: var(--vp-c-text-2);
+  margin-top: -8px;
+}
+.section-desc {
+  font-size: 0.85em;
+  color: var(--vp-c-text-3);
+  margin-top: -8px;
+}
 table {
   border-collapse: collapse;
   width: 100%;

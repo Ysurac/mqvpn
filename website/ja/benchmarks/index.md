@@ -25,11 +25,11 @@ const latestUdp = computed(() => weekly.udpSchedulerRows.value[0] || null)
 
 # ベンチマーク
 
-CI による自動ベンチマーク結果です。環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04
+<p class="page-desc">CI による自動ベンチマーク結果です。<br>環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04</p>
 
 ## コミットごとの結果
 
-main へのプッシュごとに実行されるベンチマーク。
+<p class="section-desc">main へのプッシュごとに実行されるベンチマーク。</p>
 
 <div v-if="push.loading.value">読み込み中...</div>
 <div v-else-if="push.error.value" style="color: red;">{{ push.error.value }}</div>
@@ -74,7 +74,7 @@ main へのプッシュごとに実行されるベンチマーク。
 
 ## 週次結果
 
-毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。
+<p class="section-desc">毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。</p>
 
 <div v-if="weekly.loading.value">読み込み中...</div>
 <div v-else-if="weekly.error.value && !weekly.error.value.includes('404')" style="color: red;">{{ weekly.error.value }}</div>
@@ -117,6 +117,16 @@ main へのプッシュごとに実行されるベンチマーク。
 </template>
 
 <style scoped>
+.page-desc {
+  font-size: 0.9em;
+  color: var(--vp-c-text-2);
+  margin-top: -8px;
+}
+.section-desc {
+  font-size: 0.85em;
+  color: var(--vp-c-text-3);
+  margin-top: -8px;
+}
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
