@@ -104,9 +104,10 @@ jobs:
           COMMIT_SHORT=$(git rev-parse --short HEAD)
           TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-          cp ci_bench_results/*.json website/public/perf-data/ 2>/dev/null || true
+          mkdir -p website/public/perf-data/weekly
+          cp ci_bench_results/*.json website/public/perf-data/weekly/ 2>/dev/null || true
 
-          cd website/public/perf-data
+          cd website/public/perf-data/weekly
           python3 -c "
           import json, glob, os
           with open('index.json') as f:
@@ -145,9 +146,10 @@ jobs:
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
-            cp ci_bench_results/*.json website/public/perf-data/ 2>/dev/null || true
+            mkdir -p website/public/perf-data/weekly
+            cp ci_bench_results/*.json website/public/perf-data/weekly/ 2>/dev/null || true
 
-            cd website/public/perf-data
+            cd website/public/perf-data/weekly
             python3 -c "
           import json, glob, os
           with open('index.json') as f:
