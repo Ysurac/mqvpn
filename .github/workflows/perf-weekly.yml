@@ -63,8 +63,8 @@ jobs:
 
       # --- Core benchmarks (same as push-to-main) ---
 
-      - name: Raw throughput benchmark (TCP DL)
-        run: sudo bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh build/mqvpn
+      - name: Raw throughput benchmark (TCP DL+UL)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh --full build/mqvpn
 
       - name: Failover benchmark (WLB + MinRTT)
         run: sudo bash scripts/ci_benchmarks/ci_bench_failover.sh build/mqvpn
