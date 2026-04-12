@@ -22,16 +22,16 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Cleanup stale benchmark state
+      - name: Cleanup stale state
         run: |
-          sudo pkill -f 'mqvpn.*bench' || true
+          sudo pkill -f 'mqvpn.*ci-bench' || true
+          sudo ip netns del ci-bench-server 2>/dev/null || true
+          sudo ip netns del ci-bench-client 2>/dev/null || true
           sudo pkill -f 'iperf3' || true
-          sudo ip netns del bench-server 2>/dev/null || true
-          sudo ip netns del bench-client 2>/dev/null || true
 
       - name: Clean previous build
         run: |
-          sudo rm -rf bench_results
+          sudo rm -rf ci_bench_results
           rm -rf third_party/xquic/third_party/boringssl
           rm -rf third_party/xquic/build
           rm -rf build
@@ -61,22 +61,19 @@ jobs:
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
-      - name: Failover benchmark (WLB)
-        run: sudo bash benchmarks/bench_failover.sh -s wlb build/mqvpn
+      - name: Raw throughput benchmark (TCP DL)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh build/mqvpn
 
-      - name: Failover benchmark (MinRTT)
-        run: sudo bash benchmarks/bench_failover.sh -s minrtt build/mqvpn
+      - name: Failover benchmark (WLB + MinRTT)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_failover.sh build/mqvpn
 
-      - name: Aggregation benchmark (WLB)
-        run: sudo bash benchmarks/bench_aggregate.sh -s wlb -p 1,4,16,64 build/mqvpn
-
-      - name: Aggregation benchmark (MinRTT)
-        run: sudo bash benchmarks/bench_aggregate.sh -s minrtt -p 1,4,16,64 build/mqvpn
+      - name: Aggregation benchmark (WLB + MinRTT)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_aggregate.sh build/mqvpn
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: perf-results-${{ github.sha }}
-          path: bench_results/*.json
+          path: ci_bench_results/*.json
           retention-days: 90
