@@ -1,6 +1,20 @@
 [
   {
     "commit": "d249f25",
+    "timestamp": "2026-04-12T18:06:45Z",
+    "type": "weekly",
+    "files": [
+      "raw_throughput_20260412_174102.json",
+      "aggregate_20260412_174820.json",
+      "flow_scaling_20260412_175926.json",
+      "udp_scheduler_20260412_180246.json",
+      "failover_20260412_174321.json",
+      "ntn_20260412_180642.json",
+      "multipath_scheduler_20260412_175445.json"
+    ]
+  },
+  {
+    "commit": "d249f25",
     "timestamp": "2026-04-12T17:37:47Z",
     "type": "push",
     "files": [
