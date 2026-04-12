@@ -159,8 +159,8 @@ output = {
     'scheduler': '${BENCH_SCHEDULER}',
     'timestamp': '${TIMESTAMP}',
     'netem': {
-        'path_a': {'delay_ms': 10, 'rate_mbit': 300},
-        'path_b': {'delay_ms': 30, 'rate_mbit': 80}
+        'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 300},
+        'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 80}
     },
     'theoretical_max_mbps': 380,
     'results': results
@@ -178,6 +178,19 @@ for r in results:
 "
 
 rm -f "$RESULTS_TMP"
+
+# Sanity check: fail if all results are zero (iperf3 silently failed)
+ZERO_COUNT=$(python3 -c "
+import json
+with open('${OUTPUT_FILE}') as f:
+    data = json.load(f)
+zeros = sum(1 for r in data['results'] if r['single_path_mbps'] == 0.0 and r['multipath_mbps'] == 0.0)
+print(zeros)
+")
+if [ "$ZERO_COUNT" -eq "${#STREAM_COUNTS[@]}" ]; then
+    echo "ERROR: all benchmark results are 0.0 — iperf3 likely failed"
+    exit 1
+fi
 
 echo ""
 echo "================================================================"

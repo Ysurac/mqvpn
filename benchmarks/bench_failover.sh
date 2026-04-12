@@ -147,7 +147,10 @@ fault_recover = ${FAULT_RECOVER_SEC}
 pre_fault = [iv['mbps'] for iv in intervals if iv['time_sec'] <= fault_inject]
 pre_fault_avg = sum(pre_fault) / len(pre_fault) if pre_fault else 0
 
-# TTR: time from fault injection until goodput recovers to 90% of pre-fault avg
+# TTR (fallback): time from fault injection until goodput recovers to 90%
+# of pre-fault avg on the surviving path(s). This measures how quickly
+# the scheduler shifts traffic away from the failed path, NOT full
+# recovery after path restoration.
 threshold = pre_fault_avg * 0.9
 ttr = None
 for iv in intervals:
@@ -167,8 +170,8 @@ result = {
     'iperf_parallel_streams': ${IPERF_PARALLEL},
     'timestamp': '${TIMESTAMP}',
     'netem': {
-        'path_a': {'delay_ms': 10, 'rate_mbit': 300},
-        'path_b': {'delay_ms': 30, 'rate_mbit': 80}
+        'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 300},
+        'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 80}
     },
     'duration_sec': ${DURATION},
     'fault_inject_sec': fault_inject,
@@ -176,6 +179,7 @@ result = {
     'intervals': intervals,
     'pre_fault_avg_mbps': round(pre_fault_avg, 1),
     'ttr_sec': ttr,
+    'ttr_definition': 'seconds from fault injection until throughput reaches 90% of pre-fault avg (fallback to surviving path)',
     'post_recover_avg_mbps': round(post_recover_avg, 1)
 }
 

@@ -234,6 +234,10 @@ bench_cleanup() {
     [ -n "$_BENCH_SERVER_PID" ] && kill "$_BENCH_SERVER_PID" 2>/dev/null || true
     _BENCH_CLIENT_PID=""
     _BENCH_SERVER_PID=""
+
+    # Kill stale iperf3 inside benchmark netns only (avoid killing unrelated iperf3)
+    ip netns exec "$NS_SERVER" pkill -f "iperf3" 2>/dev/null || true
+    ip netns exec "$NS_CLIENT" pkill -f "iperf3" 2>/dev/null || true
     sleep 1
 
     # Remove tc rules
