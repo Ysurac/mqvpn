@@ -31,7 +31,7 @@ jobs:
 
       - name: Clean previous build
         run: |
-          sudo rm -rf ci_bench_results
+          sudo rm -rf ci_bench_results bench_results
           rm -rf third_party/xquic/third_party/boringssl
           rm -rf third_party/xquic/build
           rm -rf build
