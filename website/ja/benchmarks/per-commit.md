@@ -12,7 +12,7 @@ const schedFilter = ref('')
 const streamsFilter = ref('')
 
 const filteredAggregateRows = computed(() => {
-  return aggregateRows.filter(r => {
+  return aggregateRows.value.filter(r => {
     if (schedFilter.value && r.scheduler !== schedFilter.value) return false
     if (streamsFilter.value && String(r.streams) !== streamsFilter.value) return false
     return true

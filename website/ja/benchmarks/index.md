@@ -4,7 +4,7 @@ layout: page
 
 <script setup>
 import { computed } from 'vue'
-import { usePerfData, fmtNum } from '../../.vitepress/theme/composables/usePerfData'
+import { usePerfData } from '../../.vitepress/theme/composables/usePerfData'
 
 const push = usePerfData('/perf-data', 1)
 const weekly = usePerfData('/perf-data/weekly', 1)

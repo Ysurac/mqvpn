@@ -15,7 +15,7 @@ const {
 const aggSchedFilter = ref('')
 const aggStreamsFilter = ref('')
 const filteredAggregateRows = computed(() => {
-  return aggregateRows.filter(r => {
+  return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
     if (aggStreamsFilter.value && String(r.streams) !== aggStreamsFilter.value) return false
     return true
@@ -25,7 +25,7 @@ const filteredAggregateRows = computed(() => {
 const fsSchedFilter = ref('')
 const fsStreamsFilter = ref('')
 const filteredFlowScalingRows = computed(() => {
-  return flowScalingRows.filter(r => {
+  return flowScalingRows.value.filter(r => {
     if (fsSchedFilter.value && r.scheduler !== fsSchedFilter.value) return false
     if (fsStreamsFilter.value && String(r.streams) !== fsStreamsFilter.value) return false
     return true
@@ -34,7 +34,7 @@ const filteredFlowScalingRows = computed(() => {
 
 const udpSchedFilter = ref('')
 const filteredUdpRows = computed(() => {
-  return udpSchedulerRows.filter(r => {
+  return udpSchedulerRows.value.filter(r => {
     if (udpSchedFilter.value && r.scheduler !== udpSchedFilter.value) return false
     return true
   })
