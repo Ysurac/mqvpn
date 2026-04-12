@@ -124,7 +124,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Retry loop: pull latest, re-add files, commit, push
+          # Retry loop: fetch latest, reset, re-add files, commit, push
+          push_ok=false
           for attempt in 1 2 3; do
             git fetch origin main
             git reset --hard origin/main
@@ -161,12 +162,16 @@ jobs:
             cd $GITHUB_WORKSPACE
 
             git add website/public/perf-data/
-            git diff --cached --quiet && break
+            git diff --cached --quiet && { push_ok=true; break; }
             git commit -m "perf: update benchmark results (${COMMIT_SHORT}) [skip ci]"
-            git push && break
+            git push && { push_ok=true; break; }
             echo "Push failed (attempt $attempt), retrying..."
             sleep 5
           done
+          if [ "$push_ok" = false ]; then
+            echo "::error::Failed to publish benchmark results after 3 attempts"
+            exit 1
+          fi
 
       - name: Trigger Cloudflare Pages deploy
         if: success()
