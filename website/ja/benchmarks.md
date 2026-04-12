@@ -34,7 +34,7 @@ async function fetchJson(url) {
 onMounted(async () => {
   try {
     const index = await fetchJson('/perf-data/index.json')
-    const entries = index.slice(-10)
+    const entries = index.slice(0, 10)
 
     const allData = []
     for (const entry of entries) {
