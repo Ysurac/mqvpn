@@ -318,6 +318,11 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "ReinjectionMode") == 0 ||
                    strcasecmp(key, "ReinjCtl") == 0) {
             snprintf(cfg->reinjection_mode, sizeof(cfg->reinjection_mode), "%s", val);
+        } else if (strcasecmp(key, "Fec") == 0 ||
+                   strcasecmp(key, "FecEnable") == 0) {
+            cfg->fec_enable = parse_bool(val);
+        } else if (strcasecmp(key, "FecScheme") == 0) {
+            snprintf(cfg->fec_scheme, sizeof(cfg->fec_scheme), "%s", val);
         } else if (strcasecmp(key, "Path") == 0) {
             if (cfg->n_paths < MQVPN_CONFIG_MAX_PATHS) {
                 snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[0]), "%s", val);
@@ -439,6 +444,16 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->reinjection_mode, sizeof(cfg->reinjection_mode), s32);
 
+    v = json_find_key(json_text, "fec_enable");
+    if (v && json_read_bool(v, &iv) == 0) cfg->fec_enable = iv;
+
+    v = json_find_key(json_text, "fec");
+    if (v && json_read_bool(v, &iv) == 0) cfg->fec_enable = iv;
+
+    v = json_find_key(json_text, "fec_scheme");
+    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
+        mqvpn_copy_str(cfg->fec_scheme, sizeof(cfg->fec_scheme), s32);
+
     v = json_find_key(json_text, "reconnect");
     if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;
 
@@ -520,6 +535,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->key_file, sizeof(cfg->key_file), "server.key");
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
     snprintf(cfg->reinjection_mode, sizeof(cfg->reinjection_mode), "default");
+    snprintf(cfg->fec_scheme, sizeof(cfg->fec_scheme), "reed_solomon");
     snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
     cfg->max_clients = 64;
     cfg->reconnect = 1;

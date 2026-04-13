@@ -26,3 +26,5 @@ MaxClients = 64
 Scheduler = wlb
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
+# FecEnable = true
+# FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor

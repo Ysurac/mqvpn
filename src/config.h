@@ -53,6 +53,8 @@ typedef struct mqvpn_file_config_s {
     char scheduler[16];
     int reinjection_control; /* 1=enable reinjection, 0=off */
     char reinjection_mode[16]; /* default|deadline|dgram */
+    int fec_enable; /* 1=enable FEC, 0=off */
+    char fec_scheme[32]; /* galois_calculation|packet_mask|reed_solomon|xor */
     char cc[16];
 
     /* [Interface] — client reconnection */

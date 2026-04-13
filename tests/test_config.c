@@ -58,6 +58,8 @@ static void test_defaults(void)
     ASSERT_EQ_STR(cfg.scheduler, "wlb", "default scheduler");
     ASSERT_EQ_INT(cfg.reinjection_control, 0, "default reinjection_control");
     ASSERT_EQ_STR(cfg.reinjection_mode, "default", "default reinjection_mode");
+    ASSERT_EQ_INT(cfg.fec_enable, 0, "default fec_enable");
+    ASSERT_EQ_STR(cfg.fec_scheme, "reed_solomon", "default fec_scheme");
     ASSERT_EQ_INT(cfg.is_server, 0, "default is_server");
     ASSERT_EQ_STR(cfg.server_addr, "", "default server_addr");
     ASSERT_EQ_STR(cfg.auth_key, "", "default auth_key");
@@ -117,6 +119,8 @@ static void test_parse_client_config(void)
         "Scheduler = minrtt\n"
         "ReinjectionControl = true\n"
         "ReinjectionMode = deadline\n"
+        "FecEnable = true\n"
+        "FecScheme = xor\n"
         "Path = eth0\n"
         "Path = wlan0\n";
 
@@ -138,6 +142,8 @@ static void test_parse_client_config(void)
     ASSERT_EQ_STR(cfg.scheduler, "minrtt", "scheduler");
     ASSERT_EQ_INT(cfg.reinjection_control, 1, "reinjection_control");
     ASSERT_EQ_STR(cfg.reinjection_mode, "deadline", "reinjection_mode");
+    ASSERT_EQ_INT(cfg.fec_enable, 1, "fec_enable");
+    ASSERT_EQ_STR(cfg.fec_scheme, "xor", "fec_scheme");
     ASSERT_EQ_INT(cfg.n_paths, 2, "n_paths");
     ASSERT_EQ_STR(cfg.paths[0], "eth0", "path[0]");
     ASSERT_EQ_STR(cfg.paths[1], "wlan0", "path[1]");

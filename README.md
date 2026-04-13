@@ -73,6 +73,8 @@ User = bob:bob-secret
 Scheduler = wlb
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
+# FecEnable = true
+# FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
 
 [Control]
 # Port = 9090          # enable JSON control API on this TCP port
@@ -96,6 +98,8 @@ DNS = 1.1.1.1, 8.8.8.8
 Scheduler = wlb
 # ReinjectionControl = true
 # ReinjectionMode = deadline  # default|deadline|dgram
+# FecEnable = true
+# FecScheme = xor             # galois_calculation|packet_mask|reed_solomon|xor
 Path = eth0
 Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
@@ -126,6 +130,8 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
+    "fec_enable": true,
+    "fec_scheme": "reed_solomon",
     "control_port": 9090,
     "control_addr": "127.0.0.1"
 }
@@ -150,6 +156,8 @@ Client example:
     "scheduler": "wlb",
     "reinjection_control": true,
     "reinjection_mode": "deadline",
+    "fec_enable": true,
+    "fec_scheme": "xor",
     "control_port": 0,
     "control_addr": "127.0.0.1"
 }
@@ -418,6 +426,9 @@ mqvpn [--config PATH] --mode client|server [options]
     --scheduler minrtt|wlb|backup|backup_fec|rap Multipath scheduler (default: wlb)
     --reinjection-control  Enable multipath reinjection control
     --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)
+    --fec-enable          Enable FEC
+    --no-fec              Disable FEC
+    --fec-scheme galois_calculation|packet_mask|reed_solomon|xor FEC scheme (default: reed_solomon)
   --route-via-server     Add host route to server IP before setting default route (client)
   --no-routes            Skip all automatic route setup; manage routes manually (client)
   --control-port PORT    TCP port for JSON control API (server)

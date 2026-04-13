@@ -16,6 +16,8 @@
   "scheduler": "wlb",
   "reinjection_control": true,
   "reinjection_mode": "default",
+  "fec_enable": true,
+  "fec_scheme": "reed_solomon",
   "control_port": 0,
   "control_addr": "127.0.0.1"
 }

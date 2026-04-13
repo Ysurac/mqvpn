@@ -1363,6 +1363,36 @@ cli_start_connection(mqvpn_client_t *c)
     else
         cs.reinj_ctl_callback = xqc_default_reinj_ctl_cb;
 
+    if (c->config.fec_enable) {
+#ifdef XQC_ENABLE_FEC
+        xqc_fec_schemes_e fec_scheme = XQC_REED_SOLOMON_CODE;
+        cs.fec_callback = xqc_reed_solomon_code_cb;
+
+        if (c->config.fec_scheme == MQVPN_FEC_SCHEME_XOR) {
+            fec_scheme = XQC_XOR_CODE;
+            cs.fec_callback = xqc_xor_code_cb;
+        } else if (c->config.fec_scheme == MQVPN_FEC_SCHEME_PACKET_MASK) {
+#ifdef XQC_ENABLE_PKM
+            fec_scheme = XQC_PACKET_MASK_CODE;
+            cs.fec_callback = xqc_packet_mask_code_cb;
+#else
+            LOG_W(c, "packet_mask FEC unavailable in xquic build; using reed_solomon");
+#endif
+        }
+
+        cs.enable_encode_fec = 1;
+        cs.enable_decode_fec = 1;
+        cs.fec_params.fec_encoder_schemes_num = 1;
+        cs.fec_params.fec_decoder_schemes_num = 1;
+        cs.fec_params.fec_encoder_schemes[0] = fec_scheme;
+        cs.fec_params.fec_decoder_schemes[0] = fec_scheme;
+        cs.fec_params.fec_encoder_scheme = fec_scheme;
+        cs.fec_params.fec_decoder_scheme = fec_scheme;
+#else
+        LOG_W(c, "FEC enabled in config but unavailable in this xquic build");
+#endif
+    }
+
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
     ssl_cfg.cert_verify_flag = c->config.insecure ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED

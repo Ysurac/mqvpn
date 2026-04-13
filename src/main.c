@@ -68,6 +68,9 @@ usage(const char *prog)
         "  --scheduler minrtt|wlb|backup|backup_fec|rap  Multipath scheduler (default wlb)\n"
         "  --reinjection-control      Enable multipath reinjection control\n"
         "  --reinjection-mode default|deadline|dgram  Reinjection control mode (default: default)\n"
+        "  --fec-enable              Enable FEC\n"
+        "  --no-fec                  Disable FEC\n"
+        "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme (default reed_solomon)\n"
         "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited  Congestion control (default bbr2)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -145,6 +148,9 @@ main(int argc, char *argv[])
         {"scheduler",   required_argument, NULL, 'S'},
         {"reinjection-control", no_argument, NULL, 'Y'},
         {"reinjection-mode", required_argument, NULL, 'Z'},
+        {"fec-enable", no_argument, NULL, 'E'},
+        {"no-fec", no_argument, NULL, 'e'},
+        {"fec-scheme", required_argument, NULL, 'F'},
         {"cc",          required_argument, NULL, 'Q'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
@@ -181,6 +187,8 @@ main(int argc, char *argv[])
     const char *scheduler_str = NULL;
     int reinjection_control = -1; /* -1 means not set by CLI */
     const char *reinjection_mode_str = NULL;
+    int fec_enable = -1; /* -1 means not set by CLI */
+    const char *fec_scheme_str = NULL;
     const char *cc_str        = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
@@ -198,7 +206,7 @@ main(int argc, char *argv[])
     int         status_mode  = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:YZ:Q:M:L:X:x:wWh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -262,6 +270,9 @@ main(int argc, char *argv[])
         case 'S': scheduler_str = optarg; break;
         case 'Y': reinjection_control = 1; break;
         case 'Z': reinjection_mode_str = optarg; break;
+        case 'E': fec_enable = 1; break;
+        case 'e': fec_enable = 0; break;
+        case 'F': fec_scheme_str = optarg; break;
         case 'Q': cc_str = optarg; break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
@@ -313,6 +324,8 @@ main(int argc, char *argv[])
     const char *eff_reinjection_mode = reinjection_mode_str
                                        ? reinjection_mode_str
                                        : file_cfg.reinjection_mode;
+    int eff_fec_enable = fec_enable >= 0 ? fec_enable : file_cfg.fec_enable;
+    const char *eff_fec_scheme = fec_scheme_str ? fec_scheme_str : file_cfg.fec_scheme;
     const char *eff_cc        = cc_str        ? cc_str        : file_cfg.cc;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
     const char *eff_subnet = subnet ? subnet : file_cfg.subnet;
@@ -423,6 +436,20 @@ main(int argc, char *argv[])
         return 1;
     }
 
+    int fec_scheme = MQVPN_FEC_SCHEME_REED_SOLOMON;
+    if (strcmp(eff_fec_scheme, "xor") == 0) {
+        fec_scheme = MQVPN_FEC_SCHEME_XOR;
+    } else if (strcmp(eff_fec_scheme, "packet_mask") == 0 ||
+               strcmp(eff_fec_scheme, "packet_maskn") == 0) {
+        fec_scheme = MQVPN_FEC_SCHEME_PACKET_MASK;
+    } else if (strcmp(eff_fec_scheme, "galois_calculation") == 0) {
+        fec_scheme = MQVPN_FEC_SCHEME_GALOIS_CALCULATION;
+    } else if (strcmp(eff_fec_scheme, "reed_solomon") != 0) {
+        fprintf(stderr,
+                "error: --fec-scheme must be 'galois_calculation', 'packet_mask', 'reed_solomon' or 'xor'\n");
+        return 1;
+    }
+
     /* Map our log level to xquic log level (roughly) */
     int xqc_log_level;
     switch (log_level) {
@@ -486,6 +513,8 @@ main(int argc, char *argv[])
             .scheduler = scheduler,
             .reinjection_control = eff_reinjection_control,
             .reinjection_mode = reinjection_mode,
+            .fec_enable = eff_fec_enable,
+            .fec_scheme = fec_scheme,
             .cc = cc,
             .auth_key = eff_auth_key,
             .n_dns = n_dns,
@@ -540,6 +569,8 @@ main(int argc, char *argv[])
             .scheduler   = scheduler,
             .reinjection_control = eff_reinjection_control,
             .reinjection_mode = reinjection_mode,
+            .fec_enable = eff_fec_enable,
+            .fec_scheme = fec_scheme,
             .cc          = cc,
             .auth_key       = eff_auth_key,
             .n_users        = eff_n_users,

@@ -64,13 +64,19 @@ XQUIC_BUILD="$XQUIC_DIR/build"
 
 echo "=== Building xquic ==="
 mkdir -p "$XQUIC_BUILD"
-if [ ! -f "$XQUIC_BUILD/CMakeCache.txt" ]; then
-    cmake -S "$XQUIC_DIR" -B "$XQUIC_BUILD" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DSSL_TYPE=boringssl \
-        -DSSL_PATH="$BSSL_DIR" \
-        -DXQC_ENABLE_BBR2=ON
-fi
+# Always configure xquic so feature flags stay in sync across incremental builds.
+cmake -S "$XQUIC_DIR" -B "$XQUIC_BUILD" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DSSL_TYPE=boringssl \
+    -DSSL_PATH="$BSSL_DIR" \
+    -DXQC_ENABLE_BBR2=ON \
+    -DXQC_ENABLE_RENO=ON \
+    -DXQC_ENABLE_COPA=ON \
+    -DXQC_ENABLE_UNLIMITED=ON \
+    -DXQC_ENABLE_FEC=ON \
+    -DXQC_ENABLE_XOR=ON \
+    -DXQC_ENABLE_RSC=ON \
+    -DXQC_ENABLE_PKM=ON
 make -C "$XQUIC_BUILD" -j"$NPROC"
 
 # ---------- 3. mqvpn ----------

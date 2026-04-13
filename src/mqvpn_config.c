@@ -133,6 +133,7 @@ mqvpn_config_new(void)
     cfg->server_port = 443;
     cfg->scheduler = MQVPN_SCHED_WLB;
     cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
+    cfg->fec_scheme = MQVPN_FEC_SCHEME_REED_SOLOMON;
     cfg->log_level = MQVPN_LOG_INFO;
     cfg->multipath = 1;
     cfg->reconnect_enable = 1;
@@ -333,6 +334,29 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         }
     }
 
+    v = json_find_key(json_text, "fec_enable");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->fec_enable = iv;
+    }
+
+    v = json_find_key(json_text, "fec");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->fec_enable = iv;
+    }
+
+    v = json_find_key(json_text, "fec_scheme");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        if (strcmp(tmp, "xor") == 0) {
+            cfg->fec_scheme = MQVPN_FEC_SCHEME_XOR;
+        } else if (strcmp(tmp, "packet_mask") == 0 || strcmp(tmp, "packet_maskn") == 0) {
+            cfg->fec_scheme = MQVPN_FEC_SCHEME_PACKET_MASK;
+        } else if (strcmp(tmp, "galois_calculation") == 0) {
+            cfg->fec_scheme = MQVPN_FEC_SCHEME_GALOIS_CALCULATION;
+        } else {
+            cfg->fec_scheme = MQVPN_FEC_SCHEME_REED_SOLOMON;
+        }
+    }
+
     v = json_find_key(json_text, "reconnect_interval_sec");
     if (v && json_read_int(v, &iv) == MQVPN_OK) {
         cfg->reconnect_interval_sec = iv;
@@ -399,6 +423,22 @@ mqvpn_config_set_reinj_ctl(mqvpn_config_t *cfg, mqvpn_reinj_ctl_t ctl)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->reinj_ctl = ctl;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_fec(mqvpn_config_t *cfg, int enable)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->fec_enable = enable ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_fec_scheme(mqvpn_config_t *cfg, mqvpn_fec_scheme_t scheme)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->fec_scheme = scheme;
     return MQVPN_OK;
 }
 

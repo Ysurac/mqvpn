@@ -27,6 +27,8 @@ struct mqvpn_config_s {
     mqvpn_cc_t        cc;
     int reinjection_enable;
     mqvpn_reinj_ctl_t reinj_ctl;
+    int fec_enable;
+    mqvpn_fec_scheme_t fec_scheme;
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;
