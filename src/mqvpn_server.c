@@ -1616,11 +1616,36 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     conn_settings.mp_ping_on = 1;
     conn_settings.pacing_on = 1;
     conn_settings.max_pkt_out_size = 1400;
-    conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-    conn_settings.cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+    switch (cfg->cc) {
+    case MQVPN_CC_BBR:
+        conn_settings.cong_ctrl_callback = xqc_bbr_cb;
+        break;
+    case MQVPN_CC_CUBIC:
+        conn_settings.cong_ctrl_callback = xqc_cubic_cb;
+        break;
+    case MQVPN_CC_NEW_RENO:
+        conn_settings.cong_ctrl_callback = xqc_reno_cb;
+        break;
+    case MQVPN_CC_COPA:
+        conn_settings.cong_ctrl_callback = xqc_copa_cb;
+        break;
+    case MQVPN_CC_UNLIMITED:
+        conn_settings.cong_ctrl_callback = xqc_unlimited_cc_cb;
+        break;
+    default: /* MQVPN_CC_BBR2 */
+        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+        conn_settings.cc_params.cc_optimization_flags =
+            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+        break;
+    }
     if (cfg->scheduler == MQVPN_SCHED_WLB)
         conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
+    else if (cfg->scheduler == MQVPN_SCHED_BACKUP)
+        conn_settings.scheduler_callback = xqc_backup_scheduler_cb;
+    else if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC)
+        conn_settings.scheduler_callback = xqc_backup_fec_scheduler_cb;
+    else if (cfg->scheduler == MQVPN_SCHED_RAP)
+        conn_settings.scheduler_callback = xqc_rap_scheduler_cb;
     else
         conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;

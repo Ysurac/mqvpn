@@ -1302,15 +1302,40 @@ cli_start_connection(mqvpn_client_t *c)
     cs.mp_ping_on = multipath;
     cs.pacing_on = 1;
     cs.max_pkt_out_size = 1400;
-    cs.cong_ctrl_callback = xqc_bbr2_cb;
-    cs.cc_params.cc_optimization_flags =
-        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+    switch (c->config.cc) {
+    case MQVPN_CC_BBR:
+        cs.cong_ctrl_callback = xqc_bbr_cb;
+        break;
+    case MQVPN_CC_CUBIC:
+        cs.cong_ctrl_callback = xqc_cubic_cb;
+        break;
+    case MQVPN_CC_NEW_RENO:
+        cs.cong_ctrl_callback = xqc_reno_cb;
+        break;
+    case MQVPN_CC_COPA:
+        cs.cong_ctrl_callback = xqc_copa_cb;
+        break;
+    case MQVPN_CC_UNLIMITED:
+        cs.cong_ctrl_callback = xqc_unlimited_cc_cb;
+        break;
+    default: /* MQVPN_CC_BBR2 */
+        cs.cong_ctrl_callback = xqc_bbr2_cb;
+        cs.cc_params.cc_optimization_flags =
+            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+        break;
+    }
     cs.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     cs.so_sndbuf = 8 * 1024 * 1024;
     cs.idle_time_out = 120000;
     cs.init_idle_time_out = 10000;
     if (c->config.scheduler == MQVPN_SCHED_WLB)
         cs.scheduler_callback = xqc_wlb_scheduler_cb;
+    else if (c->config.scheduler == MQVPN_SCHED_BACKUP)
+        cs.scheduler_callback = xqc_backup_scheduler_cb;
+    else if (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
+        cs.scheduler_callback = xqc_backup_fec_scheduler_cb;
+    else if (c->config.scheduler == MQVPN_SCHED_RAP)
+        cs.scheduler_callback = xqc_rap_scheduler_cb;
     else
         cs.scheduler_callback = xqc_minrtt_scheduler_cb;
 

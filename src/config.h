@@ -51,6 +51,7 @@ typedef struct mqvpn_file_config_s {
     char backup_paths[MQVPN_CONFIG_MAX_PATHS][32]; /* failover-only interfaces */
     int n_backup_paths;
     char scheduler[16];
+    char cc[16];
 
     /* [Interface] — client reconnection */
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */

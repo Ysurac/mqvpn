@@ -419,6 +419,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
 
+    v = json_find_key(json_text, "cc");
+    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
+        mqvpn_copy_str(cfg->cc, sizeof(cfg->cc), s32);
+
     v = json_find_key(json_text, "reconnect");
     if (v && json_read_bool(v, &iv) == 0) cfg->reconnect = iv;
 
@@ -499,6 +503,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->cert_file, sizeof(cfg->cert_file), "server.crt");
     snprintf(cfg->key_file, sizeof(cfg->key_file), "server.key");
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
+    snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;

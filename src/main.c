@@ -1,3 +1,4 @@
+#include "libmqvpn.h"
 #include "log.h"
 #include "config.h"
 #include "json_mini.h"
@@ -64,7 +65,8 @@ usage(const char *prog)
         "  --control-port PORT       TCP port for JSON control API (server mode)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
         "  --status                  Query server status via control API and exit\n"
-        "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
+        "  --scheduler minrtt|wlb|backup|backup_fec|rap  Multipath scheduler (default wlb)\n"
+        "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited  Congestion control (default bbr2)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --help                    Show this help\n"
@@ -139,6 +141,7 @@ main(int argc, char *argv[])
         {"backup-path", required_argument, NULL, 'b'},
         {"dns",         required_argument, NULL, 'd'},
         {"scheduler",   required_argument, NULL, 'S'},
+        {"cc",          required_argument, NULL, 'Q'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
         {"no-reconnect",        no_argument,      NULL, 'R'},
@@ -172,6 +175,7 @@ main(int argc, char *argv[])
     int         genkey      = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
+    const char *cc_str        = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -188,7 +192,7 @@ main(int argc, char *argv[])
     int         status_mode  = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:M:L:X:x:wWh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:Q:M:L:X:x:wWh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -250,6 +254,7 @@ main(int argc, char *argv[])
             }
             break;
         case 'S': scheduler_str = optarg; break;
+        case 'Q': cc_str = optarg; break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -294,6 +299,7 @@ main(int argc, char *argv[])
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
+    const char *eff_cc        = cc_str        ? cc_str        : file_cfg.cc;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
     const char *eff_subnet = subnet ? subnet : file_cfg.subnet;
     const char *eff_subnet6 =
@@ -364,8 +370,31 @@ main(int argc, char *argv[])
     int scheduler = MQVPN_SCHED_MINRTT;
     if (strcmp(eff_scheduler, "wlb") == 0) {
         scheduler = MQVPN_SCHED_WLB;
+    } else if (strcmp(eff_scheduler, "backup") == 0) {
+        scheduler = MQVPN_SCHED_BACKUP;
+    } else if (strcmp(eff_scheduler, "backup_fec") == 0) {
+        scheduler = MQVPN_SCHED_BACKUP_FEC;
+    } else if (strcmp(eff_scheduler, "rap") == 0) {
+        scheduler = MQVPN_SCHED_RAP;
     } else if (strcmp(eff_scheduler, "minrtt") != 0) {
-        fprintf(stderr, "error: --scheduler must be 'minrtt' or 'wlb'\n");
+        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', 'backup_fec' or 'rap'\n");
+        return 1;
+    }
+
+    /* Parse congestion control */
+    int cc = MQVPN_CC_BBR2;
+    if (strcmp(eff_cc, "bbr") == 0) {
+        cc = MQVPN_CC_BBR;
+    } else if (strcmp(eff_cc, "cubic") == 0) {
+        cc = MQVPN_CC_CUBIC;
+    } else if (strcmp(eff_cc, "new_reno") == 0) {
+        cc = MQVPN_CC_NEW_RENO;
+    } else if (strcmp(eff_cc, "copa") == 0) {
+        cc = MQVPN_CC_COPA;
+    } else if (strcmp(eff_cc, "unlimited") == 0) {
+        cc = MQVPN_CC_UNLIMITED;
+    } else if (strcmp(eff_cc, "bbr2") != 0) {
+        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', 'new_reno', 'copa' or 'unlimited'\n");
         return 1;
     }
 
@@ -430,6 +459,7 @@ main(int argc, char *argv[])
             .n_paths = n_paths,
             .n_backup_paths = n_backup_paths,
             .scheduler = scheduler,
+            .cc = cc,
             .auth_key = eff_auth_key,
             .n_dns = n_dns,
             .reconnect = eff_reconnect,
@@ -481,6 +511,7 @@ main(int argc, char *argv[])
             .key_file    = eff_key,
             .log_level   = xqc_log_level,
             .scheduler   = scheduler,
+            .cc          = cc,
             .auth_key       = eff_auth_key,
             .n_users        = eff_n_users,
             .max_clients    = eff_max_clients,

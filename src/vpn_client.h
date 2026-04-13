@@ -16,6 +16,7 @@ typedef struct mqvpn_client_cfg_s {
     const char *backup_ifaces[MQVPN_MAX_PATH_IFACES]; /* failover-only interfaces */
     int n_backup_paths;         /* number of backup interfaces */
     int scheduler;              /* 0=minrtt, 1=wlb (default) */
+    int cc;                     /* 0=bbr2 (default), 1=bbr, 2=cubic, 3=new_reno, 4=copa, 5=unlimited */
     const char *auth_key;       /* PSK for server authentication (NULL = no auth) */
     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
     int n_dns;                  /* number of DNS servers */

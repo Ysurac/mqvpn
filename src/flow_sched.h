@@ -10,10 +10,6 @@
 
 #include <stdint.h>
 
-/* Scheduler mode */
-#define MQVPN_SCHED_MINRTT 0
-#define MQVPN_SCHED_WLB    1 /* WLB with flow-affinity WRR (default) */
-
 /* Sentinel: WRR without flow pinning (for UDP/QUIC — no reordering concern) */
 #define MQVPN_FLOW_HASH_UNPINNED 0xFFFFFFFFU
 

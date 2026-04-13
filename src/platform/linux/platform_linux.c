@@ -528,6 +528,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
                                                             : MQVPN_SCHED_MINRTT);
+    mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -980,6 +981,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
     mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
                                                             : MQVPN_SCHED_MINRTT);
+    mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
 
     mqvpn_log_level_t lib_log;
     if (cfg->log_level >= 5)

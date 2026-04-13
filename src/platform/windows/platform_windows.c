@@ -445,6 +445,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
                                                             : MQVPN_SCHED_MINRTT);
+    mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
