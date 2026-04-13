@@ -63,10 +63,9 @@ multi_client_cleanup() {
 
     sleep 1
 
-    # Delete client namespaces and veths
+    # Delete client namespaces (veth ends are destroyed with the netns)
     for i in $(seq 1 "$NUM_CLIENTS"); do
         ip netns del "ci-stress-c${i}" 2>/dev/null || true
-        ip link del "ci-s-c${i}a" 2>/dev/null || true
     done
 
     # Delete server namespace (bridge + veths cleaned up with it)
@@ -91,7 +90,6 @@ ci_stress_cleanup_stale
 # Also clean any stale multi-client state
 for i in $(seq 1 "$NUM_CLIENTS"); do
     ip netns del "ci-stress-c${i}" 2>/dev/null || true
-    ip link del "ci-s-c${i}a" 2>/dev/null || true
 done
 ip netns del "$SERVER_NS" 2>/dev/null || true
 
@@ -112,6 +110,7 @@ ip netns add "$SERVER_NS"
 ip netns exec "$SERVER_NS" ip link set lo up
 ip netns exec "$SERVER_NS" ip link add "$BRIDGE_NAME" type bridge
 ip netns exec "$SERVER_NS" ip addr add "${SERVER_IP}/24" dev "$BRIDGE_NAME"
+ip netns exec "$SERVER_NS" ip link set "$BRIDGE_NAME" type bridge stp_state 0
 ip netns exec "$SERVER_NS" ip link set "$BRIDGE_NAME" up
 
 echo "OK: server netns created (${SERVER_IP} on ${BRIDGE_NAME})"
