@@ -33,7 +33,8 @@ FAULT_RECOVER_SEC=40
 IPERF_PARALLEL=4
 SCHEDULERS="wlb minrtt"
 
-TTR_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
+TTF_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
+TTR_DEFINITION="seconds from fault recovery until throughput reaches 90% of pre-fault average (full recovery)"
 
 trap ci_bench_cleanup EXIT
 
@@ -51,6 +52,7 @@ echo "================================================================"
 
 declare -A RESULT_PRE_FAULT
 declare -A RESULT_DEGRADED
+declare -A RESULT_TTF
 declare -A RESULT_TTR
 declare -A RESULT_POST_RECOVER
 
@@ -142,14 +144,23 @@ degraded = [iv['mbps'] for iv in intervals
             if iv['time_sec'] > fault_inject and iv['time_sec'] <= fault_recover]
 degraded_avg = sum(degraded) / len(degraded) if degraded else 0
 
-# TTR (fallback): time from fault injection until throughput stabilizes on
-# the surviving path. Threshold = 50% of Path B capacity (80 Mbps) = 40 Mbps.
+# TTF (Time-To-Fallback): time from fault injection until throughput reaches
+# 50% of surviving path capacity. Measures how fast traffic shifts to Path B.
 surviving_path_mbps = 80  # Path B rate
-threshold = surviving_path_mbps * 0.5
+ttf_threshold = surviving_path_mbps * 0.5
+ttf = None
+for iv in intervals:
+    if iv['time_sec'] > fault_inject and iv['mbps'] >= ttf_threshold:
+        ttf = round(iv['time_sec'] - fault_inject, 2)
+        break
+
+# TTR (Time-To-Recovery): time from fault recovery until throughput reaches
+# 90% of pre-fault average. Measures how fast full multipath resumes.
+ttr_threshold = pre_fault_avg * 0.9
 ttr = None
 for iv in intervals:
-    if iv['time_sec'] > fault_inject and iv['mbps'] >= threshold:
-        ttr = round(iv['time_sec'] - fault_inject, 2)
+    if iv['time_sec'] > fault_recover and iv['mbps'] >= ttr_threshold:
+        ttr = round(iv['time_sec'] - fault_recover, 2)
         break
 
 # Post-recover average (last 10s of test — path revalidation takes ~10-15s)
@@ -159,22 +170,26 @@ post_recover_avg = sum(post_recover) / len(post_recover) if post_recover else 0
 
 print(f'{pre_fault_avg:.1f}')
 print(f'{degraded_avg:.1f}')
+print(f'{ttf}')
 print(f'{ttr}')
 print(f'{post_recover_avg:.1f}')
 ")
 
     PRE_FAULT=$(echo "$PARSE_RESULT" | sed -n '1p')
     DEGRADED=$(echo "$PARSE_RESULT" | sed -n '2p')
-    TTR=$(echo "$PARSE_RESULT" | sed -n '3p')
-    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '4p')
+    TTF=$(echo "$PARSE_RESULT" | sed -n '3p')
+    TTR=$(echo "$PARSE_RESULT" | sed -n '4p')
+    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '5p')
 
     echo "  Pre-fault avg:     ${PRE_FAULT} Mbps"
     echo "  Degraded avg:      ${DEGRADED} Mbps"
+    echo "  TTF:               ${TTF} sec"
     echo "  TTR:               ${TTR} sec"
     echo "  Post-recover avg:  ${POST_RECOVER} Mbps"
 
     RESULT_PRE_FAULT[$SCHED]="$PRE_FAULT"
     RESULT_DEGRADED[$SCHED]="$DEGRADED"
+    RESULT_TTF[$SCHED]="$TTF"
     RESULT_TTR[$SCHED]="$TTR"
     RESULT_POST_RECOVER[$SCHED]="$POST_RECOVER"
 
@@ -192,9 +207,13 @@ done
 TIMESTAMP="$(date -Iseconds)"
 OUTPUT_FILE="${CI_BENCH_RESULTS}/failover_$(date +%Y%m%d_%H%M%S).json"
 
-# Convert "None" TTR values to JSON null
+# Convert "None" values to JSON null
+ttf_wlb="${RESULT_TTF[wlb]}"
+ttf_minrtt="${RESULT_TTF[minrtt]}"
 ttr_wlb="${RESULT_TTR[wlb]}"
 ttr_minrtt="${RESULT_TTR[minrtt]}"
+[ "$ttf_wlb" = "None" ] && ttf_wlb="null"
+[ "$ttf_minrtt" = "None" ] && ttf_minrtt="null"
 [ "$ttr_wlb" = "None" ] && ttr_wlb="null"
 [ "$ttr_minrtt" = "None" ] && ttr_minrtt="null"
 
@@ -213,16 +232,19 @@ result = {
         'wlb': {
             'pre_fault_avg_mbps': ${RESULT_PRE_FAULT[wlb]},
             'degraded_avg_mbps': ${RESULT_DEGRADED[wlb]},
+            'ttf_sec': ${ttf_wlb},
             'ttr_sec': ${ttr_wlb},
             'post_recover_avg_mbps': ${RESULT_POST_RECOVER[wlb]}
         },
         'minrtt': {
             'pre_fault_avg_mbps': ${RESULT_PRE_FAULT[minrtt]},
             'degraded_avg_mbps': ${RESULT_DEGRADED[minrtt]},
+            'ttf_sec': ${ttf_minrtt},
             'ttr_sec': ${ttr_minrtt},
             'post_recover_avg_mbps': ${RESULT_POST_RECOVER[minrtt]}
         }
     },
+    'ttf_definition': '${TTF_DEFINITION}',
     'ttr_definition': '${TTR_DEFINITION}'
 }
 

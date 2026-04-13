@@ -8,13 +8,22 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 
 const { loading, error, rawRows, failoverRows, aggregateRows } = usePerfData('/perf-data')
 
-const schedFilter = ref('wlb')
-const streamsFilter = ref('64')
+const foSchedFilter = ref('wlb')
+
+const filteredFailoverRows = computed(() => {
+  return failoverRows.value.filter(r => {
+    if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    return true
+  })
+})
+
+const aggSchedFilter = ref('wlb')
+const aggStreamsFilter = ref('64')
 
 const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
-    if (schedFilter.value && r.scheduler !== schedFilter.value) return false
-    if (streamsFilter.value && String(r.streams) !== streamsFilter.value) return false
+    if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
+    if (aggStreamsFilter.value && String(r.streams) !== aggStreamsFilter.value) return false
     return true
   })
 })
@@ -56,39 +65,46 @@ const filteredAggregateRows = computed(() => {
   </tbody>
 </table>
 
-## Failover TTR
+## Failover
 
 <div v-if="failoverRows.length === 0">No data yet.</div>
-<table v-else>
+<template v-else>
+<div class="filter-bar">
+  <label>Scheduler:
+    <select v-model="foSchedFilter">
+      <option value="">All</option>
+      <option value="wlb">WLB</option>
+      <option value="minrtt">MinRTT</option>
+    </select>
+  </label>
+</div>
+<table>
   <thead>
     <tr>
       <th>Commit</th>
       <th>Date</th>
-      <th>WLB TTR</th>
-      <th>MinRTT TTR</th>
-      <th>WLB Pre-fault</th>
-      <th>WLB Degraded</th>
-      <th>WLB Post-recover</th>
-      <th>MinRTT Pre-fault</th>
-      <th>MinRTT Degraded</th>
-      <th>MinRTT Post-recover</th>
+      <th>Scheduler</th>
+      <th>TTF (s)</th>
+      <th>TTR (s)</th>
+      <th>Pre-fault (Mbps)</th>
+      <th>Degraded (Mbps)</th>
+      <th>Post-recover (Mbps)</th>
     </tr>
   </thead>
   <tbody>
-    <tr v-for="(r, i) in failoverRows" :key="'fo-' + i">
+    <tr v-for="(r, i) in filteredFailoverRows" :key="'fo-' + i">
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
-      <td>{{ r.wlb_ttr }}s</td>
-      <td>{{ r.minrtt_ttr }}s</td>
-      <td>{{ r.wlb_pre }} Mbps</td>
-      <td>{{ r.wlb_degraded }} Mbps</td>
-      <td>{{ r.wlb_post }} Mbps</td>
-      <td>{{ r.minrtt_pre }} Mbps</td>
-      <td>{{ r.minrtt_degraded }} Mbps</td>
-      <td>{{ r.minrtt_post }} Mbps</td>
+      <td>{{ r.scheduler }}</td>
+      <td>{{ r.ttf }}</td>
+      <td>{{ r.ttr }}</td>
+      <td>{{ r.pre }}</td>
+      <td>{{ r.degraded }}</td>
+      <td>{{ r.post }}</td>
     </tr>
   </tbody>
 </table>
+</template>
 
 ## Bandwidth Aggregation
 
@@ -97,14 +113,14 @@ const filteredAggregateRows = computed(() => {
 
 <div class="filter-bar">
   <label>Scheduler:
-    <select v-model="schedFilter">
+    <select v-model="aggSchedFilter">
       <option value="">All</option>
       <option value="wlb">WLB</option>
       <option value="minrtt">MinRTT</option>
     </select>
   </label>
   <label>Streams:
-    <select v-model="streamsFilter">
+    <select v-model="aggStreamsFilter">
       <option value="">All</option>
       <option value="1">1</option>
       <option value="4">4</option>

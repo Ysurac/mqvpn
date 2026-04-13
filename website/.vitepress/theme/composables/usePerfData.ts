@@ -97,20 +97,19 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     const rows: any[] = []
     for (const item of items.value) {
       if (item.data.test !== 'failover') continue
-      const w = item.data.results?.wlb || {}
-      const m = item.data.results?.minrtt || {}
-      rows.push({
-        commit: fmtCommit(item.commit),
-        date: fmtDate(item.timestamp),
-        wlb_ttr: fmtNum(w.ttr_sec, 2),
-        minrtt_ttr: fmtNum(m.ttr_sec, 2),
-        wlb_pre: fmtNum(w.pre_fault_avg_mbps),
-        wlb_degraded: fmtNum(w.degraded_avg_mbps),
-        wlb_post: fmtNum(w.post_recover_avg_mbps),
-        minrtt_pre: fmtNum(m.pre_fault_avg_mbps),
-        minrtt_degraded: fmtNum(m.degraded_avg_mbps),
-        minrtt_post: fmtNum(m.post_recover_avg_mbps),
-      })
+      for (const sched of ['wlb', 'minrtt']) {
+        const d = item.data.results?.[sched] || {}
+        rows.push({
+          commit: fmtCommit(item.commit),
+          date: fmtDate(item.timestamp),
+          scheduler: sched,
+          ttf: fmtNum(d.ttf_sec, 2),
+          ttr: fmtNum(d.ttr_sec, 2),
+          pre: fmtNum(d.pre_fault_avg_mbps),
+          degraded: fmtNum(d.degraded_avg_mbps),
+          post: fmtNum(d.post_recover_avg_mbps),
+        })
+      }
     }
     return rows
   })

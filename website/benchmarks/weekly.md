@@ -12,6 +12,15 @@ const {
   multipathSchedulerRows, flowScalingRows, udpSchedulerRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
+// Failover filter
+const foSchedFilter = ref('wlb')
+const filteredFailoverRows = computed(() => {
+  return failoverRows.value.filter(r => {
+    if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    return true
+  })
+})
+
 // Aggregation filters
 const aggSchedFilter = ref('wlb')
 const aggStreamsFilter = ref('64')
@@ -81,39 +90,22 @@ const filteredUdpRows = computed(() => {
   </tbody>
 </table>
 
-## Failover TTR
+## Failover
 
 <div v-if="failoverRows.length === 0">No data.</div>
-<table v-else>
-  <thead>
-    <tr>
-      <th>Commit</th>
-      <th>Date</th>
-      <th>WLB TTR</th>
-      <th>MinRTT TTR</th>
-      <th>WLB Pre-fault</th>
-      <th>WLB Degraded</th>
-      <th>WLB Post-recover</th>
-      <th>MinRTT Pre-fault</th>
-      <th>MinRTT Degraded</th>
-      <th>MinRTT Post-recover</th>
-    </tr>
-  </thead>
+<template v-else>
+<div class="filter-bar">
+  <label>Scheduler: <select v-model="foSchedFilter"><option value="">All</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
+</div>
+<table>
+  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>TTF (s)</th><th>TTR (s)</th><th>Pre-fault (Mbps)</th><th>Degraded (Mbps)</th><th>Post-recover (Mbps)</th></tr></thead>
   <tbody>
-    <tr v-for="(r, i) in failoverRows" :key="'fo-' + i">
-      <td><code>{{ r.commit }}</code></td>
-      <td>{{ r.date }}</td>
-      <td>{{ r.wlb_ttr }}s</td>
-      <td>{{ r.minrtt_ttr }}s</td>
-      <td>{{ r.wlb_pre }} Mbps</td>
-      <td>{{ r.wlb_degraded }} Mbps</td>
-      <td>{{ r.wlb_post }} Mbps</td>
-      <td>{{ r.minrtt_pre }} Mbps</td>
-      <td>{{ r.minrtt_degraded }} Mbps</td>
-      <td>{{ r.minrtt_post }} Mbps</td>
+    <tr v-for="(r, i) in filteredFailoverRows" :key="'fo-' + i">
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.post }}</td>
     </tr>
   </tbody>
 </table>
+</template>
 
 ## Bandwidth Aggregation
 
