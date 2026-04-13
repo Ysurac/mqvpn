@@ -115,6 +115,7 @@ ip link set "$SERVER_VETH_IN" netns "$SERVER_NS"
 ip netns exec "$SERVER_NS" ip addr add "${SERVER_IP}/24" dev "$SERVER_VETH_IN"
 ip netns exec "$SERVER_NS" ip link set "$SERVER_VETH_IN" up
 ip netns exec "$SERVER_NS" ip link set lo up
+ip netns exec "$SERVER_NS" sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
 ip addr add "${ROUTER_SERVER_IP}/24" dev "$SERVER_VETH_OUT"
 ip link set "$SERVER_VETH_OUT" up
@@ -194,12 +195,28 @@ echo "OK: ${NUM_CLIENTS} client namespaces created"
 # ── Enable IP forwarding in default netns ──
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-echo "OK: ip_forward enabled in default netns"
+# Disable reverse path filtering on all interfaces used for routing
+# (rp_filter drops packets arriving on "unexpected" interfaces)
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf."$SERVER_VETH_OUT".rp_filter=0 >/dev/null
+for i in $(seq 1 "$NUM_CLIENTS"); do
+    sysctl -w "net.ipv4.conf.ci-s-c${i}b.rp_filter=0" >/dev/null
+done
+echo "OK: ip_forward enabled, rp_filter disabled in default netns"
 
 # ── Verify basic connectivity ──
 
 echo "Verifying connectivity (client 1 -> server)..."
-ip netns exec "ci-stress-c1" ping -c 1 -W 2 "$SERVER_IP" >/dev/null
+if ! ip netns exec "ci-stress-c1" ping -c 1 -W 5 "$SERVER_IP"; then
+    echo "DEBUG: client 1 routes:"
+    ip netns exec "ci-stress-c1" ip route
+    echo "DEBUG: default ns routes:"
+    ip route
+    echo "DEBUG: server ns routes:"
+    ip netns exec "$SERVER_NS" ip route
+    echo "ERROR: client 1 cannot reach server"
+    exit 1
+fi
 echo "OK: routing works"
 
 # ── Start 60 VPN clients ──
