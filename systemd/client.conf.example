@@ -25,6 +25,8 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
+# ReinjectionControl = true
+# ReinjectionMode = default   # default|deadline|dgram
 # Path = eth0
 # Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down

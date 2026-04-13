@@ -12,6 +12,8 @@
   "route_via_server": false,
   "no_routes": false,
   "scheduler": "wlb",
+  "reinjection_control": true,
+  "reinjection_mode": "deadline",
   "paths": ["eth0", "wlan0"],
   "backup_paths": [],
   "control_port": 0,

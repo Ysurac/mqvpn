@@ -526,8 +526,17 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         lib_log = MQVPN_LOG_ERROR;
     mqvpn_config_set_log_level(lib_cfg, lib_log);
 
-    mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
-                                                            : MQVPN_SCHED_MINRTT);
+    mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
+    switch (cfg->scheduler) {
+    case MQVPN_SCHED_WLB: sched = MQVPN_SCHED_WLB; break;
+    case MQVPN_SCHED_BACKUP: sched = MQVPN_SCHED_BACKUP; break;
+    case MQVPN_SCHED_BACKUP_FEC: sched = MQVPN_SCHED_BACKUP_FEC; break;
+    case MQVPN_SCHED_RAP: sched = MQVPN_SCHED_RAP; break;
+    default: break;
+    }
+    mqvpn_config_set_scheduler(lib_cfg, sched);
+    mqvpn_config_set_reinjection(lib_cfg, cfg->reinjection_control);
+    mqvpn_config_set_reinj_ctl(lib_cfg, (mqvpn_reinj_ctl_t)cfg->reinjection_mode);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
 
     /* Create callbacks */
@@ -979,8 +988,17 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         }
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
-    mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
-                                                            : MQVPN_SCHED_MINRTT);
+    mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
+    switch (cfg->scheduler) {
+    case MQVPN_SCHED_WLB: sched = MQVPN_SCHED_WLB; break;
+    case MQVPN_SCHED_BACKUP: sched = MQVPN_SCHED_BACKUP; break;
+    case MQVPN_SCHED_BACKUP_FEC: sched = MQVPN_SCHED_BACKUP_FEC; break;
+    case MQVPN_SCHED_RAP: sched = MQVPN_SCHED_RAP; break;
+    default: break;
+    }
+    mqvpn_config_set_scheduler(lib_cfg, sched);
+    mqvpn_config_set_reinjection(lib_cfg, cfg->reinjection_control);
+    mqvpn_config_set_reinj_ctl(lib_cfg, (mqvpn_reinj_ctl_t)cfg->reinjection_mode);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
 
     mqvpn_log_level_t lib_log;

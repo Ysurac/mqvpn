@@ -15,6 +15,7 @@
 #include <assert.h>
 #include <arpa/inet.h>
 
+#include "../include/libmqvpn.h"
 #include "flow_sched.h"
 
 static int tests_passed = 0;

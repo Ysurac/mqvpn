@@ -22,5 +22,7 @@ MaxClients = 64
 # ControlAddr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
 
 [Multipath]
-# Scheduler: wlb (weighted load balancing) or minrtt (lowest RTT)
+# Scheduler: minrtt|wlb|backup|backup_fec|rap
 Scheduler = wlb
+# ReinjectionControl = true
+# ReinjectionMode = default   # default|deadline|dgram

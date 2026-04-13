@@ -1300,6 +1300,11 @@ cli_start_connection(mqvpn_client_t *c)
     cs.enable_multipath = multipath;
     cs.ping_on = 1;
     cs.mp_ping_on = multipath;
+    cs.mp_enable_reinjection = (multipath && c->config.reinjection_enable) ?
+                               (XQC_REINJ_UNACK_AFTER_SCHED |
+                                XQC_REINJ_UNACK_BEFORE_SCHED |
+                                XQC_REINJ_UNACK_AFTER_SEND)
+                               : 0;
     cs.pacing_on = 1;
     cs.max_pkt_out_size = 1400;
     switch (c->config.cc) {
@@ -1310,13 +1315,25 @@ cli_start_connection(mqvpn_client_t *c)
         cs.cong_ctrl_callback = xqc_cubic_cb;
         break;
     case MQVPN_CC_NEW_RENO:
+#ifdef XQC_ENABLE_RENO
         cs.cong_ctrl_callback = xqc_reno_cb;
+#else
+        cs.cong_ctrl_callback = xqc_bbr2_cb;
+#endif
         break;
     case MQVPN_CC_COPA:
+#ifdef XQC_ENABLE_COPA
         cs.cong_ctrl_callback = xqc_copa_cb;
+#else
+        cs.cong_ctrl_callback = xqc_bbr2_cb;
+#endif
         break;
     case MQVPN_CC_UNLIMITED:
+#ifdef XQC_ENABLE_UNLIMITED
         cs.cong_ctrl_callback = xqc_unlimited_cc_cb;
+#else
+        cs.cong_ctrl_callback = xqc_bbr2_cb;
+#endif
         break;
     default: /* MQVPN_CC_BBR2 */
         cs.cong_ctrl_callback = xqc_bbr2_cb;
@@ -1338,6 +1355,13 @@ cli_start_connection(mqvpn_client_t *c)
         cs.scheduler_callback = xqc_rap_scheduler_cb;
     else
         cs.scheduler_callback = xqc_minrtt_scheduler_cb;
+
+    if (c->config.reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
+        cs.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
+    else if (c->config.reinj_ctl == MQVPN_REINJ_CTL_DGRAM)
+        cs.reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
+    else
+        cs.reinj_ctl_callback = xqc_default_reinj_ctl_cb;
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));

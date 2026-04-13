@@ -132,6 +132,7 @@ mqvpn_config_new(void)
     /* Defaults */
     cfg->server_port = 443;
     cfg->scheduler = MQVPN_SCHED_WLB;
+    cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
     cfg->log_level = MQVPN_LOG_INFO;
     cfg->multipath = 1;
     cfg->reconnect_enable = 1;
@@ -300,6 +301,38 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->reconnect_enable = iv;
     }
 
+    v = json_find_key(json_text, "reinjection_enable");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->reinjection_enable = iv;
+    }
+
+    v = json_find_key(json_text, "reinjection_control");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->reinjection_enable = iv;
+    }
+
+    v = json_find_key(json_text, "reinjection_mode");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        if (strcmp(tmp, "deadline") == 0) {
+            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEADLINE;
+        } else if (strcmp(tmp, "dgram") == 0) {
+            cfg->reinj_ctl = MQVPN_REINJ_CTL_DGRAM;
+        } else {
+            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
+        }
+    }
+
+    v = json_find_key(json_text, "reinj_ctl");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        if (strcmp(tmp, "deadline") == 0) {
+            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEADLINE;
+        } else if (strcmp(tmp, "dgram") == 0) {
+            cfg->reinj_ctl = MQVPN_REINJ_CTL_DGRAM;
+        } else {
+            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
+        }
+    }
+
     v = json_find_key(json_text, "reconnect_interval_sec");
     if (v && json_read_int(v, &iv) == MQVPN_OK) {
         cfg->reconnect_interval_sec = iv;
@@ -350,6 +383,22 @@ mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->cc = cc;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reinjection(mqvpn_config_t *cfg, int enable)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reinjection_enable = enable ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reinj_ctl(mqvpn_config_t *cfg, mqvpn_reinj_ctl_t ctl)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->reinj_ctl = ctl;
     return MQVPN_OK;
 }
 

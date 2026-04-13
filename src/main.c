@@ -66,6 +66,8 @@ usage(const char *prog)
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
         "  --status                  Query server status via control API and exit\n"
         "  --scheduler minrtt|wlb|backup|backup_fec|rap  Multipath scheduler (default wlb)\n"
+        "  --reinjection-control      Enable multipath reinjection control\n"
+        "  --reinjection-mode default|deadline|dgram  Reinjection control mode (default: default)\n"
         "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited  Congestion control (default bbr2)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
@@ -141,6 +143,8 @@ main(int argc, char *argv[])
         {"backup-path", required_argument, NULL, 'b'},
         {"dns",         required_argument, NULL, 'd'},
         {"scheduler",   required_argument, NULL, 'S'},
+        {"reinjection-control", no_argument, NULL, 'Y'},
+        {"reinjection-mode", required_argument, NULL, 'Z'},
         {"cc",          required_argument, NULL, 'Q'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level",   required_argument, NULL, 'L'},
@@ -175,6 +179,8 @@ main(int argc, char *argv[])
     int         genkey      = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
+    int reinjection_control = -1; /* -1 means not set by CLI */
+    const char *reinjection_mode_str = NULL;
     const char *cc_str        = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
@@ -192,7 +198,7 @@ main(int argc, char *argv[])
     int         status_mode  = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:Q:M:L:X:x:wWh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:YZ:Q:M:L:X:x:wWh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -254,6 +260,8 @@ main(int argc, char *argv[])
             }
             break;
         case 'S': scheduler_str = optarg; break;
+        case 'Y': reinjection_control = 1; break;
+        case 'Z': reinjection_mode_str = optarg; break;
         case 'Q': cc_str = optarg; break;
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
@@ -299,6 +307,12 @@ main(int argc, char *argv[])
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
+    int eff_reinjection_control = reinjection_control >= 0
+                                  ? reinjection_control
+                                  : file_cfg.reinjection_control;
+    const char *eff_reinjection_mode = reinjection_mode_str
+                                       ? reinjection_mode_str
+                                       : file_cfg.reinjection_mode;
     const char *eff_cc        = cc_str        ? cc_str        : file_cfg.cc;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
     const char *eff_subnet = subnet ? subnet : file_cfg.subnet;
@@ -398,6 +412,17 @@ main(int argc, char *argv[])
         return 1;
     }
 
+    int reinjection_mode = MQVPN_REINJ_CTL_DEFAULT;
+    if (strcmp(eff_reinjection_mode, "deadline") == 0) {
+        reinjection_mode = MQVPN_REINJ_CTL_DEADLINE;
+    } else if (strcmp(eff_reinjection_mode, "dgram") == 0) {
+        reinjection_mode = MQVPN_REINJ_CTL_DGRAM;
+    } else if (strcmp(eff_reinjection_mode, "default") != 0) {
+        fprintf(stderr,
+                "error: --reinjection-mode must be 'default', 'deadline' or 'dgram'\n");
+        return 1;
+    }
+
     /* Map our log level to xquic log level (roughly) */
     int xqc_log_level;
     switch (log_level) {
@@ -459,6 +484,8 @@ main(int argc, char *argv[])
             .n_paths = n_paths,
             .n_backup_paths = n_backup_paths,
             .scheduler = scheduler,
+            .reinjection_control = eff_reinjection_control,
+            .reinjection_mode = reinjection_mode,
             .cc = cc,
             .auth_key = eff_auth_key,
             .n_dns = n_dns,
@@ -511,6 +538,8 @@ main(int argc, char *argv[])
             .key_file    = eff_key,
             .log_level   = xqc_log_level,
             .scheduler   = scheduler,
+            .reinjection_control = eff_reinjection_control,
+            .reinjection_mode = reinjection_mode,
             .cc          = cc,
             .auth_key       = eff_auth_key,
             .n_users        = eff_n_users,

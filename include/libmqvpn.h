@@ -108,6 +108,12 @@ typedef enum {
 } mqvpn_scheduler_t;
 
 typedef enum {
+    MQVPN_REINJ_CTL_DEFAULT  = 0,
+    MQVPN_REINJ_CTL_DEADLINE = 1,
+    MQVPN_REINJ_CTL_DGRAM    = 2,
+} mqvpn_reinj_ctl_t;
+
+typedef enum {
     MQVPN_STATE_IDLE = 0,
     MQVPN_STATE_CONNECTING = 1,
     MQVPN_STATE_AUTHENTICATING = 2,
@@ -314,6 +320,8 @@ MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg,
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
+MQVPN_API int mqvpn_config_set_reinjection(mqvpn_config_t *cfg, int enable);
+MQVPN_API int mqvpn_config_set_reinj_ctl(mqvpn_config_t *cfg, mqvpn_reinj_ctl_t ctl);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,

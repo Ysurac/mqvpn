@@ -1614,6 +1614,11 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     conn_settings.proto_version = XQC_VERSION_V1;
     conn_settings.enable_multipath = 1;
     conn_settings.mp_ping_on = 1;
+    conn_settings.mp_enable_reinjection = cfg->reinjection_enable ?
+                                          (XQC_REINJ_UNACK_AFTER_SCHED |
+                                           XQC_REINJ_UNACK_BEFORE_SCHED |
+                                           XQC_REINJ_UNACK_AFTER_SEND)
+                                          : 0;
     conn_settings.pacing_on = 1;
     conn_settings.max_pkt_out_size = 1400;
     switch (cfg->cc) {
@@ -1624,13 +1629,25 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         conn_settings.cong_ctrl_callback = xqc_cubic_cb;
         break;
     case MQVPN_CC_NEW_RENO:
+#ifdef XQC_ENABLE_RENO
         conn_settings.cong_ctrl_callback = xqc_reno_cb;
+#else
+        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+#endif
         break;
     case MQVPN_CC_COPA:
+#ifdef XQC_ENABLE_COPA
         conn_settings.cong_ctrl_callback = xqc_copa_cb;
+#else
+        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+#endif
         break;
     case MQVPN_CC_UNLIMITED:
+#ifdef XQC_ENABLE_UNLIMITED
         conn_settings.cong_ctrl_callback = xqc_unlimited_cc_cb;
+#else
+        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
+#endif
         break;
     default: /* MQVPN_CC_BBR2 */
         conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
@@ -1648,6 +1665,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         conn_settings.scheduler_callback = xqc_rap_scheduler_cb;
     else
         conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+
+    if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
+        conn_settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
+    else if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DGRAM)
+        conn_settings.reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
+    else
+        conn_settings.reinj_ctl_callback = xqc_default_reinj_ctl_cb;
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
     conn_settings.idle_time_out = 120000;

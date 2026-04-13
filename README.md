@@ -71,6 +71,8 @@ User = bob:bob-secret
 
 [Multipath]
 Scheduler = wlb
+# ReinjectionControl = true
+# ReinjectionMode = default   # default|deadline|dgram
 
 [Control]
 # Port = 9090          # enable JSON control API on this TCP port
@@ -92,6 +94,8 @@ DNS = 1.1.1.1, 8.8.8.8
 
 [Multipath]
 Scheduler = wlb
+# ReinjectionControl = true
+# ReinjectionMode = deadline  # default|deadline|dgram
 Path = eth0
 Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
@@ -144,6 +148,8 @@ Client example:
     "route_via_server": false,
     "no_routes": false,
     "scheduler": "wlb",
+    "reinjection_control": true,
+    "reinjection_mode": "deadline",
     "control_port": 0,
     "control_addr": "127.0.0.1"
 }
@@ -409,7 +415,9 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-  --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+    --scheduler minrtt|wlb|backup|backup_fec|rap Multipath scheduler (default: wlb)
+    --reinjection-control  Enable multipath reinjection control
+    --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)
   --route-via-server     Add host route to server IP before setting default route (client)
   --no-routes            Skip all automatic route setup; manage routes manually (client)
   --control-port PORT    TCP port for JSON control API (server)
