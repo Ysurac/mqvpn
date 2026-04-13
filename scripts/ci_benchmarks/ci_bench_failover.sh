@@ -212,15 +212,15 @@ done
 TIMESTAMP="$(date -Iseconds)"
 OUTPUT_FILE="${CI_BENCH_RESULTS}/failover_$(date +%Y%m%d_%H%M%S).json"
 
-# Convert "None" values to JSON null
+# Convert "None" to Python None (json.dump serializes as null)
 ttf_wlb="${RESULT_TTF[wlb]}"
 ttf_minrtt="${RESULT_TTF[minrtt]}"
 ttr_wlb="${RESULT_TTR[wlb]}"
 ttr_minrtt="${RESULT_TTR[minrtt]}"
-[ "$ttf_wlb" = "None" ] && ttf_wlb="null"
-[ "$ttf_minrtt" = "None" ] && ttf_minrtt="null"
-[ "$ttr_wlb" = "None" ] && ttr_wlb="null"
-[ "$ttr_minrtt" = "None" ] && ttr_minrtt="null"
+[ "$ttf_wlb" = "None" ] && ttf_wlb="None"
+[ "$ttf_minrtt" = "None" ] && ttf_minrtt="None"
+[ "$ttr_wlb" = "None" ] && ttr_wlb="None"
+[ "$ttr_minrtt" = "None" ] && ttr_minrtt="None"
 
 python3 -c "
 import json
