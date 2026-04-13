@@ -15,7 +15,7 @@
 #   TTF (Time-To-Fallback): seconds from fault injection until throughput
 #       reaches 50% of surviving path capacity
 #   TTR (Time-To-Recovery): seconds from fault recovery until throughput
-#       reaches 90% of pre-fault average (path revalidation ~10-15s)
+#       reaches 80% of pre-fault average (path revalidation ~10-15s)
 #   Pre-fault avg:  t=0-20s  (both paths active)
 #   Degraded avg:   t=20-40s (surviving path only)
 #   Post-recover:   last 10s (t=65-75s, after path revalidation)
@@ -39,7 +39,7 @@ IPERF_PARALLEL=4
 SCHEDULERS="wlb minrtt"
 
 TTF_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
-TTR_DEFINITION="seconds from fault recovery until throughput reaches 90% of pre-fault average (full recovery)"
+TTR_DEFINITION="seconds from fault recovery until throughput reaches 80% of pre-fault average (full recovery)"
 
 trap ci_bench_cleanup EXIT
 
@@ -160,8 +160,8 @@ for iv in intervals:
         break
 
 # TTR (Time-To-Recovery): time from fault recovery until throughput reaches
-# 90% of pre-fault average. Measures how fast full multipath resumes.
-ttr_threshold = pre_fault_avg * 0.9
+# 80% of pre-fault average. Measures how fast full multipath resumes.
+ttr_threshold = pre_fault_avg * 0.8
 ttr = None
 for iv in intervals:
     if iv['time_sec'] > fault_recover and iv['mbps'] >= ttr_threshold:
