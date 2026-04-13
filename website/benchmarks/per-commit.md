@@ -67,7 +67,9 @@ const filteredAggregateRows = computed(() => {
       <th>WLB TTR</th>
       <th>MinRTT TTR</th>
       <th>WLB Pre-fault</th>
+      <th>WLB Post-recover</th>
       <th>MinRTT Pre-fault</th>
+      <th>MinRTT Post-recover</th>
     </tr>
   </thead>
   <tbody>
@@ -77,7 +79,9 @@ const filteredAggregateRows = computed(() => {
       <td>{{ r.wlb_ttr }}s</td>
       <td>{{ r.minrtt_ttr }}s</td>
       <td>{{ r.wlb_pre }} Mbps</td>
+      <td>{{ r.wlb_post }} Mbps</td>
       <td>{{ r.minrtt_pre }} Mbps</td>
+      <td>{{ r.minrtt_post }} Mbps</td>
     </tr>
   </tbody>
 </table>
