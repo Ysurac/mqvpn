@@ -4,7 +4,7 @@
 # Runs 100 fault/recover cycles alternating Path A and Path B while continuous
 # iperf3 traffic flows over the VPN tunnel. Odd cycles fault Path A (surviving
 # path = B, 80Mbps), even cycles fault Path B (surviving path = A, 300Mbps).
-# Each cycle: bring path down (2s), bring it back up (3s), verify tunnel alive.
+# Each cycle: bring path down (2s), recover + wait revalidation (10s), verify.
 # Monitors RSS/fd for both VPN processes to detect resource leaks.
 #
 # Flow:
