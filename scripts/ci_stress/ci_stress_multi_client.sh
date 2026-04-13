@@ -311,10 +311,17 @@ for i in $(seq 1 "$NUM_CLIENTS"); do
     fi
 done
 
-# Wait for all client processes to exit
+# Wait for all client processes and capture exit codes
+CLIENT_SANITIZER_FAIL=0
 for i in $(seq 1 "$NUM_CLIENTS"); do
     pid="${CLIENT_PIDS[$((i - 1))]}"
-    wait "$pid" 2>/dev/null || true
+    exit_code=0
+    wait "$pid" 2>/dev/null; exit_code=$?
+    # exit 143 = SIGTERM (normal kill)
+    if [ "$exit_code" -ne 0 ] && [ "$exit_code" -ne 143 ]; then
+        echo "  WARN: client $i (PID $pid) exited with code $exit_code"
+        CLIENT_SANITIZER_FAIL=1
+    fi
 done
 
 echo "OK: all clients stopped"
@@ -324,11 +331,12 @@ echo "OK: all clients stopped"
 ci_stress_monitor_stop
 
 echo "Stopping VPN server..."
+SERVER_EXIT=0
 if kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null; SERVER_EXIT=$?
 fi
-echo "OK: server stopped"
+echo "OK: server stopped (exit=$SERVER_EXIT)"
 
 # ── Check server resources ──
 
@@ -337,6 +345,24 @@ echo "=== Resource Check ==="
 
 resource_status="pass"
 if ! ci_stress_check_resources "$SERVER_MONITOR_LOG" "server"; then
+    resource_status="fail"
+fi
+
+echo ""
+echo "=== Sanitizer Check ==="
+sanitizer_ok=true
+# exit 143 = SIGTERM (normal kill), anything else is ASan/UBSan error
+if [ "$SERVER_EXIT" -ne 0 ] && [ "$SERVER_EXIT" -ne 143 ]; then
+    echo "  FAIL: VPN server exited with code $SERVER_EXIT (ASan/UBSan error)"
+    sanitizer_ok=false
+fi
+if [ "$CLIENT_SANITIZER_FAIL" -ne 0 ]; then
+    echo "  FAIL: one or more VPN clients reported ASan/UBSan errors"
+    sanitizer_ok=false
+fi
+if [ "$sanitizer_ok" = true ]; then
+    echo "  OK: no sanitizer errors"
+else
     resource_status="fail"
 fi
 

@@ -98,11 +98,15 @@ RESOURCE_FAILED=0
 ci_stress_check_resources "$SERVER_MON_LOG" "server" || RESOURCE_FAILED=1
 ci_stress_check_resources "$CLIENT_MON_LOG" "client" || RESOURCE_FAILED=1
 
-# ── Stop VPN (ASan leak detection runs on process exit) ──
+# ── Stop VPN (ASan/UBSan checks run on process exit) ──
 
 echo ""
-echo "Stopping VPN (ASan checks run on exit)..."
+echo "Stopping VPN..."
 ci_stress_stop_vpn
+
+echo ""
+echo "── Sanitizer Check ──"
+ci_stress_check_sanitizer || RESOURCE_FAILED=1
 
 # ── Parse iperf3 JSON for throughput ──
 

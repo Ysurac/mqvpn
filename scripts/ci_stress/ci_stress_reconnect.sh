@@ -118,6 +118,12 @@ if ! ci_stress_check_resources "$SERVER_MONITOR_LOG" "server"; then
     resource_status="fail"
 fi
 
+echo ""
+echo "=== Sanitizer check ==="
+if ! ci_stress_check_sanitizer; then
+    resource_status="fail"
+fi
+
 # ── Extract server RSS from monitor log ──
 
 read -r server_rss_initial server_rss_final server_rss_max <<< "$(python3 -c "
