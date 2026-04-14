@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: doc
 ---
 
 <script setup>
@@ -123,6 +123,8 @@ const filteredAggregateRows = computed(() => {
 </template>
 
 ## Bandwidth Aggregation
+
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms. Theoretical max 380Mbps.</p>
 
 <div v-if="aggregateRows.length === 0">No data yet.</div>
 <template v-else>
