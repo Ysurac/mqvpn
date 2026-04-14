@@ -280,6 +280,21 @@ int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         mqvpn_copy_str(cfg->tls_key, sizeof(cfg->tls_key), tmp);
     }
 
+    v = json_find_key(json_text, "tls_ciphers");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), tmp);
+    }
+
+    v = json_find_key(json_text, "ciphers");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), tmp);
+    }
+
+    v = json_find_key(json_text, "cipher");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), tmp);
+    }
+
     v = json_find_key(json_text, "max_clients");
     if (v && json_read_int(v, &iv) == MQVPN_OK) {
         cfg->max_clients = iv;
@@ -515,6 +530,14 @@ mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert, const char *key
     if (!cfg || !cert || !key) return MQVPN_ERR_INVALID_ARG;
     snprintf(cfg->tls_cert, sizeof(cfg->tls_cert), "%s", cert);
     snprintf(cfg->tls_key, sizeof(cfg->tls_key), "%s", key);
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_tls_ciphers(mqvpn_config_t *cfg, const char *ciphers)
+{
+    if (!cfg || !ciphers) return MQVPN_ERR_INVALID_ARG;
+    snprintf(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), "%s", ciphers);
     return MQVPN_OK;
 }
 

@@ -503,6 +503,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
+    if (cfg->tls_ciphers && cfg->tls_ciphers[0])
+        mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
     /* Enable multipath when there are multiple primary paths, or when there is at
      * least one backup path (even a single auto-detected primary + one backup needs
@@ -983,6 +985,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     if (cfg->subnet6) mqvpn_config_set_subnet6(lib_cfg, cfg->subnet6);
     if (cfg->cert_file && cfg->key_file)
         mqvpn_config_set_tls_cert(lib_cfg, cfg->cert_file, cfg->key_file);
+    if (cfg->tls_ciphers && cfg->tls_ciphers[0])
+        mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     for (int i = 0; i < cfg->n_users; i++) {
         if (cfg->user_names[i] && cfg->user_keys[i]) {

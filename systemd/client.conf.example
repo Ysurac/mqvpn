@@ -6,6 +6,9 @@
 Address = your-server.example.com:443
 # Insecure = false
 
+[TLS]
+# Cipher = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256
+
 [Auth]
 Key = <YOUR_PSK_HERE>
 

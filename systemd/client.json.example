@@ -2,6 +2,7 @@
   "mode": "client",
   "server_addr": "your-server.example.com:443",
   "auth_key": "<YOUR_PSK_HERE>",
+  "cipher": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
   "insecure": false,
   "tun_name": "mqvpn0",
   "dns": ["1.1.1.1", "8.8.8.8"],

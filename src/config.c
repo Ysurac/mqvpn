@@ -288,6 +288,9 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             snprintf(cfg->cert_file, sizeof(cfg->cert_file), "%s", val);
         } else if (strcasecmp(key, "Key") == 0) {
             snprintf(cfg->key_file, sizeof(cfg->key_file), "%s", val);
+        } else if (strcasecmp(key, "Cipher") == 0 ||
+                   strcasecmp(key, "Ciphers") == 0) {
+            snprintf(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), "%s", val);
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [TLS]", path, lineno, key);
         }
@@ -421,6 +424,18 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "key_file");
     if (v && json_read_string(v, s256, sizeof(s256)) == 0)
         mqvpn_copy_str(cfg->key_file, sizeof(cfg->key_file), s256);
+
+    v = json_find_key(json_text, "tls_ciphers");
+    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
+        mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), s256);
+
+    v = json_find_key(json_text, "ciphers");
+    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
+        mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), s256);
+
+    v = json_find_key(json_text, "cipher");
+    if (v && json_read_string(v, s256, sizeof(s256)) == 0)
+        mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), s256);
 
     v = json_find_key(json_text, "max_clients");
     if (v && json_read_int(v, &iv) == 0) cfg->max_clients = iv > 0 ? iv : 64;

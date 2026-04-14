@@ -46,6 +46,7 @@ usage(const char *prog)
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
+        "  --cipher LIST             TLS cipher suites list (colon-separated)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
         "  --auth-key KEY            PSK for authentication\n"
         "  --user NAME:KEY           Add a server user credential (repeatable)\n"
@@ -138,6 +139,7 @@ main(int argc, char *argv[])
         {"tun-name",    required_argument, NULL, 't'},
         {"cert",        required_argument, NULL, 'c'},
         {"key",         required_argument, NULL, 'k'},
+        {"cipher",      required_argument, NULL, 'y'},
         {"insecure",    no_argument,       NULL, 'i'},
         {"auth-key",    required_argument, NULL, 'a'},
         {"user",        required_argument, NULL, 'u'},
@@ -177,6 +179,7 @@ main(int argc, char *argv[])
     const char *tun_name    = NULL;
     const char *cert_file   = NULL;
     const char *key_file    = NULL;
+    const char *cipher_list = NULL;
     int         insecure    = -1;     /* -1 means "not set by CLI" */
     const char *auth_key    = NULL;
     char        cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
@@ -206,7 +209,7 @@ main(int argc, char *argv[])
     int         status_mode  = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -218,6 +221,7 @@ main(int argc, char *argv[])
         case 't': tun_name = optarg; break;
         case 'c': cert_file = optarg; break;
         case 'k': key_file = optarg; break;
+        case 'y': cipher_list = optarg; break;
         case 'i': insecure = 1; break;
         case 'a': auth_key = optarg; break;
         case 'u': {
@@ -333,6 +337,7 @@ main(int argc, char *argv[])
         subnet6 ? subnet6 : (file_cfg.subnet6[0] ? file_cfg.subnet6 : NULL);
     const char *eff_cert = cert_file ? cert_file : file_cfg.cert_file;
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
+    const char *eff_tls_ciphers = cipher_list ? cipher_list : file_cfg.tls_ciphers;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
 
@@ -506,6 +511,7 @@ main(int argc, char *argv[])
             .server_addr = host,
             .server_port = port,
             .tun_name = eff_tun_name,
+            .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .insecure = eff_insecure,
             .log_level = xqc_log_level,
             .n_paths = n_paths,
@@ -565,6 +571,7 @@ main(int argc, char *argv[])
             .tun_name    = eff_tun_name,
             .cert_file   = eff_cert,
             .key_file    = eff_key,
+            .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .log_level   = xqc_log_level,
             .scheduler   = scheduler,
             .reinjection_control = eff_reinjection_control,

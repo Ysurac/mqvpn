@@ -63,6 +63,7 @@ Subnet6 = 2001:db8:1::/112
 [TLS]
 Cert = /etc/mqvpn/server.crt
 Key = /etc/mqvpn/server.key       # TLS private key (PEM file)
+# Cipher = TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=   # PSK example (mqvpn --genkey)
@@ -85,6 +86,9 @@ Scheduler = wlb
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
+
+[TLS]
+# Cipher = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -123,6 +127,7 @@ Server example:
     "subnet6": "fd00:abcd::/112",
     "cert_file": "/etc/mqvpn/server.crt",
     "key_file": "/etc/mqvpn/server.key",
+    "cipher": "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384",
     "auth_key": "legacy-fallback-key",
     "users": [
         { "name": "alice", "key": "alice-secret" },
@@ -144,6 +149,7 @@ Client example:
     "mode": "client",
     "server_addr": "203.0.113.1:443",
     "auth_key": "client-key",
+    "cipher": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
     "insecure": true,
     "dns": ["1.1.1.1", "8.8.8.8"],
     "paths": ["eth0", "wlan0"],
@@ -420,6 +426,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
+    --cipher LIST          TLS cipher suites list (colon-separated)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)

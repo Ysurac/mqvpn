@@ -9,6 +9,7 @@ typedef struct mqvpn_client_cfg_s {
     const char *server_addr;                        /* server address (e.g. "1.2.3.4") */
     int server_port;                                /* server port (e.g. 443) */
     const char *tun_name;                           /* TUN device name */
+    const char *tls_ciphers;                        /* TLS cipher suites list */
     int insecure;                                   /* skip TLS cert verification */
     int log_level;                                  /* xquic log level */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */

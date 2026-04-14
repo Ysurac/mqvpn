@@ -37,6 +37,7 @@ typedef struct mqvpn_file_config_s {
     /* [TLS] — server */
     char cert_file[256];
     char key_file[256];
+    char tls_ciphers[256]; /* TLS cipher suites list */
 
     /* [Auth] — server */
     char server_auth_key[256];

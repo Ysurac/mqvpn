@@ -46,6 +46,7 @@ struct mqvpn_config_s {
     char subnet6[64];
     char tls_cert[256];
     char tls_key[256];
+    char tls_ciphers[256];
     int max_clients;
 };
 

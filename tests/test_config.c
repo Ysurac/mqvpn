@@ -51,6 +51,7 @@ static void test_defaults(void)
     ASSERT_EQ_STR(cfg.subnet, "10.0.0.0/24", "default subnet");
     ASSERT_EQ_STR(cfg.cert_file, "server.crt", "default cert_file");
     ASSERT_EQ_STR(cfg.key_file, "server.key", "default key_file");
+    ASSERT_EQ_STR(cfg.tls_ciphers, "", "default tls_ciphers");
     ASSERT_EQ_INT(cfg.insecure, 0, "default insecure");
     ASSERT_EQ_INT(cfg.max_clients, 64, "default max_clients");
     ASSERT_EQ_INT(cfg.n_paths, 0, "default n_paths");
@@ -78,6 +79,7 @@ static void test_parse_server_config(void)
         "[TLS]\n"
         "Cert = /etc/mqvpn/cert.pem\n"
         "Key = /etc/mqvpn/key.pem\n"
+        "Cipher = TLS_AES_128_GCM_SHA256\n"
         "\n"
         "[Auth]\n"
         "Key = supersecretkey123\n"
@@ -97,6 +99,7 @@ static void test_parse_server_config(void)
     ASSERT_EQ_STR(cfg.log_level, "debug", "log_level");
     ASSERT_EQ_STR(cfg.cert_file, "/etc/mqvpn/cert.pem", "cert_file");
     ASSERT_EQ_STR(cfg.key_file, "/etc/mqvpn/key.pem", "key_file");
+    ASSERT_EQ_STR(cfg.tls_ciphers, "TLS_AES_128_GCM_SHA256", "tls_ciphers");
     ASSERT_EQ_STR(cfg.server_auth_key, "supersecretkey123", "auth_key");
     ASSERT_EQ_INT(cfg.max_clients, 32, "max_clients");
 }

@@ -7,6 +7,7 @@
   "log_level": "info",
   "cert_file": "/etc/mqvpn/server.crt",
   "key_file": "/etc/mqvpn/server.key",
+  "cipher": "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384",
   "auth_key": "<YOUR_PSK_HERE>",
   "users": [
     { "name": "alice", "key": "<ALICE_PSK_HERE>" },

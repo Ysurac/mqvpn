@@ -1567,7 +1567,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     memset(&engine_ssl, 0, sizeof(engine_ssl));
     engine_ssl.private_key_file = cfg->tls_key[0] ? (char *)cfg->tls_key : NULL;
     engine_ssl.cert_file = cfg->tls_cert[0] ? (char *)cfg->tls_cert : NULL;
-    engine_ssl.ciphers = XQC_TLS_CIPHERS;
+    engine_ssl.ciphers = cfg->tls_ciphers[0] ? (char *)cfg->tls_ciphers : XQC_TLS_CIPHERS;
     engine_ssl.groups = XQC_TLS_GROUPS;
 
     xqc_engine_callback_t engine_cbs = {

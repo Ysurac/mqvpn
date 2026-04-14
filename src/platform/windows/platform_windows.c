@@ -426,6 +426,8 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
+    if (cfg->tls_ciphers && cfg->tls_ciphers[0])
+        mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
     mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,

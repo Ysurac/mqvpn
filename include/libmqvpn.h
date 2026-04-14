@@ -348,6 +348,7 @@ MQVPN_API int mqvpn_config_set_subnet(mqvpn_config_t *cfg, const char *cidr);
 MQVPN_API int mqvpn_config_set_subnet6(mqvpn_config_t *cfg, const char *cidr6);
 MQVPN_API int mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert,
                                         const char *key);
+MQVPN_API int mqvpn_config_set_tls_ciphers(mqvpn_config_t *cfg, const char *ciphers);
 MQVPN_API int mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max);
 
 /* ─── Client API ─── */
