@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: doc
 ---
 
 <script setup>
