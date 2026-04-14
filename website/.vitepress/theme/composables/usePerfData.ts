@@ -112,6 +112,7 @@ export function usePerfData(basePath: string, maxEntries = 10) {
               ttr: fmtNum(d.ttr_sec, 2),
               pre: fmtNum(d.pre_fault_avg_mbps),
               degraded: fmtNum(d.degraded_avg_mbps),
+              recovery: fmtNum(d.recovery_avg_mbps),
               post: fmtNum(r.post_recover_avg_mbps),
             })
           }
@@ -126,6 +127,7 @@ export function usePerfData(basePath: string, maxEntries = 10) {
             ttr: fmtNum(r.ttr_sec, 2),
             pre: fmtNum(r.pre_fault_avg_mbps),
             degraded: fmtNum(r.degraded_avg_mbps),
+            recovery: '-',
             post: fmtNum(r.post_recover_avg_mbps),
           })
         }

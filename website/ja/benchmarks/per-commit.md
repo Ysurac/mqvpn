@@ -101,6 +101,7 @@ const filteredAggregateRows = computed(() => {
       <th>TTR (s)</th>
       <th>障害前 (Mbps)</th>
       <th>障害中 (Mbps)</th>
+      <th>復旧 (Mbps)</th>
       <th>復旧後 (Mbps)</th>
     </tr>
   </thead>
@@ -114,6 +115,7 @@ const filteredAggregateRows = computed(() => {
       <td>{{ r.ttr }}</td>
       <td>{{ r.pre }}</td>
       <td>{{ r.degraded }}</td>
+      <td>{{ r.recovery }}</td>
       <td>{{ r.post }}</td>
     </tr>
   </tbody>

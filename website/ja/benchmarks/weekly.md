@@ -78,10 +78,10 @@ const filteredUdpSweepRows = computed(() => {
   <label>障害パス: <select v-model="foPathFilter"><option value="">すべて</option><option value="A">パス A</option><option value="B">パス B</option></select></label>
 </div>
 <table>
-  <thead><tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>障害パス</th><th>TTF (s)</th><th>TTR (s)</th><th>障害前 (Mbps)</th><th>障害中 (Mbps)</th><th>復旧後 (Mbps)</th></tr></thead>
+  <thead><tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>障害パス</th><th>TTF (s)</th><th>TTR (s)</th><th>障害前 (Mbps)</th><th>障害中 (Mbps)</th><th>復旧 (Mbps)</th><th>復旧後 (Mbps)</th></tr></thead>
   <tbody>
     <tr v-for="(r, i) in filteredFailoverRows" :key="'fo-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.fault_path }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.post }}</td>
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.fault_path }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.recovery }}</td><td>{{ r.post }}</td>
     </tr>
   </tbody>
 </table>
