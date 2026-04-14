@@ -8,6 +8,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'Benchmarks', link: '/benchmarks/' },
     ],
 
     footer: {
@@ -16,6 +17,16 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
     },
 
     sidebar: {
+      '/benchmarks/': [
+        {
+          text: 'Benchmarks',
+          items: [
+            { text: 'Overview', link: '/benchmarks/' },
+            { text: 'Per-commit', link: '/benchmarks/per-commit' },
+            { text: 'Weekly', link: '/benchmarks/weekly' },
+          ],
+        },
+      ],
       '/guide/': [
         {
           text: 'Guide',

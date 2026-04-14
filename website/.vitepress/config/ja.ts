@@ -8,6 +8,7 @@ export const ja: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
   themeConfig: {
     nav: [
       { text: 'ガイド', link: '/ja/guide/getting-started' },
+      { text: 'ベンチマーク', link: '/ja/benchmarks/' },
     ],
 
     footer: {
@@ -16,6 +17,16 @@ export const ja: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
     },
 
     sidebar: {
+      '/ja/benchmarks/': [
+        {
+          text: 'ベンチマーク',
+          items: [
+            { text: '概要', link: '/ja/benchmarks/' },
+            { text: 'Per-commit', link: '/ja/benchmarks/per-commit' },
+            { text: 'Weekly', link: '/ja/benchmarks/weekly' },
+          ],
+        },
+      ],
       '/ja/guide/': [
         {
           text: 'ガイド',
