@@ -10,7 +10,7 @@ const push = usePerfData('/perf-data', 1)
 const weekly = usePerfData('/perf-data/weekly', 1)
 
 const latestRaw = computed(() => push.rawRows.value[0] || null)
-const latestFailover = computed(() => push.failoverRows.value[0] || null)
+const latestFailover = computed(() => push.failoverRows.value.find(r => r.fault_path === 'A') || null)
 const latestAggregate = computed(() => {
   const rows = push.aggregateRows.value
   if (!rows.length) return null

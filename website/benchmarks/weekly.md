@@ -14,9 +14,11 @@ const {
 
 // Failover filter
 const foSchedFilter = ref('wlb')
+const foPathFilter = ref('A')
 const filteredFailoverRows = computed(() => {
   return failoverRows.value.filter(r => {
     if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    if (foPathFilter.value && r.fault_path !== foPathFilter.value) return false
     return true
   })
 })
@@ -85,12 +87,13 @@ const filteredUdpSweepRows = computed(() => {
 <template v-else>
 <div class="filter-bar">
   <label>Scheduler: <select v-model="foSchedFilter"><option value="">All</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
+  <label>Fault Path: <select v-model="foPathFilter"><option value="">All</option><option value="A">Path A</option><option value="B">Path B</option></select></label>
 </div>
 <table>
-  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>TTF (s)</th><th>TTR (s)</th><th>Pre-fault (Mbps)</th><th>Degraded (Mbps)</th><th>Post-recover (Mbps)</th></tr></thead>
+  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>Fault Path</th><th>TTF (s)</th><th>TTR (s)</th><th>Pre-fault (Mbps)</th><th>Degraded (Mbps)</th><th>Post-recover (Mbps)</th></tr></thead>
   <tbody>
     <tr v-for="(r, i) in filteredFailoverRows" :key="'fo-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.post }}</td>
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.fault_path }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.post }}</td>
     </tr>
   </tbody>
 </table>
