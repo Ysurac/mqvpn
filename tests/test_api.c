@@ -880,6 +880,233 @@ TEST(path_backup_flag_value)
     ASSERT_EQ(MQVPN_PATH_FLAG_BACKUP, (uint32_t)1);
 }
 
+/* ── FEC ── */
+
+TEST(config_set_fec_defaults)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->fec_enable, 0);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_REED_SOLOMON);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_fec)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_fec(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_enable, 1);
+    ASSERT_EQ(mqvpn_config_set_fec(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_enable, 0);
+    ASSERT_EQ(mqvpn_config_set_fec(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_fec_scheme_all_values)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_REED_SOLOMON), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_REED_SOLOMON);
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_XOR), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_XOR);
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_PACKET_MASK), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_PACKET_MASK);
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_GALOIS_CALCULATION), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_GALOIS_CALCULATION);
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(NULL, MQVPN_FEC_SCHEME_XOR), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_load_json_fec)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+
+    /* fec_enable key */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_enable\":true}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_enable, 1);
+
+    /* fec shorthand key */
+    cfg->fec_enable = 0;
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec\":true}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_enable, 1);
+
+    /* fec_scheme — xor */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"xor\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_XOR);
+
+    /* fec_scheme — packet_mask */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"packet_mask\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_PACKET_MASK);
+
+    /* fec_scheme — galois_calculation */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"galois_calculation\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_GALOIS_CALCULATION);
+
+    /* fec_scheme — reed_solomon (default/fallback) */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"reed_solomon\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_REED_SOLOMON);
+
+    /* unknown fec_scheme falls back to reed_solomon */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"unknown\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_REED_SOLOMON);
+
+    mqvpn_config_free(cfg);
+}
+
+/* ── Ciphers ── */
+
+TEST(config_set_tls_ciphers)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_tls_ciphers(cfg, "TLS_AES_256_GCM_SHA384"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_256_GCM_SHA384");
+    ASSERT_EQ(mqvpn_config_set_tls_ciphers(cfg, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256");
+    ASSERT_EQ(mqvpn_config_set_tls_ciphers(NULL, "TLS_AES_256_GCM_SHA384"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_tls_ciphers(cfg, NULL), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_load_json_ciphers)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+
+    /* tls_ciphers key */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"tls_ciphers\":\"TLS_AES_256_GCM_SHA384\"}"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_256_GCM_SHA384");
+
+    /* ciphers alias */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"ciphers\":\"TLS_AES_128_GCM_SHA256\"}"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_128_GCM_SHA256");
+
+    /* cipher (singular) alias */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cipher\":\"TLS_CHACHA20_POLY1305_SHA256\"}"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_CHACHA20_POLY1305_SHA256");
+
+    mqvpn_config_free(cfg);
+}
+
+/* ── Schedulers ── */
+
+TEST(config_scheduler_default)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_WLB);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_scheduler_all_values)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_MINRTT), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_MINRTT);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_WLB), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_WLB);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_BACKUP), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_BACKUP);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_BACKUP_FEC), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_BACKUP_FEC);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_RAP), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_RAP);
+    ASSERT_EQ(mqvpn_config_set_scheduler(NULL, MQVPN_SCHED_WLB), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_cc_all_values)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR2), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_BBR2);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_BBR);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_CUBIC), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_CUBIC);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_NEW_RENO), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_NEW_RENO);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_COPA), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_COPA);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_UNLIMITED), MQVPN_OK);
+    ASSERT_EQ(cfg->cc, MQVPN_CC_UNLIMITED);
+    ASSERT_EQ(mqvpn_config_set_cc(NULL, MQVPN_CC_BBR2), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+/* ── Reinjection control ── */
+
+TEST(config_reinj_defaults)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->reinjection_enable, 0);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEFAULT);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_reinjection)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection_enable, 1);
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection_enable, 0);
+    /* non-zero values normalize to 1 */
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, 42), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection_enable, 1);
+    ASSERT_EQ(mqvpn_config_set_reinjection(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_reinj_ctl_all_values)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_set_reinj_ctl(cfg, MQVPN_REINJ_CTL_DEFAULT), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEFAULT);
+    ASSERT_EQ(mqvpn_config_set_reinj_ctl(cfg, MQVPN_REINJ_CTL_DEADLINE), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEADLINE);
+    ASSERT_EQ(mqvpn_config_set_reinj_ctl(cfg, MQVPN_REINJ_CTL_DGRAM), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DGRAM);
+    ASSERT_EQ(mqvpn_config_set_reinj_ctl(NULL, MQVPN_REINJ_CTL_DEFAULT), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_load_json_reinjection)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+
+    /* reinjection_enable key */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_enable\":true}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection_enable, 1);
+
+    /* reinjection_control alias */
+    cfg->reinjection_enable = 0;
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_control\":true}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinjection_enable, 1);
+
+    /* reinjection_mode — deadline */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_mode\":\"deadline\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEADLINE);
+
+    /* reinjection_mode — dgram */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_mode\":\"dgram\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DGRAM);
+
+    /* reinjection_mode — unknown falls back to DEFAULT */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection_mode\":\"unknown\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEFAULT);
+
+    /* reinj_ctl key — deadline */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinj_ctl\":\"deadline\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEADLINE);
+
+    /* reinj_ctl key — dgram */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinj_ctl\":\"dgram\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DGRAM);
+
+    /* reinj_ctl key — default */
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinj_ctl\":\"default\"}"), MQVPN_OK);
+    ASSERT_EQ(cfg->reinj_ctl, MQVPN_REINJ_CTL_DEFAULT);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Key generation ── */
 
 TEST(generate_key)
@@ -1016,6 +1243,27 @@ main(void)
 
     /* Server info tests */
     run_server_get_client_info_null_safety();
+
+    /* FEC tests */
+    run_config_set_fec_defaults();
+    run_config_set_fec();
+    run_config_set_fec_scheme_all_values();
+    run_config_load_json_fec();
+
+    /* Cipher tests */
+    run_config_set_tls_ciphers();
+    run_config_load_json_ciphers();
+
+    /* Scheduler tests */
+    run_config_scheduler_default();
+    run_config_set_scheduler_all_values();
+    run_config_set_cc_all_values();
+
+    /* Reinjection control tests */
+    run_config_reinj_defaults();
+    run_config_set_reinjection();
+    run_config_set_reinj_ctl_all_values();
+    run_config_load_json_reinjection();
 
     /* Utility tests */
     run_generate_key();
