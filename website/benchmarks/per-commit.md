@@ -9,10 +9,12 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 const { loading, error, rawRows, failoverRows, aggregateRows } = usePerfData('/perf-data')
 
 const foSchedFilter = ref('wlb')
+const foPathFilter = ref('A')
 
 const filteredFailoverRows = computed(() => {
   return failoverRows.value.filter(r => {
     if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    if (foPathFilter.value && r.fault_path !== foPathFilter.value) return false
     return true
   })
 })
@@ -77,6 +79,13 @@ const filteredAggregateRows = computed(() => {
       <option value="minrtt">MinRTT</option>
     </select>
   </label>
+  <label>Fault Path:
+    <select v-model="foPathFilter">
+      <option value="">All</option>
+      <option value="A">Path A</option>
+      <option value="B">Path B</option>
+    </select>
+  </label>
 </div>
 <table>
   <thead>
@@ -84,6 +93,7 @@ const filteredAggregateRows = computed(() => {
       <th>Commit</th>
       <th>Date</th>
       <th>Scheduler</th>
+      <th>Fault Path</th>
       <th>TTF (s)</th>
       <th>TTR (s)</th>
       <th>Pre-fault (Mbps)</th>
@@ -96,6 +106,7 @@ const filteredAggregateRows = computed(() => {
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
       <td>{{ r.scheduler }}</td>
+      <td>{{ r.fault_path }}</td>
       <td>{{ r.ttf }}</td>
       <td>{{ r.ttr }}</td>
       <td>{{ r.pre }}</td>
