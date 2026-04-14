@@ -27,7 +27,7 @@
 #   TTF (Time-To-Fallback): seconds from fault injection until throughput
 #       reaches 50% of surviving path capacity
 #   TTR (Time-To-Recovery): seconds from fault recovery until throughput
-#       reaches 80% of pre-fault average
+#       reaches 90% of pre-fault average
 #
 # Output: ci_bench_results/failover_<timestamp>.json
 #
@@ -52,7 +52,7 @@ FAULT_B_INJECT_SEC=55
 FAULT_B_RECOVER_SEC=75
 
 TTF_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
-TTR_DEFINITION="seconds from fault recovery until throughput reaches 80% of pre-fault average (full recovery)"
+TTR_DEFINITION="seconds from fault recovery until throughput reaches 90% of pre-fault average (full recovery)"
 
 trap ci_bench_cleanup EXIT
 
@@ -73,10 +73,12 @@ declare -A RESULT_A_PRE_FAULT
 declare -A RESULT_A_DEGRADED
 declare -A RESULT_A_TTF
 declare -A RESULT_A_TTR
+declare -A RESULT_A_RECOVERY
 declare -A RESULT_B_PRE_FAULT
 declare -A RESULT_B_DEGRADED
 declare -A RESULT_B_TTF
 declare -A RESULT_B_TTR
+declare -A RESULT_B_RECOVERY
 declare -A RESULT_POST_RECOVER
 
 for SCHED in $SCHEDULERS; do
@@ -209,9 +211,9 @@ for iv in intervals:
         ttf_a = round(iv['time_sec'] - fault_a_inject, 2)
         break
 
-# TTR A: time from fault A recovery until throughput >= 80% of pre-fault A average
+# TTR A: time from fault A recovery until throughput >= 90% of pre-fault A average
 # Bounded to recovery-A window (40<t<=55) to avoid contamination by Path B fault
-ttr_a_threshold = pre_fault_a_avg * 0.8
+ttr_a_threshold = pre_fault_a_avg * 0.9
 ttr_a = None
 for iv in intervals:
     if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject and iv['mbps'] >= ttr_a_threshold:
@@ -240,16 +242,26 @@ for iv in intervals:
         ttf_b = round(iv['time_sec'] - fault_b_inject, 2)
         break
 
-# TTR B: time from fault B recovery until throughput >= 80% of pre-fault B average
+# TTR B: time from fault B recovery until throughput >= 90% of pre-fault B average
 # Bounded to recovery-B window (75<t<=90)
-ttr_b_threshold = pre_fault_b_avg * 0.8
+ttr_b_threshold = pre_fault_b_avg * 0.9
 ttr_b = None
 for iv in intervals:
     if iv['time_sec'] > fault_b_recover and iv['time_sec'] <= 90 and iv['mbps'] >= ttr_b_threshold:
         ttr_b = round(iv['time_sec'] - fault_b_recover, 2)
         break
 
-# Post-recover average (t>90, both paths active again)
+# Recovery A average (40<t<=55, Path A recovering, Path B healthy)
+recovery_a = [iv['mbps'] for iv in intervals
+              if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject]
+recovery_a_avg = sum(recovery_a) / len(recovery_a) if recovery_a else 0
+
+# Recovery B average (75<t<=90, Path B recovering, Path A healthy)
+recovery_b = [iv['mbps'] for iv in intervals
+              if iv['time_sec'] > fault_b_recover and iv['time_sec'] <= 90]
+recovery_b_avg = sum(recovery_b) / len(recovery_b) if recovery_b else 0
+
+# Post-recover average (t>90, both paths fully active)
 post_recover = [iv['mbps'] for iv in intervals if iv['time_sec'] > 90]
 post_recover_avg = sum(post_recover) / len(post_recover) if post_recover else 0
 
@@ -257,10 +269,12 @@ print(f'{pre_fault_a_avg:.1f}')
 print(f'{degraded_a_avg:.1f}')
 print(f'{ttf_a}')
 print(f'{ttr_a}')
+print(f'{recovery_a_avg:.1f}')
 print(f'{pre_fault_b_avg:.1f}')
 print(f'{degraded_b_avg:.1f}')
 print(f'{ttf_b}')
 print(f'{ttr_b}')
+print(f'{recovery_b_avg:.1f}')
 print(f'{post_recover_avg:.1f}')
 ")
 
@@ -268,22 +282,26 @@ print(f'{post_recover_avg:.1f}')
     DEGRADED_A=$(echo "$PARSE_RESULT" | sed -n '2p')
     TTF_A=$(echo "$PARSE_RESULT" | sed -n '3p')
     TTR_A=$(echo "$PARSE_RESULT" | sed -n '4p')
-    PRE_FAULT_B=$(echo "$PARSE_RESULT" | sed -n '5p')
-    DEGRADED_B=$(echo "$PARSE_RESULT" | sed -n '6p')
-    TTF_B=$(echo "$PARSE_RESULT" | sed -n '7p')
-    TTR_B=$(echo "$PARSE_RESULT" | sed -n '8p')
-    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '9p')
+    RECOVERY_A=$(echo "$PARSE_RESULT" | sed -n '5p')
+    PRE_FAULT_B=$(echo "$PARSE_RESULT" | sed -n '6p')
+    DEGRADED_B=$(echo "$PARSE_RESULT" | sed -n '7p')
+    TTF_B=$(echo "$PARSE_RESULT" | sed -n '8p')
+    TTR_B=$(echo "$PARSE_RESULT" | sed -n '9p')
+    RECOVERY_B=$(echo "$PARSE_RESULT" | sed -n '10p')
+    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '11p')
 
     echo "  ── Path A fault (t=${FAULT_A_INJECT_SEC}-${FAULT_A_RECOVER_SEC}) ──"
     echo "  Pre-fault avg:     ${PRE_FAULT_A} Mbps"
     echo "  Degraded avg:      ${DEGRADED_A} Mbps"
     echo "  TTF:               ${TTF_A} sec"
     echo "  TTR:               ${TTR_A} sec"
+    echo "  Recovery avg:      ${RECOVERY_A} Mbps"
     echo "  ── Path B fault (t=${FAULT_B_INJECT_SEC}-${FAULT_B_RECOVER_SEC}) ──"
     echo "  Pre-fault avg:     ${PRE_FAULT_B} Mbps"
     echo "  Degraded avg:      ${DEGRADED_B} Mbps"
     echo "  TTF:               ${TTF_B} sec"
     echo "  TTR:               ${TTR_B} sec"
+    echo "  Recovery avg:      ${RECOVERY_B} Mbps"
     echo "  ── Post-recover (t>90) ──"
     echo "  Post-recover avg:  ${POST_RECOVER} Mbps"
 
@@ -291,10 +309,12 @@ print(f'{post_recover_avg:.1f}')
     RESULT_A_DEGRADED[$SCHED]="$DEGRADED_A"
     RESULT_A_TTF[$SCHED]="$TTF_A"
     RESULT_A_TTR[$SCHED]="$TTR_A"
+    RESULT_A_RECOVERY[$SCHED]="$RECOVERY_A"
     RESULT_B_PRE_FAULT[$SCHED]="$PRE_FAULT_B"
     RESULT_B_DEGRADED[$SCHED]="$DEGRADED_B"
     RESULT_B_TTF[$SCHED]="$TTF_B"
     RESULT_B_TTR[$SCHED]="$TTR_B"
+    RESULT_B_RECOVERY[$SCHED]="$RECOVERY_B"
     RESULT_POST_RECOVER[$SCHED]="$POST_RECOVER"
 
     rm -f "$IPERF_JSON"
@@ -347,13 +367,15 @@ result = {
                 'pre_fault_avg_mbps': ${RESULT_A_PRE_FAULT[wlb]},
                 'degraded_avg_mbps': ${RESULT_A_DEGRADED[wlb]},
                 'ttf_sec': ${a_ttf_wlb},
-                'ttr_sec': ${a_ttr_wlb}
+                'ttr_sec': ${a_ttr_wlb},
+                'recovery_avg_mbps': ${RESULT_A_RECOVERY[wlb]}
             },
             'fault_b': {
                 'pre_fault_avg_mbps': ${RESULT_B_PRE_FAULT[wlb]},
                 'degraded_avg_mbps': ${RESULT_B_DEGRADED[wlb]},
                 'ttf_sec': ${b_ttf_wlb},
-                'ttr_sec': ${b_ttr_wlb}
+                'ttr_sec': ${b_ttr_wlb},
+                'recovery_avg_mbps': ${RESULT_B_RECOVERY[wlb]}
             },
             'post_recover_avg_mbps': ${RESULT_POST_RECOVER[wlb]}
         },
@@ -362,13 +384,15 @@ result = {
                 'pre_fault_avg_mbps': ${RESULT_A_PRE_FAULT[minrtt]},
                 'degraded_avg_mbps': ${RESULT_A_DEGRADED[minrtt]},
                 'ttf_sec': ${a_ttf_minrtt},
-                'ttr_sec': ${a_ttr_minrtt}
+                'ttr_sec': ${a_ttr_minrtt},
+                'recovery_avg_mbps': ${RESULT_A_RECOVERY[minrtt]}
             },
             'fault_b': {
                 'pre_fault_avg_mbps': ${RESULT_B_PRE_FAULT[minrtt]},
                 'degraded_avg_mbps': ${RESULT_B_DEGRADED[minrtt]},
                 'ttf_sec': ${b_ttf_minrtt},
-                'ttr_sec': ${b_ttr_minrtt}
+                'ttr_sec': ${b_ttr_minrtt},
+                'recovery_avg_mbps': ${RESULT_B_RECOVERY[minrtt]}
             },
             'post_recover_avg_mbps': ${RESULT_POST_RECOVER[minrtt]}
         }
