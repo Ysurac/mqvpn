@@ -137,7 +137,13 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
     snprintf(pair, sizeof(pair), "%s", val);
     char *sep = strchr(pair, ':');
     if (!sep) {
-        LOG_WRN("%s:%d: [Auth] User must be NAME:KEY", path, lineno);
+        /* No colon: treat as plain client username (used with Key = ...) */
+        char *name = trim(pair);
+        if (name[0] == '\0') {
+            LOG_WRN("%s:%d: [Auth] User is empty", path, lineno);
+            return;
+        }
+        snprintf(cfg->auth_username, sizeof(cfg->auth_username), "%s", name);
         return;
     }
 

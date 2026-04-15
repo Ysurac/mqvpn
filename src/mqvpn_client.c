@@ -784,7 +784,9 @@ cli_masque_start_tunnel(cli_conn_t *conn)
     if (has_auth)
         snprintf(auth_value, sizeof(auth_value), "Bearer %s", c->config.auth_key);
 
-    xqc_http_header_t hdrs[7] = {
+    int has_username = (c->config.auth_username[0] != '\0');
+
+    xqc_http_header_t hdrs[8] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -809,6 +811,14 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
         hdrs[hdr_count].value =
             (struct iovec){.iov_base = auth_value, .iov_len = strlen(auth_value)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+    }
+    if (has_username) {
+        hdrs[hdr_count].name = (struct iovec){.iov_base = "x-user", .iov_len = 6};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = c->config.auth_username,
+                           .iov_len = strlen(c->config.auth_username)};
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }

@@ -1222,6 +1222,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         int has_scheme_https = 0, has_capsule_proto = 0, has_valid_path = 0;
         const char *auth_token = NULL;
         size_t auth_token_len = 0;
+        char x_user_buf[64] = {0};
 
         for (int i = 0; i < (int)headers->count; i++) {
             xqc_http_header_t *h = &headers->headers[i];
@@ -1248,6 +1249,13 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 h->value.iov_len > 7 && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
                 auth_token = (const char *)h->value.iov_base + 7;
                 auth_token_len = h->value.iov_len - 7;
+            }
+            if (h->name.iov_len == 6 && memcmp(h->name.iov_base, "x-user", 6) == 0 &&
+                h->value.iov_len > 0) {
+                size_t ulen = h->value.iov_len < sizeof(x_user_buf) - 1
+                              ? h->value.iov_len : sizeof(x_user_buf) - 1;
+                memcpy(x_user_buf, h->value.iov_base, ulen);
+                x_user_buf[ulen] = '\0';
             }
         }
 
@@ -1301,8 +1309,12 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                     mqvpn_auth_ct_compare(auth_token, auth_token_len,
                                           s->config.auth_key,
                                           strlen(s->config.auth_key)) == 0) {
-                    snprintf(stream->conn->username,
-                             sizeof(stream->conn->username), "(global)");
+                    if (x_user_buf[0] != '\0')
+                        snprintf(stream->conn->username,
+                                 sizeof(stream->conn->username), "%s", x_user_buf);
+                    else
+                        snprintf(stream->conn->username,
+                                 sizeof(stream->conn->username), "(global)");
                 } else {
                     for (int i = 0; i < s->config.n_users; i++) {
                         const char *ek = s->config.user_keys[i];

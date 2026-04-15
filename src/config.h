@@ -33,6 +33,7 @@ typedef struct mqvpn_file_config_s {
 
     /* [Auth] — client */
     char auth_key[256];
+    char auth_username[64]; /* client username (x-user header) */
 
     /* [TLS] — server */
     char cert_file[256];

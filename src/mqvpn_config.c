@@ -172,6 +172,15 @@ mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key)
     return MQVPN_OK;
 }
 
+int
+mqvpn_config_set_auth_username(mqvpn_config_t *cfg, const char *username)
+{
+    if (!cfg || !username) return MQVPN_ERR_INVALID_ARG;
+
+    snprintf(cfg->auth_username, sizeof(cfg->auth_username), "%s", username);
+    return MQVPN_OK;
+}
+
 int mqvpn_config_add_user(mqvpn_config_t *cfg,
                           const char *username,
                           const char *key)

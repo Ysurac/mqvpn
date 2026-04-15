@@ -792,13 +792,14 @@ static void test_auth_users_ini(void)
     ASSERT_EQ_STR(cfg.user_names[1], "bob", "user[1] name");
 }
 
-static void test_auth_users_ini_invalid_ignored(void)
+static void test_auth_users_ini_plain_name_sets_auth_username(void)
 {
+    /* In any config, User = name (no colon) → stores as auth_username, not n_users */
     const char *ini =
         "[Interface]\n"
         "Listen = 0.0.0.0:443\n"
         "[Auth]\n"
-        "User = invalid-without-colon\n"
+        "User = plain-name\n"
         "User = alice:alice-key\n";
 
     char *path = write_tmp(ini);
@@ -807,9 +808,10 @@ static void test_auth_users_ini_invalid_ignored(void)
     int rc = mqvpn_config_load(&cfg, path);
     unlink(path);
 
-    ASSERT_EQ_INT(rc, 0, "invalid auth user ignored");
-    ASSERT_EQ_INT(cfg.n_users, 1, "only valid user parsed");
-    ASSERT_EQ_STR(cfg.user_names[0], "alice", "valid user kept");
+    ASSERT_EQ_INT(rc, 0, "plain user name parse ok");
+    ASSERT_EQ_STR(cfg.auth_username, "plain-name", "plain User stores in auth_username");
+    ASSERT_EQ_INT(cfg.n_users, 1, "NAME:KEY user still parsed");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "NAME:KEY user name");
 }
 
 static void test_json_config_load(void)
@@ -1125,6 +1127,97 @@ static void test_backup_path_json_parse(void)
     ASSERT_EQ_STR(cfg.backup_paths[1], "wlan0", "json backup_path[1]");
 }
 
+/* ================================================================
+ *  Client auth: User + Key fields
+ * ================================================================ */
+
+static void test_client_auth_username_default_empty(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_STR(cfg.auth_username, "", "default auth_username empty");
+}
+
+static void test_client_auth_user_plain(void)
+{
+    /* User = alice (no colon) in client config sets auth_username */
+    const char *ini =
+        "[Server]\n"
+        "Address = vpn.example.com:443\n"
+        "[Auth]\n"
+        "User = alice\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "client plain User parse ok");
+    ASSERT_EQ_STR(cfg.auth_username, "alice", "auth_username set from User");
+    ASSERT_EQ_INT(cfg.n_users, 0, "no user list entries");
+}
+
+static void test_client_auth_user_and_key(void)
+{
+    /* User = alice + Key = secret → auth_username + auth_key, no user list */
+    const char *ini =
+        "[Server]\n"
+        "Address = vpn.example.com:443\n"
+        "[Auth]\n"
+        "User = alice\n"
+        "Key = mysecretkey\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "client User+Key parse ok");
+    ASSERT_EQ_STR(cfg.auth_username, "alice", "auth_username from User");
+    ASSERT_EQ_STR(cfg.auth_key, "mysecretkey", "auth_key from Key");
+    ASSERT_EQ_INT(cfg.n_users, 0, "no user list entries");
+}
+
+static void test_client_auth_user_whitespace_trimmed(void)
+{
+    const char *ini =
+        "[Server]\n"
+        "Address = vpn.example.com:443\n"
+        "[Auth]\n"
+        "User =   bob  \n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "client User whitespace parse ok");
+    ASSERT_EQ_STR(cfg.auth_username, "bob", "auth_username whitespace trimmed");
+}
+
+static void test_client_auth_user_empty_ignored(void)
+{
+    /* User = (empty) → auth_username stays empty */
+    const char *ini =
+        "[Server]\n"
+        "Address = vpn.example.com:443\n"
+        "[Auth]\n"
+        "User = \n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "empty User no error");
+    ASSERT_EQ_STR(cfg.auth_username, "", "empty User leaves auth_username empty");
+}
+
 static void test_backup_path_json_empty_array(void)
 {
     const char *json =
@@ -1188,7 +1281,7 @@ int main(void)
     test_subnet6_not_set();
     test_subnet6_duplicate_last_wins();
     test_auth_users_ini();
-    test_auth_users_ini_invalid_ignored();
+    test_auth_users_ini_plain_name_sets_auth_username();
     test_json_config_load();
     test_json_client_config_load();
     test_json_duplicate_users_last_wins();
@@ -1205,6 +1298,13 @@ int main(void)
     test_no_routes_config_false();
     test_json_client_route_options();
     test_json_client_no_routes();
+
+    /* client auth: User + Key */
+    test_client_auth_username_default_empty();
+    test_client_auth_user_plain();
+    test_client_auth_user_and_key();
+    test_client_auth_user_whitespace_trimmed();
+    test_client_auth_user_empty_ignored();
 
     /* backup path tests */
     test_backup_path_default_empty();

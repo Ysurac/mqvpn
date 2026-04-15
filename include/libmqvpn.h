@@ -327,6 +327,7 @@ MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
 
 MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
 MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
+MQVPN_API int mqvpn_config_set_auth_username(mqvpn_config_t *cfg, const char *username);
 MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
                                     const char *key);
 MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username);

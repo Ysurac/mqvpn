@@ -18,6 +18,7 @@ struct mqvpn_config_s {
     char    server_host[256];
     int     server_port;
     char    auth_key[256];
+    char    auth_username[64]; /* client-only: name to send in x-user header */
     char    user_names[MQVPN_MAX_USERS][64];
     char    user_keys[MQVPN_MAX_USERS][256];
     int     n_users;

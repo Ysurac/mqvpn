@@ -507,6 +507,17 @@ main(int argc, char *argv[])
 
         int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
 
+        const char *eff_auth_key_client = eff_auth_key;
+        const char *eff_auth_username = file_cfg.auth_username[0] ? file_cfg.auth_username : NULL;
+        if (!eff_auth_key_client && eff_n_users > 0) {
+            /* User = NAME:KEY style: use first entry's key and name */
+            if (eff_n_users > 1)
+                LOG_WRN("client mode: only the first user credential is used");
+            eff_auth_key_client = eff_user_keys[0];
+            if (!eff_auth_username)
+                eff_auth_username = eff_user_names[0];
+        }
+
         mqvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,
@@ -522,7 +533,8 @@ main(int argc, char *argv[])
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
-            .auth_key = eff_auth_key,
+            .auth_key = eff_auth_key_client,
+            .auth_username = eff_auth_username,
             .n_dns = n_dns,
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,

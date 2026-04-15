@@ -23,6 +23,7 @@ typedef struct mqvpn_client_cfg_s {
     int fec_scheme;             /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
     int cc;                     /* 0=bbr2 (default), 1=bbr, 2=cubic, 3=new_reno, 4=copa, 5=unlimited */
     const char *auth_key;       /* PSK for server authentication (NULL = no auth) */
+    const char *auth_username;  /* client username sent to server via x-user header (NULL = none) */
     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
     int n_dns;                  /* number of DNS servers */
     int reconnect;              /* 1=auto-reconnect on disconnect (default 1) */

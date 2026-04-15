@@ -92,6 +92,7 @@ Address = 203.0.113.1:443
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
+# User = alice             # optional: identifies this client on the server (shown in status/logs)
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
@@ -149,6 +150,7 @@ Client example:
     "mode": "client",
     "server_addr": "203.0.113.1:443",
     "auth_key": "client-key",
+    "auth_username": "alice",
     "cipher": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
     "insecure": true,
     "dns": ["1.1.1.1", "8.8.8.8"],
@@ -172,6 +174,7 @@ Client example:
 Notes:
 - `users` is server-side auth and accepts either objects (`{"name","key"}`) or `"name:key"` strings.
 - `auth_key` remains supported as a single legacy/global key.
+- `auth_username` is client-side only: the name sent to the server for identification in logs and status output. It does not affect authentication.
 - `mode` is optional if it can be inferred (`listen` implies server).
 
 ```bash
@@ -449,7 +452,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.1.0 — TLS verification, WLB scheduler, multi-client, PSK auth, DNS, config file
 - [x] v0.2.0 — Reconnection, kill switch, IPv6, ICMP PTB, systemd service
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
-- [ ] Per-client token auth
+- [x] Per-client token auth
 - [x] resolvectl DNS support (with resolv.conf fallback)
 - [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
