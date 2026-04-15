@@ -586,7 +586,12 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
              * PENDING + active=1 + in_use=0, unreachable by
              * reactivate_path(). Undo everything so the next netlink
              * event can retry cleanly (path_removed_by_platform stays 1,
-             * fd reverts to -1). */
+             * fd reverts to -1).
+             *
+             * Safe ordering: remove_path() first, then close(fd).
+             * Because the path is PENDING (not ACTIVE) and in_use=0,
+             * remove_path() skips xqc_conn_close_path() — xquic never
+             * touches this fd during teardown. */
             LOG_WRN("netlink: re-add %s not activated, will retry", ifname);
             mqvpn_client_remove_path(p->client, handle);
             close(fd);
@@ -616,39 +621,43 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     char buf[8192];
 
-    ssize_t len = recv(fd, buf, sizeof(buf), 0);
-    if (len <= 0) return;
+    for (;;) {
+        ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (len <= 0) break;
 
-    for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, (size_t)len);
-         nh = NLMSG_NEXT(nh, len)) {
-        if (nh->nlmsg_type == RTM_NEWADDR) {
-            struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
-            char ifname[IFNAMSIZ];
-            if (if_indextoname(ifa->ifa_index, ifname)) {
-                if (!try_readd_removed_path(p, ifname))
-                    try_reactivate_by_ifname(p, ifname);
+        int nlen = (int)len;
+        for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, nlen);
+             nh = NLMSG_NEXT(nh, nlen)) {
+            if (nh->nlmsg_type == RTM_NEWADDR) {
+                struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
+                char ifname[IFNAMSIZ];
+                if (if_indextoname(ifa->ifa_index, ifname)) {
+                    if (!try_readd_removed_path(p, ifname))
+                        try_reactivate_by_ifname(p, ifname);
+                }
+
+            } else if (nh->nlmsg_type == RTM_DELLINK) {
+                const char *ifname = nlmsg_get_ifname(nh);
+                if (!ifname) continue;
+                for (int i = 0; i < p->path_mgr.n_paths; i++) {
+                    if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
+                        remove_path_by_index(p, i);
+                }
+
+            } else if (nh->nlmsg_type == RTM_NEWLINK) {
+                struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
+                if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING))
+                    continue;
+                const char *ifname = nlmsg_get_ifname(nh);
+                if (!ifname) continue;
+                if (!iface_has_ip(ifname)) continue;
+
+                /* First: try to re-add paths removed by RTM_DELLINK (dead fd) */
+                if (try_readd_removed_path(p, ifname)) continue;
+
+                /* Otherwise: reactivate degraded/closed paths (fd still valid) */
+                try_reactivate_by_ifname(p, ifname);
             }
-
-        } else if (nh->nlmsg_type == RTM_DELLINK) {
-            const char *ifname = nlmsg_get_ifname(nh);
-            if (!ifname) continue;
-            for (int i = 0; i < p->path_mgr.n_paths; i++) {
-                if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
-                    remove_path_by_index(p, i);
-            }
-
-        } else if (nh->nlmsg_type == RTM_NEWLINK) {
-            struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
-            if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING)) continue;
-            const char *ifname = nlmsg_get_ifname(nh);
-            if (!ifname) continue;
-            if (!iface_has_ip(ifname)) continue;
-
-            /* First: try to re-add paths removed by RTM_DELLINK (dead fd) */
-            if (try_readd_removed_path(p, ifname)) continue;
-
-            /* Otherwise: reactivate degraded/closed paths (fd still valid) */
-            try_reactivate_by_ifname(p, ifname);
         }
     }
 }
