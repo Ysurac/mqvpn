@@ -1565,6 +1565,26 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     return MQVPN_OK;
 }
 
+int
+mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+
+    path_entry_t *p = find_path_by_handle(c, path);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    /* Free the slot but do NOT call xqc_conn_close_path().
+     * xquic will detect the dead fd via sendto() errors and remove
+     * the path through its normal PTO-based failure detection. */
+    p->status = MQVPN_PATH_CLOSED;
+    p->active = 0;
+    p->recreate_after_us = 0;
+    p->recreate_retries = 0;
+    p->path_stable_since_us = 0;
+    return MQVPN_OK;
+}
+
 /* ─── Path re-activation (platform-triggered) ─── */
 
 int
