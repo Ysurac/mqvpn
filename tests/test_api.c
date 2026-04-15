@@ -716,6 +716,41 @@ TEST(generate_key)
     ASSERT_EQ(mqvpn_generate_key(NULL, 64), MQVPN_ERR_INVALID_ARG);
 }
 
+/* ── drop_path preconditions ── */
+
+TEST(drop_path_null_client)
+{
+    ASSERT_EQ(mqvpn_client_drop_path(NULL, 1), MQVPN_ERR_INVALID_ARG);
+}
+
+TEST(drop_path_invalid_handle)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_drop_path(c, 999), MQVPN_ERR_INVALID_ARG);
+    mqvpn_client_destroy(c);
+}
+
+TEST(drop_path_sets_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    desc.fd = 42;
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+
+    /* Verify path is now CLOSED */
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    mqvpn_client_get_paths(c, info, 4, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -821,6 +856,11 @@ main(void)
     /* I/O feed tests */
     run_client_on_tun_packet_null();
     run_client_on_socket_recv_null();
+
+    /* Path drop tests */
+    run_drop_path_null_client();
+    run_drop_path_invalid_handle();
+    run_drop_path_sets_closed();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
