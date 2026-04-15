@@ -161,6 +161,7 @@ bench_start_vpn_server() {
 
 bench_start_vpn_client() {
     local paths="$1"  # e.g. "--path veth-a0 --path veth-b0"
+    local logfile="${2:-/dev/null}"
 
     # Kill previous client if running
     if [ -n "$_BENCH_CLIENT_PID" ] && kill -0 "$_BENCH_CLIENT_PID" 2>/dev/null; then
@@ -177,7 +178,7 @@ bench_start_vpn_client() {
         --auth-key "$_BENCH_PSK" \
         --scheduler "$BENCH_SCHEDULER" \
         --insecure \
-        --log-level "$BENCH_LOG_LEVEL" &
+        --log-level "$BENCH_LOG_LEVEL" >"$logfile" 2>&1 &
     _BENCH_CLIENT_PID=$!
     sleep 3
 
