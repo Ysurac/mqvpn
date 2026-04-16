@@ -1,15 +1,13 @@
 # Performance Tests
-# Runner requires: cmake gcc make git libevent-dev golang iptables
-#                  iproute2 iperf3 python3 jq openssl
+# Runner requires a Docker executor (runs as root in debian:12-slim)
 
 stages:
   - perf
 
 perf-test:
   stage: perf
+  image: debian:12-slim
   timeout: 30 minutes
-  # Prevents concurrent runs; combined with interruptible, a newer pipeline
-  # cancels an in-progress one (mirrors GitHub's cancel-in-progress: true).
   resource_group: perf-test
   interruptible: true
   variables:
@@ -18,14 +16,21 @@ perf-test:
     - when: manual
 
   before_script:
-    - sudo rm -rf ci_bench_results bench_results
+    - rm -rf ci_bench_results bench_results
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends
+        cmake gcc g++ make git
+        libevent-dev golang-go
+        iptables iproute2 iperf3
+        python3 jq openssl ca-certificates
+        procps
 
   script:
     # --- Cleanup stale state ---
-    - sudo pkill -f 'mqvpn.*ci-bench' || true
-    - sudo ip netns del ci-bench-server 2>/dev/null || true
-    - sudo ip netns del ci-bench-client 2>/dev/null || true
-    - sudo pkill -f 'iperf3' || true
+    - pkill -f 'mqvpn.*ci-bench' || true
+    - ip netns del ci-bench-server 2>/dev/null || true
+    - ip netns del ci-bench-client 2>/dev/null || true
+    - pkill -f 'iperf3' || true
 
     # --- Clean previous build ---
     - rm -rf third_party/xquic/third_party/boringssl third_party/xquic/build build
@@ -51,13 +56,12 @@ perf-test:
     - cd "$CI_PROJECT_DIR"
 
     # --- Benchmarks ---
-    - sudo bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh build/mqvpn
-    - sudo bash scripts/ci_benchmarks/ci_bench_failover.sh build/mqvpn
-    - sudo bash scripts/ci_benchmarks/ci_bench_aggregate.sh build/mqvpn
-
+    - bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh build/mqvpn
+    - bash scripts/ci_benchmarks/ci_bench_failover.sh build/mqvpn
+    - bash scripts/ci_benchmarks/ci_bench_aggregate.sh build/mqvpn
 
   after_script:
-    - sudo rm -rf ci_bench_results
+    - rm -rf ci_bench_results
 
   artifacts:
     name: "perf-results-$CI_COMMIT_SHA"
