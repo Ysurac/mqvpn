@@ -7,8 +7,6 @@ stages:
 
 perf-test:
   stage: perf
-  tags:
-    - perf-test
   timeout: 30 minutes
   # Prevents concurrent runs; combined with interruptible, a newer pipeline
   # cancels an in-progress one (mirrors GitHub's cancel-in-progress: true).
