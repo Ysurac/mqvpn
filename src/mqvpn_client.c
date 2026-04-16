@@ -52,6 +52,7 @@
 #define PATH_RECREATE_MAX_DELAY_US (60ULL * 1000000) /* 60 sec max backoff */
 #define PATH_RECREATE_MAX_RETRIES  6                 /* max consecutive failures */
 #define PATH_STABLE_THRESHOLD_US   (30ULL * 1000000) /* 30 sec to confirm stable */
+#define SOCKET_BUF_SIZE            (7 * 1024 * 1024) /* 7 MiB socket buffer */
 
 /* ─── Forward declarations ─── */
 
@@ -165,6 +166,10 @@ struct mqvpn_client_s {
     uint64_t reconnect_scheduled_us;
     int shutting_down;
 
+    /* Log correlation */
+    uint32_t
+        conn_id; /* monotonic connection ID for log correlation, bumped on each connect */
+
     /* Timer: next wake (from xquic set_event_timer) */
     uint64_t next_wake_us;
 
@@ -269,9 +274,11 @@ client_log(mqvpn_client_t *c, mqvpn_log_level_t level, const char *fmt, ...)
 {
     if (!c->cbs.log) return;
     char buf[512];
+    int off = snprintf(buf, sizeof(buf), "[conn:%u] ", c->conn_id);
+    if (off < 0 || off >= (int)sizeof(buf)) off = 0;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    vsnprintf(buf + off, sizeof(buf) - off, fmt, ap);
     va_end(ap);
     c->cbs.log(level, buf, c->user_ctx);
 }
@@ -760,13 +767,13 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
             c->state != MQVPN_STATE_TUNNEL_READY) {
             /* Compute MTU */
-            int tun_mtu = 1280;
+            int tun_mtu = IPV6_MIN_MTU;
             if (conn->dgram_mss > 0) {
                 size_t udp_mss =
                     xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
                 if (udp_mss >= 68) tun_mtu = (int)udp_mss;
             }
-            if (conn->addr6_assigned && tun_mtu < 1280) tun_mtu = 1280;
+            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
             c->mtu = tun_mtu;
 
             /* Build tunnel info for callback */
@@ -834,7 +841,7 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
     uint8_t fwd_pkt[PACKET_BUF_SIZE];
 
     if (ip_ver == 4) {
-        if (payload_len < 20) return;
+        if (payload_len < IPV4_MIN_HDR) return;
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[8] <= 1) {
             if (c->conn && c->conn->addr_assigned)
@@ -1051,6 +1058,7 @@ cli_conn_destroy(mqvpn_client_t *c)
 static int
 cli_start_connection(mqvpn_client_t *c)
 {
+    c->conn_id++;
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
     conn->client = c;
@@ -1315,7 +1323,7 @@ mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *des
     p->fd = fd;
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
-    int bufsize = 7 * 1024 * 1024; /* 7 MiB */
+    int bufsize = SOCKET_BUF_SIZE;
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 #ifdef SO_SNDBUFFORCE
