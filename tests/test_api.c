@@ -815,6 +815,27 @@ TEST(drop_path_sets_closed)
     mqvpn_client_destroy(c);
 }
 
+TEST(drop_path_double_drop)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    desc.fd = 42;
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+
+    mqvpn_path_info_t info[4];
+    int n = 0;
+    mqvpn_client_get_paths(c, info, 4, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -933,6 +954,7 @@ main(void)
     run_drop_path_null_client();
     run_drop_path_invalid_handle();
     run_drop_path_sets_closed();
+    run_drop_path_double_drop();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
