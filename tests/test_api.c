@@ -224,6 +224,7 @@ TEST(config_set_insecure)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_insecure(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->insecure, 1);
     ASSERT_EQ(mqvpn_config_set_insecure(cfg, 0), MQVPN_OK);
     mqvpn_config_free(cfg);
 }
@@ -233,6 +234,7 @@ TEST(config_set_scheduler)
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_MINRTT), MQVPN_OK);
     ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_WLB), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_WLB);
     mqvpn_config_free(cfg);
 }
 
@@ -240,6 +242,7 @@ TEST(config_set_log_level)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_log_level(cfg, MQVPN_LOG_DEBUG), MQVPN_OK);
+    ASSERT_EQ(cfg->log_level, MQVPN_LOG_DEBUG);
     ASSERT_EQ(mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR), MQVPN_OK);
     mqvpn_config_free(cfg);
 }
@@ -248,6 +251,8 @@ TEST(config_set_reconnect)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_reconnect(cfg, 1, 5), MQVPN_OK);
+    ASSERT_EQ(cfg->reconnect_enable, 1);
+    ASSERT_EQ(cfg->reconnect_interval_sec, 5);
     ASSERT_EQ(mqvpn_config_set_reconnect(cfg, 0, 0), MQVPN_OK);
     mqvpn_config_free(cfg);
 }
@@ -256,6 +261,7 @@ TEST(config_set_killswitch_hint)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_killswitch_hint(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->killswitch_hint, 1);
     ASSERT_EQ(mqvpn_config_set_killswitch_hint(cfg, 0), MQVPN_OK);
     mqvpn_config_free(cfg);
 }
@@ -264,6 +270,8 @@ TEST(config_set_listen)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_listen(cfg, "0.0.0.0", 443), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->listen_addr, "0.0.0.0");
+    ASSERT_EQ(cfg->listen_port, 443);
     mqvpn_config_free(cfg);
 }
 
@@ -271,7 +279,9 @@ TEST(config_set_subnet)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_subnet(cfg, "10.0.0.0/24"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->subnet, "10.0.0.0/24");
     ASSERT_EQ(mqvpn_config_set_subnet6(cfg, "fd00::/112"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->subnet6, "fd00::/112");
     mqvpn_config_free(cfg);
 }
 
@@ -280,6 +290,8 @@ TEST(config_set_tls_cert)
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_tls_cert(cfg, "/path/cert.pem", "/path/key.pem"),
               MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_cert, "/path/cert.pem");
+    ASSERT_STR_EQ(cfg->tls_key, "/path/key.pem");
     mqvpn_config_free(cfg);
 }
 
@@ -287,6 +299,7 @@ TEST(config_set_max_clients)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_max_clients(cfg, 128), MQVPN_OK);
+    ASSERT_EQ(cfg->max_clients, 128);
     mqvpn_config_free(cfg);
 }
 
@@ -294,6 +307,7 @@ TEST(config_set_multipath)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_multipath(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->multipath, 1);
     ASSERT_EQ(mqvpn_config_set_multipath(cfg, 0), MQVPN_OK);
     mqvpn_config_free(cfg);
 }
