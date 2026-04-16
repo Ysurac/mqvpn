@@ -1326,6 +1326,18 @@ cleanup:
  *  Public API — Lifecycle
  * ================================================================ */
 
+static int
+map_log_level_to_xquic(mqvpn_log_level_t level)
+{
+    switch (level) {
+    case MQVPN_LOG_DEBUG: return 5;
+    case MQVPN_LOG_INFO: return 3;
+    case MQVPN_LOG_WARN: return 2;
+    case MQVPN_LOG_ERROR: return 1;
+    default: return 3;
+    }
+}
+
 mqvpn_client_t *
 mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
                  void *user_ctx)
@@ -1383,14 +1395,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     };
 
     /* Map log level */
-    int xqc_log_level;
-    switch (cfg->log_level) {
-    case MQVPN_LOG_DEBUG: xqc_log_level = 5; break;
-    case MQVPN_LOG_INFO: xqc_log_level = 3; break;
-    case MQVPN_LOG_WARN: xqc_log_level = 2; break;
-    case MQVPN_LOG_ERROR: xqc_log_level = 1; break;
-    default: xqc_log_level = 3; break;
-    }
+    int xqc_log_level = map_log_level_to_xquic(cfg->log_level);
 
     xqc_config_t xconfig;
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_CLIENT) < 0) goto cleanup;

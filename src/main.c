@@ -98,6 +98,18 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
 
 /* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
 
+static int
+map_log_level_to_xquic(mqvpn_log_level_t level)
+{
+    switch (level) {
+    case MQVPN_LOG_DEBUG: return 5;
+    case MQVPN_LOG_INFO: return 3;
+    case MQVPN_LOG_WARN: return 2;
+    case MQVPN_LOG_ERROR: return 1;
+    default: return 3;
+    }
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -344,14 +356,7 @@ main(int argc, char *argv[])
     }
 
     /* Map our log level to xquic log level (roughly) */
-    int xqc_log_level;
-    switch (log_level) {
-    case MQVPN_LOG_DEBUG: xqc_log_level = 5; break; /* XQC_LOG_DEBUG */
-    case MQVPN_LOG_INFO: xqc_log_level = 3; break;  /* XQC_LOG_INFO */
-    case MQVPN_LOG_WARN: xqc_log_level = 2; break;  /* XQC_LOG_WARN */
-    case MQVPN_LOG_ERROR: xqc_log_level = 1; break; /* XQC_LOG_ERROR */
-    default: xqc_log_level = 3; break;
-    }
+    int xqc_log_level = map_log_level_to_xquic(log_level);
 
     /* Paths: CLI paths override config paths entirely */
     if (n_paths == 0 && file_cfg.n_paths > 0) {
