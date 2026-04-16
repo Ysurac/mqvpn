@@ -663,6 +663,52 @@ test_ipv6_get6_large_offset(void)
     ASSERT_EQ_INT(off, 65534, "offset 65534 round-trip");
 }
 
+static void
+test_pool_max_boundary(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "init /24");
+    ASSERT_EQ_INT(pool.pool_size, 254, "/24 pool_size is 254");
+
+    mqvpn_addr_pool_t pool16;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool16, "172.16.0.0/16"), 0, "init /16");
+    ASSERT_EQ_INT(pool16.pool_size, 254, "/16 capped to 254");
+}
+
+static void
+test_ipv6_large_offset_no_overflow(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "init v4");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/96"), 0, "init v6 /96");
+
+    struct in6_addr addr;
+    mqvpn_addr_pool_get6(&pool, 254, &addr);
+    char str[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &addr, str, sizeof(str));
+    ASSERT_EQ_STR(str, "fd00::fe", "offset 254 is fd00::fe");
+
+    ASSERT_EQ_INT(addr.s6_addr[0], 0xfd, "prefix byte 0");
+    ASSERT_EQ_INT(addr.s6_addr[1], 0x00, "prefix byte 1");
+    for (int i = 2; i < 12; i++) {
+        ASSERT_EQ_INT(addr.s6_addr[i], 0, "prefix byte zeroed");
+    }
+}
+
+static void
+test_cidr_non_aligned(void)
+{
+    mqvpn_addr_pool_t pool;
+    int ret = mqvpn_addr_pool_init(&pool, "10.0.0.5/24");
+    if (ret == 0) {
+        struct in_addr ip;
+        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc from non-aligned");
+        uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
+        ASSERT_TRUE(off >= 2 && off <= 254, "offset valid from non-aligned CIDR");
+    }
+    /* If init rejects it, that's also acceptable — no crash */
+}
+
 int
 main(void)
 {
@@ -696,6 +742,11 @@ main(void)
     test_ipv6_offset6_below_base();
     test_ipv6_get6_offset_zero();
     test_ipv6_get6_large_offset();
+
+    /* IP pool boundary tests */
+    test_pool_max_boundary();
+    test_ipv6_large_offset_no_overflow();
+    test_cidr_non_aligned();
 
     printf("\n=== test_session: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
