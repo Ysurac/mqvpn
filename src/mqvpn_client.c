@@ -855,7 +855,7 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         fwd_pkt[10] = (sum >> 8) & 0xFF;
         fwd_pkt[11] = sum & 0xFF;
     } else if (ip_ver == 6) {
-        if (payload_len < 40 || !conn->addr6_assigned) return;
+        if (payload_len < IPV6_MIN_HDR || !conn->addr6_assigned) return;
         memcpy(fwd_pkt, payload, payload_len);
         if (fwd_pkt[7] <= 1) {
             if (c->conn && c->conn->addr6_assigned)
@@ -925,7 +925,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(mss, conn->masque_stream_id);
         if (udp_mss >= 68) {
             int new_mtu = (int)udp_mss;
-            if (conn->addr6_assigned && new_mtu < 1280) new_mtu = 1280;
+            if (conn->addr6_assigned && new_mtu < IPV6_MIN_MTU) new_mtu = IPV6_MIN_MTU;
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;
@@ -1460,11 +1460,11 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
 
     uint8_t ip_ver = pkt[0] >> 4;
     if (ip_ver == 4) {
-        if (len < 20) return MQVPN_ERR_INVALID_ARG;
+        if (len < IPV4_MIN_HDR) return MQVPN_ERR_INVALID_ARG;
         if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0)
             return MQVPN_OK; /* silently drop: src mismatch */
     } else if (ip_ver == 6) {
-        if (len < 40 || !conn->addr6_assigned) return MQVPN_OK;
+        if (len < IPV6_MIN_HDR || !conn->addr6_assigned) return MQVPN_OK;
         if (memcmp(pkt + 8, conn->assigned_ip6, 16) != 0) return MQVPN_OK;
     } else {
         return MQVPN_OK;
