@@ -29,6 +29,7 @@
 #include <poll.h>
 
 #include "libmqvpn.h"
+#include "mqvpn_internal.h"
 
 /* ── Test infrastructure ── */
 
@@ -788,6 +789,22 @@ TEST(server_session_quic_loopback)
     close(cli_fd);
 }
 
+/* ── max_clients config boundary ── */
+
+TEST(server_max_clients_config)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_listen(cfg, "0.0.0.0", 4433);
+    mqvpn_config_set_max_clients(cfg, 1);
+    ASSERT_EQ(cfg->max_clients, 1);
+
+    /* Setter stores value as-is (no clamp) */
+    mqvpn_config_set_max_clients(cfg, 0);
+    ASSERT_EQ(cfg->max_clients, 0);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Main ── */
 
 int
@@ -829,6 +846,9 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+
+    /* max_clients config boundary */
+    run_server_max_clients_config();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return (g_tests_passed == g_tests_run) ? 0 : 1;
