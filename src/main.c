@@ -6,6 +6,8 @@
 #include "vpn_server.h"
 #include "flow_sched.h"
 
+#include <xquic/xquic.h> /* for XQC_LOG_* constants */
+
 #ifdef _WIN32
 #  include "platform_windows.h"
 #  include <winsock2.h>
@@ -101,13 +103,12 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
 static int
 map_log_level_to_xquic(mqvpn_log_level_t level)
 {
-    /* xqc_log_level_t: REPORT=0, FATAL=1, ERROR=2, WARN=3, STATS=4, INFO=5, DEBUG=6 */
     switch (level) {
-    case MQVPN_LOG_DEBUG: return 6;
-    case MQVPN_LOG_INFO: return 5;
-    case MQVPN_LOG_WARN: return 3;
-    case MQVPN_LOG_ERROR: return 2;
-    default: return 5;
+    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
+    case MQVPN_LOG_INFO: return XQC_LOG_INFO;
+    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
+    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
+    default: return XQC_LOG_INFO;
     }
 }
 
