@@ -169,7 +169,10 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
      * that stale fd events don't fire ("tun read: Bad file descriptor").
      * The TUN will be recreated in cb_tunnel_config_ready on reconnect. */
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
-        /* Reset netlink path recovery state */
+        /* Reset netlink path recovery state.
+         * path_removed_by_platform is intentionally NOT reset — it tracks
+         * physical interface absence (RTM_DELLINK), which persists across
+         * reconnects. Only cleared when the interface reappears. */
         memset(p->path_recoverable, 0, sizeof(p->path_recoverable));
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         cleanup_killswitch(p);
@@ -483,6 +486,52 @@ platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
  *  Netlink path recovery accelerator
  * ================================================================ */
 
+/* Extract interface name from IFLA_IFNAME attribute in netlink message.
+ * Required for RTM_DELLINK where if_indextoname() fails (interface gone). */
+static const char *
+nlmsg_get_ifname(struct nlmsghdr *nh)
+{
+    struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
+    struct rtattr *rta = IFLA_RTA(ifi);
+    int rtl = (int)IFLA_PAYLOAD(nh);
+    for (; RTA_OK(rta, rtl); rta = RTA_NEXT(rta, rtl)) {
+        if (rta->rta_type == IFLA_IFNAME) return (const char *)RTA_DATA(rta);
+    }
+    return NULL;
+}
+
+/* Remove a path that was destroyed by the kernel (RTM_DELLINK).
+ * Cleans up: library path, libevent, fd. Preserves iface name for re-add. */
+static void
+remove_path_by_index(platform_ctx_t *p, int idx)
+{
+    if (p->path_mgr.paths[idx].fd < 0) return; /* already removed */
+
+    LOG_WRN("netlink: interface %s removed, closing path %d",
+            p->path_mgr.paths[idx].iface, idx);
+
+    /* Use drop_path (not remove_path) — frees the library slot without
+     * calling xqc_conn_close_path(). xquic detects the dead fd naturally
+     * via sendto() errors, same as ip link set down. */
+    mqvpn_client_drop_path(p->client, p->lib_path_handles[idx]);
+
+    /* Remove libevent watcher */
+    if (p->ev_udp[idx]) {
+        event_del(p->ev_udp[idx]);
+        event_free(p->ev_udp[idx]);
+        p->ev_udp[idx] = NULL;
+    }
+
+    /* Close dead socket */
+    close(p->path_mgr.paths[idx].fd);
+    p->path_mgr.paths[idx].fd = -1;
+    p->path_mgr.paths[idx].active = 0;
+
+    /* Mark as removed by platform — prevents library timer recovery on stale fd */
+    p->path_removed_by_platform[idx] = 1;
+    p->path_recoverable[idx] = 0;
+}
+
 /* Check if interface has an IP address (v4 or v6) */
 static int
 iface_has_ip(const char *ifname)
@@ -521,6 +570,134 @@ try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
     }
 }
 
+/* Re-add a path whose interface was previously removed (RTM_DELLINK).
+ * Creates a new UDP socket, registers with library and libevent.
+ * Returns 1 if a path was re-added and activated, 0 otherwise. */
+static int
+try_readd_removed_path(platform_ctx_t *p, const char *ifname)
+{
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (!p->path_removed_by_platform[i]) continue;
+        if (strcmp(p->path_mgr.paths[i].iface, ifname) != 0) continue;
+
+        /* Create new UDP socket bound to the re-appeared interface */
+        sa_family_t af = p->server_addr.ss_family;
+        int fd = (int)socket(af, SOCK_DGRAM, 0);
+        if (fd < 0) {
+            LOG_WRN("netlink: socket() for re-add %s: %s", ifname, strerror(errno));
+            return 0;
+        }
+        if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
+            LOG_WRN("netlink: fcntl() for re-add %s: %s", ifname, strerror(errno));
+            close(fd);
+            return 0;
+        }
+
+        /* Socket buffers are set by mqvpn_client_add_path_fd() (7 MiB) */
+
+        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, ifname,
+                       (socklen_t)(strlen(ifname) + 1)) < 0) {
+            LOG_WRN("netlink: SO_BINDTODEVICE(%s) for re-add: %s", ifname,
+                    strerror(errno));
+            close(fd);
+            return 0;
+        }
+
+        /* Bind to ephemeral port */
+        mqvpn_path_t *mp = &p->path_mgr.paths[i];
+        memset(&mp->local_addr, 0, sizeof(mp->local_addr));
+        if (af == AF_INET6) {
+            struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&mp->local_addr;
+            sin6->sin6_family = AF_INET6;
+            sin6->sin6_addr = in6addr_any;
+            mp->local_addrlen = sizeof(struct sockaddr_in6);
+        } else {
+            struct sockaddr_in *sin4 = (struct sockaddr_in *)&mp->local_addr;
+            sin4->sin_family = AF_INET;
+            sin4->sin_addr.s_addr = htonl(INADDR_ANY);
+            mp->local_addrlen = sizeof(struct sockaddr_in);
+        }
+        if (bind(fd, (struct sockaddr *)&mp->local_addr, mp->local_addrlen) < 0) {
+            LOG_WRN("netlink: bind() for re-add %s: %s", ifname, strerror(errno));
+            close(fd);
+            return 0;
+        }
+
+        /* Update path_mgr slot in-place (n_paths unchanged, slot reuse) */
+        mp->fd = fd;
+        mp->active = 1;
+        mp->in_use = 0;
+        mp->path_id = 0;
+
+        /* Register with library — add_path_fd() may call
+         * client_activate_path() synchronously (fires cb_path_event
+         * ACTIVE before returning). We store handle AFTER this call. */
+        mqvpn_path_desc_t desc = {0};
+        desc.struct_size = sizeof(desc);
+        desc.fd = fd;
+        snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
+        if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
+            memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
+            desc.local_addr_len = mp->local_addrlen;
+        }
+
+        mqvpn_path_handle_t handle = mqvpn_client_add_path_fd(p->client, fd, &desc);
+        if (handle < 0) {
+            LOG_WRN("netlink: add_path_fd() for re-add %s failed", ifname);
+            close(fd);
+            mp->fd = -1;
+            mp->active = 0;
+            return 0;
+        }
+        p->lib_path_handles[i] = handle;
+
+        /* Verify activation. cb_path_event(ACTIVE) already fired inside
+         * add_path_fd() but couldn't match our slot (lib_path_handles[i]
+         * wasn't stored yet). Query path status explicitly instead. */
+        mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+        int n_info = 0;
+        mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n_info);
+        int activated = 0;
+        for (int j = 0; j < n_info; j++) {
+            if (pinfo[j].handle == handle && pinfo[j].status == MQVPN_PATH_ACTIVE) {
+                activated = 1;
+                break;
+            }
+        }
+
+        if (!activated) {
+            /* Activation failed (xqc_conn_create_path error) — path is
+             * PENDING + active=1 + in_use=0, unreachable by
+             * reactivate_path(). Undo everything so the next netlink
+             * event can retry cleanly (path_removed_by_platform stays 1,
+             * fd reverts to -1).
+             *
+             * Safe ordering: remove_path() first, then close(fd).
+             * Because the path is PENDING (not ACTIVE) and in_use=0,
+             * remove_path() skips xqc_conn_close_path() — xquic never
+             * touches this fd during teardown. */
+            LOG_WRN("netlink: re-add %s not activated, will retry", ifname);
+            mqvpn_client_remove_path(p->client, handle);
+            close(fd);
+            mp->fd = -1;
+            mp->active = 0;
+            return 0;
+        }
+
+        /* Activation confirmed — register libevent and clear flags */
+        p->ev_udp[i] = event_new(p->eb, fd, EV_READ | EV_PERSIST, on_socket_read, p);
+        event_add(p->ev_udp[i], NULL);
+
+        p->path_removed_by_platform[i] = 0;
+        p->path_recoverable[i] = 0;
+
+        LOG_INF("netlink: interface %s re-appeared, path %d re-added (fd=%d)", ifname, i,
+                fd);
+        return 1;
+    }
+    return 0;
+}
+
 static void
 on_netlink_event(evutil_socket_t fd, short what, void *arg)
 {
@@ -528,24 +705,43 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     char buf[8192];
 
-    ssize_t len = recv(fd, buf, sizeof(buf), 0);
-    if (len <= 0) return;
+    for (;;) {
+        ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (len <= 0) break;
 
-    for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, (size_t)len);
-         nh = NLMSG_NEXT(nh, len)) {
-        if (nh->nlmsg_type == RTM_NEWADDR) {
-            struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
-            char ifname[IFNAMSIZ];
-            if (if_indextoname(ifa->ifa_index, ifname))
+        int nlen = (int)len;
+        for (struct nlmsghdr *nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, nlen);
+             nh = NLMSG_NEXT(nh, nlen)) {
+            if (nh->nlmsg_type == RTM_NEWADDR) {
+                struct ifaddrmsg *ifa = (struct ifaddrmsg *)NLMSG_DATA(nh);
+                char ifname[IFNAMSIZ];
+                if (if_indextoname(ifa->ifa_index, ifname)) {
+                    if (!try_readd_removed_path(p, ifname))
+                        try_reactivate_by_ifname(p, ifname);
+                }
+
+            } else if (nh->nlmsg_type == RTM_DELLINK) {
+                const char *ifname = nlmsg_get_ifname(nh);
+                if (!ifname) continue;
+                for (int i = 0; i < p->path_mgr.n_paths; i++) {
+                    if (strcmp(p->path_mgr.paths[i].iface, ifname) == 0)
+                        remove_path_by_index(p, i);
+                }
+
+            } else if (nh->nlmsg_type == RTM_NEWLINK) {
+                struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
+                if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING))
+                    continue;
+                const char *ifname = nlmsg_get_ifname(nh);
+                if (!ifname) continue;
+                if (!iface_has_ip(ifname)) continue;
+
+                /* First: try to re-add paths removed by RTM_DELLINK (dead fd) */
+                if (try_readd_removed_path(p, ifname)) continue;
+
+                /* Otherwise: reactivate degraded/closed paths (fd still valid) */
                 try_reactivate_by_ifname(p, ifname);
-
-        } else if (nh->nlmsg_type == RTM_NEWLINK) {
-            struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
-            if (!(ifi->ifi_flags & IFF_UP) || !(ifi->ifi_flags & IFF_RUNNING)) continue;
-            char ifname[IFNAMSIZ];
-            if (!if_indextoname(ifi->ifi_index, ifname)) continue;
-            /* Only reactivate if interface has an IP address */
-            if (iface_has_ip(ifname)) try_reactivate_by_ifname(p, ifname);
+            }
         }
     }
 }

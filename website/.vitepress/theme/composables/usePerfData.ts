@@ -98,17 +98,39 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     for (const item of items.value) {
       if (item.data.test !== 'failover') continue
       for (const sched of ['wlb', 'minrtt']) {
-        const d = item.data.results?.[sched] || {}
-        rows.push({
-          commit: fmtCommit(item.commit),
-          date: fmtDate(item.timestamp),
-          scheduler: sched,
-          ttf: fmtNum(d.ttf_sec, 2),
-          ttr: fmtNum(d.ttr_sec, 2),
-          pre: fmtNum(d.pre_fault_avg_mbps),
-          degraded: fmtNum(d.degraded_avg_mbps),
-          post: fmtNum(d.post_recover_avg_mbps),
-        })
+        const r = item.data.results?.[sched] || {}
+        // New format: fault_a / fault_b sub-objects
+        if (r.fault_a) {
+          for (const fp of ['fault_a', 'fault_b']) {
+            const d = r[fp] || {}
+            rows.push({
+              commit: fmtCommit(item.commit),
+              date: fmtDate(item.timestamp),
+              scheduler: sched,
+              fault_path: fp === 'fault_a' ? 'A' : 'B',
+              ttf: fmtNum(d.ttf_sec, 2),
+              ttr: fmtNum(d.ttr_sec, 2),
+              pre: fmtNum(d.pre_fault_avg_mbps),
+              degraded: fmtNum(d.degraded_avg_mbps),
+              recovery: fmtNum(d.recovery_avg_mbps),
+              post: fmtNum(r.post_recover_avg_mbps),
+            })
+          }
+        } else {
+          // Old format: flat (backward compat for existing data)
+          rows.push({
+            commit: fmtCommit(item.commit),
+            date: fmtDate(item.timestamp),
+            scheduler: sched,
+            fault_path: 'A',
+            ttf: fmtNum(r.ttf_sec, 2),
+            ttr: fmtNum(r.ttr_sec, 2),
+            pre: fmtNum(r.pre_fault_avg_mbps),
+            degraded: fmtNum(r.degraded_avg_mbps),
+            recovery: '-',
+            post: fmtNum(r.post_recover_avg_mbps),
+          })
+        }
       }
     }
     return rows
@@ -154,27 +176,6 @@ export function usePerfData(basePath: string, maxEntries = 10) {
           wlb: fmtNum(s.wlb_mbps),
           minrtt: fmtNum(s.minrtt_mbps),
         })
-      }
-    }
-    return rows
-  })
-
-  const flowScalingRows = computed(() => {
-    const rows: any[] = []
-    for (const item of items.value) {
-      if (item.data.test !== 'flow_scaling') continue
-      for (const sched of Object.keys(item.data.results || {})) {
-        const arr = item.data.results[sched]
-        if (!Array.isArray(arr)) continue
-        for (const r of arr) {
-          rows.push({
-            commit: fmtCommit(item.commit),
-            date: fmtDate(item.timestamp),
-            scheduler: sched,
-            streams: r.streams,
-            mbps: fmtNum(r.mbps),
-          })
-        }
       }
     }
     return rows
@@ -244,7 +245,6 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     failoverRows,
     aggregateRows,
     multipathSchedulerRows,
-    flowScalingRows,
     udpSweepSummaryRows,
     udpSweepRows,
     ntnRows,

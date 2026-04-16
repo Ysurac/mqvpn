@@ -10,28 +10,28 @@
 #endif
 
 typedef struct mqvpn_server_cfg_s {
-    const char  *listen_addr;   /* bind address (e.g. "0.0.0.0") */
-    int          listen_port;   /* bind port (e.g. 443) */
-    const char  *subnet;        /* client IP pool CIDR (e.g. "10.0.0.0/24") */
-    const char  *subnet6;       /* IPv6 client pool CIDR (NULL = disabled) */
-    const char  *tun_name;      /* TUN device name */
-    const char  *cert_file;     /* TLS certificate path */
-    const char  *key_file;      /* TLS private key path */
-    const char  *tls_ciphers;   /* TLS cipher suites list */
-    int          log_level;     /* xquic log level */
-    int          scheduler;     /* 0=minrtt, 1=wlb (default) */
-    int          reinjection_control; /* 1=enable reinjection control */
-    int          reinjection_mode;    /* 0=default, 1=deadline, 2=dgram */
-    int          fec_enable;    /* 1=enable FEC */
-    int          fec_scheme;    /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
-    int          cc;            /* 0=bbr2 (default), 1=bbr, 2=cubic, 3=new_reno, 4=copa, 5=unlimited */
-    const char  *auth_key;     /* PSK for client authentication (NULL = no auth) */
-    const char  *user_names[64];
-    const char  *user_keys[64];
-    int          n_users;
-    int          max_clients;    /* max concurrent clients (default 64) */
-    const char  *control_addr;  /* bind address for JSON control API (default 127.0.0.1) */
-    int          control_port;  /* TCP port for JSON control API (0 = disabled) */
+    const char *listen_addr;        /* bind address (e.g. "0.0.0.0") */
+    int listen_port;                /* bind port (e.g. 443) */
+    const char *subnet;             /* client IP pool CIDR (e.g. "10.0.0.0/24") */
+    const char *subnet6;            /* IPv6 client pool CIDR (NULL = disabled) */
+    const char *tun_name;           /* TUN device name */
+    const char *cert_file;          /* TLS certificate path */
+    const char *key_file;           /* TLS private key path */
+    const char *tls_ciphers;        /* TLS cipher suites list */
+    int log_level;                  /* xquic log level */
+    int scheduler;                  /* 0=minrtt, 1=wlb (default) */
+    int reinjection_control;        /* 1=enable reinjection control */
+    int reinjection_mode;           /* 0=default, 1=deadline, 2=dgram */
+    int fec_enable;                 /* 1=enable FEC */
+    int fec_scheme;                 /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
+    int cc;                         /* 0=bbr2 (default), 1=bbr, 2=cubic, 3=new_reno, 4=copa, 5=unlimited */
+    const char *auth_key;           /* PSK for client authentication (NULL = no auth) */
+    const char *user_names[64];
+    const char *user_keys[64];
+    int n_users;
+    int max_clients;                /* max concurrent clients (default 64) */
+    const char *control_addr;       /* bind address for JSON control API (default 127.0.0.1) */
+    int control_port;               /* TCP port for JSON control API (0 = disabled) */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

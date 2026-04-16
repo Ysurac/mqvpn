@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: doc
 ---
 
 <script setup>
@@ -9,14 +9,16 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, flowScalingRows, udpSweepSummaryRows, udpSweepRows, ntnRows
+  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
 // Failover filter
 const foSchedFilter = ref('wlb')
+const foPathFilter = ref('A')
 const filteredFailoverRows = computed(() => {
   return failoverRows.value.filter(r => {
     if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    if (foPathFilter.value && r.fault_path !== foPathFilter.value) return false
     return true
   })
 })
@@ -28,17 +30,6 @@ const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
     if (aggStreamsFilter.value && String(r.streams) !== aggStreamsFilter.value) return false
-    return true
-  })
-})
-
-// Flow scaling filters
-const fsSchedFilter = ref('')
-const fsStreamsFilter = ref('')
-const filteredFlowScalingRows = computed(() => {
-  return flowScalingRows.value.filter(r => {
-    if (fsSchedFilter.value && r.scheduler !== fsSchedFilter.value) return false
-    if (fsStreamsFilter.value && String(r.streams) !== fsStreamsFilter.value) return false
     return true
   })
 })
@@ -57,6 +48,7 @@ const filteredUdpSweepRows = computed(() => {
 
 <p class="page-desc">Extended benchmark suite run every Sunday at 3:00 UTC.<br>Includes all per-commit tests plus additional scenario-based tests.</p>
 
+<ClientOnly>
 <div v-if="loading">Loading...</div>
 <div v-else-if="error && !error.includes('404')" style="color: red;">Error: {{ error }}</div>
 <div v-else-if="rawRows.length === 0 && multipathSchedulerRows.length === 0" class="no-data-block">
@@ -92,16 +84,19 @@ const filteredUdpSweepRows = computed(() => {
 
 ## Failover
 
+<p class="section-desc">Symmetric bandwidth (150Mbps + 150Mbps), asymmetric delay (10ms + 30ms RTT). Path A fault then Path B fault in sequence.</p>
+
 <div v-if="failoverRows.length === 0">No data.</div>
 <template v-else>
 <div class="filter-bar">
   <label>Scheduler: <select v-model="foSchedFilter"><option value="">All</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
+  <label>Fault Path: <select v-model="foPathFilter"><option value="">All</option><option value="A">Path A</option><option value="B">Path B</option></select></label>
 </div>
 <table>
-  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>TTF (s)</th><th>TTR (s)</th><th>Pre-fault (Mbps)</th><th>Degraded (Mbps)</th><th>Post-recover (Mbps)</th></tr></thead>
+  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>Fault Path</th><th>TTF (s)</th><th>TTR (s)</th><th>Pre-fault (Mbps)</th><th>Degraded (Mbps)</th><th>Recovery (Mbps)</th><th>Post-recover (Mbps)</th></tr></thead>
   <tbody>
     <tr v-for="(r, i) in filteredFailoverRows" :key="'fo-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.post }}</td>
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.fault_path }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.recovery }}</td><td>{{ r.post }}</td>
     </tr>
   </tbody>
 </table>
@@ -167,29 +162,9 @@ const filteredUdpSweepRows = computed(() => {
   </tbody>
 </table>
 
-## Flow Scaling
-
-<p class="section-desc">Measures throughput as the number of parallel TCP streams increases.</p>
-
-<div v-if="flowScalingRows.length === 0">No data.</div>
-<template v-else>
-<div class="filter-bar">
-  <label>Scheduler: <select v-model="fsSchedFilter"><option value="">All</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
-  <label>Streams: <select v-model="fsStreamsFilter"><option value="">All</option><option value="1">1</option><option value="4">4</option><option value="16">16</option><option value="64">64</option></select></label>
-</div>
-<table>
-  <thead><tr><th>Commit</th><th>Date</th><th>Scheduler</th><th>Streams</th><th>Throughput (Mbps)</th></tr></thead>
-  <tbody>
-    <tr v-for="(r, i) in filteredFlowScalingRows" :key="'fs-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.streams }}</td><td>{{ r.mbps }}</td>
-    </tr>
-  </tbody>
-</table>
-</template>
-
 ## UDP Rate Sweep
 
-<p class="section-desc">Sweeps UDP send rate from 200-380 Mbps to find the saturation point (loss > 5%). Payload: 1100B, DL direction.</p>
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms. Sweeps UDP send rate from 200-380 Mbps to find the saturation point (loss > 5%). Payload: 1100B, DL direction.</p>
 
 <div v-if="udpSweepSummaryRows.length === 0">No data.</div>
 <template v-else>
@@ -261,6 +236,7 @@ const filteredUdpSweepRows = computed(() => {
 </table>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

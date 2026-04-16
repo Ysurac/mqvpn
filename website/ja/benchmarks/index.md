@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: doc
 ---
 
 <script setup>
@@ -7,20 +7,15 @@ import { computed } from 'vue'
 import { usePerfData } from '../../.vitepress/theme/composables/usePerfData'
 
 const push = usePerfData('/perf-data', 1)
-const weekly = usePerfData('/perf-data/weekly', 1)
 
 const latestRaw = computed(() => push.rawRows.value[0] || null)
-const latestFailover = computed(() => push.failoverRows.value[0] || null)
+const latestFailover = computed(() => push.failoverRows.value.find(r => r.fault_path === 'A') || null)
 const latestAggregate = computed(() => {
   const rows = push.aggregateRows.value
   if (!rows.length) return null
   return rows.reduce((a, b) => parseFloat(a.gain) > parseFloat(b.gain) ? a : b)
 })
 
-const latestNtn = computed(() => weekly.ntnRows.value[0] || null)
-const latestMultipath = computed(() => weekly.multipathSchedulerRows.value[0] || null)
-const latestFlowScaling = computed(() => weekly.flowScalingRows.value[0] || null)
-const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || null)
 </script>
 
 # ベンチマーク
@@ -31,6 +26,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 
 <p class="section-desc">main へのプッシュごとに実行されるベンチマーク。</p>
 
+<ClientOnly>
 <div v-if="push.loading.value">読み込み中...</div>
 <div v-else-if="push.error.value" style="color: red;">{{ push.error.value }}</div>
 <template v-else>
@@ -60,7 +56,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
     <h3>帯域集約</h3>
     <div v-if="latestAggregate">
       <div class="stat">{{ latestAggregate.multi }} <span class="unit">Mbps</span></div>
-      <div class="label">{{ latestAggregate.scheduler.toUpperCase() }}, {{ latestAggregate.streams }} ストリーム &mdash; +{{ latestAggregate.gain }} vs シングルパス</div>
+      <div class="label">{{ latestAggregate.scheduler.toUpperCase() }}, {{ latestAggregate.streams }} ストリーム &mdash; <strong>+{{ latestAggregate.gain }}</strong> vs シングルパス</div>
       <div class="label">回線: 300Mbps + 80Mbps（理論値 380Mbps）</div>
       <div class="meta"><code>{{ latestAggregate.commit }}</code> &middot; {{ latestAggregate.date }}</div>
     </div>
@@ -72,50 +68,7 @@ const latestUdpSummary = computed(() => weekly.udpSweepSummaryRows.value[0] || n
 
 </template>
 
-## 週次結果
-
-<p class="section-desc">毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。</p>
-
-<div v-if="weekly.loading.value">読み込み中...</div>
-<div v-else-if="weekly.error.value && !weekly.error.value.includes('404')" style="color: red;">{{ weekly.error.value }}</div>
-<template v-else>
-
-<div v-if="weekly.items.value.length === 0" class="no-data-block">
-  週次データはまだありません。毎週日曜日 3:00 UTC に実行されます。
-</div>
-
-<template v-else>
-<div class="summary-grid">
-  <div class="summary-card" v-if="latestMultipath">
-    <h3>マルチパススケジューラ</h3>
-    <div class="stat">{{ latestMultipath.wlb }} <span class="unit">Mbps</span></div>
-    <div class="label">WLB &middot; {{ latestMultipath.scenario }}</div>
-  </div>
-
-  <div class="summary-card" v-if="latestFlowScaling">
-    <h3>フロースケーリング</h3>
-    <div class="stat">{{ latestFlowScaling.mbps }} <span class="unit">Mbps</span></div>
-    <div class="label">{{ latestFlowScaling.scheduler }} &middot; {{ latestFlowScaling.streams }} ストリーム</div>
-  </div>
-
-  <div class="summary-card" v-if="latestUdpSummary">
-    <h3>UDP 飽和点</h3>
-    <div class="stat">{{ latestUdpSummary.wlb_saturation }} <span class="unit">Mbps</span></div>
-    <div class="label">WLB（シングル: {{ latestUdpSummary.single_saturation }} Mbps）</div>
-    <div class="meta"><code>{{ latestUdpSummary.commit }}</code> &middot; {{ latestUdpSummary.date }}</div>
-  </div>
-
-  <div class="summary-card" v-if="latestNtn">
-    <h3>NTN 衛星</h3>
-    <div class="stat">{{ latestNtn.wlb }} <span class="unit">Mbps</span></div>
-    <div class="label">WLB &middot; {{ latestNtn.scenario }}</div>
-  </div>
-</div>
-</template>
-
-<p><a href="/ja/benchmarks/weekly">すべて表示 &rarr;</a></p>
-
-</template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

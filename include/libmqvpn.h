@@ -376,6 +376,14 @@ MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd(mqvpn_client_t *client, i
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
 /*
+ * Drop a path slot without notifying xquic (no PATH_ABANDON, no draining).
+ * Used when the platform detects interface removal (RTM_DELLINK) — the fd is
+ * already dead, so xquic will detect the failure naturally via sendto() errors
+ * (same as link-down). This frees the slot for re-use by add_path_fd().
+ */
+MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
+
+/*
  * Re-activate a DEGRADED or CLOSED path using the existing fd.
  * Called by the platform layer when it detects the path is viable again
  * (e.g., netlink RTM_NEWADDR on Linux, ConnectivityManager on Android).

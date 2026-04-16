@@ -74,7 +74,8 @@ typedef struct {
     int nl_fd; /* netlink socket, -1 if unavailable */
     struct event *ev_netlink;
     int path_recoverable[MQVPN_MAX_PATHS];         /* 1 = reactivate on netlink event */
-    int path_removed_by_platform[MQVPN_MAX_PATHS]; /* 1 = platform called remove_path */
+    int path_removed_by_platform[MQVPN_MAX_PATHS]; /* 1 = interface removed (RTM_DELLINK),
+                                                      cleared after verified re-add */
 } platform_ctx_t;
 
 /* routing.c */

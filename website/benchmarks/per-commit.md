@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: doc
 ---
 
 <script setup>
@@ -9,10 +9,12 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 const { loading, error, rawRows, failoverRows, aggregateRows } = usePerfData('/perf-data')
 
 const foSchedFilter = ref('wlb')
+const foPathFilter = ref('A')
 
 const filteredFailoverRows = computed(() => {
   return failoverRows.value.filter(r => {
     if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    if (foPathFilter.value && r.fault_path !== foPathFilter.value) return false
     return true
   })
 })
@@ -33,6 +35,7 @@ const filteredAggregateRows = computed(() => {
 
 <p class="page-desc">Benchmarks run on every push to main. Latest 10 results.<br>Environment: Proxmox VM, i9-13900H, 4 vCPU (pinned), Ubuntu 24.04.</p>
 
+<ClientOnly>
 <div v-if="loading">Loading...</div>
 <div v-else-if="error" style="color: red;">Error: {{ error }}</div>
 <template v-else>
@@ -67,6 +70,8 @@ const filteredAggregateRows = computed(() => {
 
 ## Failover
 
+<p class="section-desc">Symmetric bandwidth (150Mbps + 150Mbps), asymmetric delay (10ms + 30ms RTT). Path A fault then Path B fault in sequence.</p>
+
 <div v-if="failoverRows.length === 0">No data yet.</div>
 <template v-else>
 <div class="filter-bar">
@@ -77,6 +82,13 @@ const filteredAggregateRows = computed(() => {
       <option value="minrtt">MinRTT</option>
     </select>
   </label>
+  <label>Fault Path:
+    <select v-model="foPathFilter">
+      <option value="">All</option>
+      <option value="A">Path A</option>
+      <option value="B">Path B</option>
+    </select>
+  </label>
 </div>
 <table>
   <thead>
@@ -84,10 +96,12 @@ const filteredAggregateRows = computed(() => {
       <th>Commit</th>
       <th>Date</th>
       <th>Scheduler</th>
+      <th>Fault Path</th>
       <th>TTF (s)</th>
       <th>TTR (s)</th>
       <th>Pre-fault (Mbps)</th>
       <th>Degraded (Mbps)</th>
+      <th>Recovery (Mbps)</th>
       <th>Post-recover (Mbps)</th>
     </tr>
   </thead>
@@ -96,10 +110,12 @@ const filteredAggregateRows = computed(() => {
       <td><code>{{ r.commit }}</code></td>
       <td>{{ r.date }}</td>
       <td>{{ r.scheduler }}</td>
+      <td>{{ r.fault_path }}</td>
       <td>{{ r.ttf }}</td>
       <td>{{ r.ttr }}</td>
       <td>{{ r.pre }}</td>
       <td>{{ r.degraded }}</td>
+      <td>{{ r.recovery }}</td>
       <td>{{ r.post }}</td>
     </tr>
   </tbody>
@@ -107,6 +123,8 @@ const filteredAggregateRows = computed(() => {
 </template>
 
 ## Bandwidth Aggregation
+
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms. Theoretical max 380Mbps.</p>
 
 <div v-if="aggregateRows.length === 0">No data yet.</div>
 <template v-else>
@@ -158,6 +176,7 @@ const filteredAggregateRows = computed(() => {
 </template>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

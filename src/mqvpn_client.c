@@ -1273,22 +1273,24 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
             p->status = MQVPN_PATH_STANDBY;
             LOG_I(c, "backup path standby: path_id=%" PRIu64 " iface=%s", path_id, p->name);
         } else if (p->active) {
+            /* Increment first, then check against max.  Uses >= for
+             * consistency with the tick() recovery path. */
             p->recreate_retries++;
 
-            if (p->recreate_retries < PATH_RECREATE_MAX_RETRIES) {
-                p->status = MQVPN_PATH_DEGRADED;
-                uint64_t delay = path_recreate_backoff(p->recreate_retries);
-                p->recreate_after_us = client_now_us(c) + delay;
-                LOG_I(c, "path degraded: %s (retry %d/%d in %ds)", p->name,
-                      p->recreate_retries, PATH_RECREATE_MAX_RETRIES,
-                      (int)(delay / 1000000));
-            } else {
+            if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
                 p->status = MQVPN_PATH_CLOSED;
                 p->recreate_after_us = 0;
                 LOG_W(c,
                       "path closed: %s (max retries %d exhausted, "
                       "platform can still recover)",
                       p->name, PATH_RECREATE_MAX_RETRIES);
+            } else {
+                p->status = MQVPN_PATH_DEGRADED;
+                uint64_t delay = path_recreate_backoff(p->recreate_retries);
+                p->recreate_after_us = client_now_us(c) + delay;
+                LOG_I(c, "path degraded: %s (retry %d/%d in %ds)", p->name,
+                      p->recreate_retries, PATH_RECREATE_MAX_RETRIES,
+                      (int)(delay / 1000000));
             }
         } else {
             p->status = MQVPN_PATH_CLOSED;
@@ -1726,6 +1728,26 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     p->path_stable_since_us = 0;
     if (p->in_use && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+    return MQVPN_OK;
+}
+
+int
+mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+
+    path_entry_t *p = find_path_by_handle(c, path);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    /* Free the slot but do NOT call xqc_conn_close_path().
+     * xquic will detect the dead fd via sendto() errors and remove
+     * the path through its normal PTO-based failure detection. */
+    p->status = MQVPN_PATH_CLOSED;
+    p->active = 0;
+    p->recreate_after_us = 0;
+    p->recreate_retries = 0;
+    p->path_stable_since_us = 0;
     return MQVPN_OK;
 }
 

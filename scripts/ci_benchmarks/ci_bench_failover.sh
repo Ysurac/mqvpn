@@ -1,24 +1,33 @@
 #!/bin/bash
-# ci_bench_failover.sh — CI failover benchmark (TTF + TTR)
+# ci_bench_failover.sh — CI dual-path failover benchmark (TTF + TTR)
 #
-# Measures failover TTF and TTR for all schedulers (minrtt, wlb, backup, backup_fec, rap).
+# Tests both Path A and Path B fault/recovery in a single 100s run, for all schedulers (minrtt, wlb, backup, backup_fec, rap).
 #
 # For each scheduler:
-#   1. Setup netns with netem: Path A = 300Mbps/10ms, Path B = 80Mbps/30ms
+#   1. Setup netns with netem: Path A = 150Mbps/10ms, Path B = 150Mbps/30ms (symmetric BW)
 #   2. Start VPN server + multipath client
-#   3. Run 75s iperf3 transfer (TCP, -P 4)
-#   4. At t=20s: inject fault on Path A (ip link set down on both ends)
-#   5. At t=40s: recover Path A (ip link set up on both ends)
+#   3. Run 100s iperf3 transfer (TCP, -P 4)
+#   4. Cycle 1 — Path A fault:
+#      t=20:  inject fault on Path A (ip link set down on both ends)
+#      t=40:  recover Path A (ip link set up + IP re-add + netem re-apply)
+#   5. Cycle 2 — Path B fault:
+#      t=55:  inject fault on Path B (ip link set down on both ends)
+#      t=75:  recover Path B (ip link set up + IP re-add + netem re-apply)
 #   6. Parse iperf3 JSON intervals to calculate TTF, TTR, and phase averages
 #
-# Metrics:
+# Timeline:
+#   t=0-20:   pre-fault         (A+B active)
+#   t=20-40:  degraded-A        (Path B only, surviving=150Mbps)
+#   t=40-55:  Path A recovery   (A+B active)
+#   t=55-75:  degraded-B        (Path A only, surviving=150Mbps)
+#   t=75-90:  Path B recovery   (A+B active)
+#   t=90-100: post-recover      (A+B active)
+#
+# Metrics per fault cycle:
 #   TTF (Time-To-Fallback): seconds from fault injection until throughput
 #       reaches 50% of surviving path capacity
 #   TTR (Time-To-Recovery): seconds from fault recovery until throughput
-#       reaches 80% of pre-fault average (path revalidation ~10-15s)
-#   Pre-fault avg:  t=0-20s  (both paths active)
-#   Degraded avg:   t=20-40s (surviving path only)
-#   Post-recover:   last 10s (t=65-75s, after path revalidation)
+#       reaches 90% of pre-fault average
 #
 # Output: ci_bench_results/failover_<timestamp>.json
 #
@@ -31,34 +40,45 @@ source "${SCRIPT_DIR}/ci_bench_env.sh"
 
 MQVPN="${1:-${MQVPN}}"
 
-DURATION=75
+DURATION=100
 INTERVAL=0.5
-FAULT_INJECT_SEC=20
-FAULT_RECOVER_SEC=40
 IPERF_PARALLEL=4
 SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
+# Fault timing
+FAULT_A_INJECT_SEC=20
+FAULT_A_RECOVER_SEC=40
+FAULT_B_INJECT_SEC=55
+FAULT_B_RECOVER_SEC=75
+
 TTF_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
-TTR_DEFINITION="seconds from fault recovery until throughput reaches 80% of pre-fault average (full recovery)"
+TTR_DEFINITION="seconds from fault recovery until throughput reaches 90% of pre-fault average (full recovery)"
 
 trap ci_bench_cleanup EXIT
 
 ci_bench_check_deps
 
 echo "================================================================"
-echo "  mqvpn Failover TTR Benchmark (CI)"
+echo "  mqvpn Dual-Path Failover Benchmark (CI)"
 echo "  Binary:     $MQVPN"
 echo "  Schedulers: ${SCHEDULERS[*]}"
+echo "  Duration:   ${DURATION}s (Path A fault t=${FAULT_A_INJECT_SEC}-${FAULT_A_RECOVER_SEC}, Path B fault t=${FAULT_B_INJECT_SEC}-${FAULT_B_RECOVER_SEC})"
 echo "  Commit:     ${CI_BENCH_COMMIT:0:12}"
 echo "  Date:       $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
 
 # ── Collect results for each scheduler ──
 
-declare -A RESULT_PRE_FAULT
-declare -A RESULT_DEGRADED
-declare -A RESULT_TTF
-declare -A RESULT_TTR
+declare -A RESULT_A_PRE_FAULT
+declare -A RESULT_A_DEGRADED
+declare -A RESULT_A_TTF
+declare -A RESULT_A_TTR
+declare -A RESULT_A_RECOVERY
+declare -A RESULT_B_PRE_FAULT
+declare -A RESULT_B_DEGRADED
+declare -A RESULT_B_TTF
+declare -A RESULT_B_TTR
+declare -A RESULT_B_RECOVERY
 declare -A RESULT_POST_RECOVER
 RESULTS_TMP="$(mktemp)"
 
@@ -68,16 +88,16 @@ for SCHED in "${SCHEDULERS[@]}"; do
     echo "  Scheduler: $SCHED"
     echo "────────────────────────────────────────"
 
-    # --- Setup netns + netem ---
+    # --- Setup netns + netem (symmetric bandwidth for failover) ---
     ci_bench_setup_netns
-    ci_bench_apply_netem
+    ci_bench_apply_netem "delay 10ms rate 150mbit" "delay 30ms rate 150mbit"
 
     # --- Start VPN ---
     ci_bench_start_server "$SCHED"
     ci_bench_start_client "--path $VETH_A0 --path $VETH_B0" "$SCHED"
     ci_bench_wait_tunnel 15
 
-    # --- iperf3 server ---
+    # --- iperf3 server (-1 = single client, exits after transfer) ---
     ip netns exec "$NS_SERVER" iperf3 -s -B "$TUNNEL_SERVER_IP" -1 &>/dev/null &
     IPERF_SERVER_PID=$!
     sleep 1
@@ -92,18 +112,18 @@ for SCHED in "${SCHEDULERS[@]}"; do
         > "$IPERF_JSON" 2>&1 &
     IPERF_CLIENT_PID=$!
 
-    # --- Fault injection at t=20s (background) ---
+    # --- Cycle 1: Path A fault injection at t=20s ---
     (
-        sleep "$FAULT_INJECT_SEC"
+        sleep "$FAULT_A_INJECT_SEC"
         echo "[$(date +%T)] FAULT INJECT ($SCHED): bringing down Path A"
         ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" down
         ip netns exec "$NS_SERVER" ip link set "$VETH_A1" down
     ) &
-    FAULT_INJECT_PID=$!
+    FAULT_A_INJECT_PID=$!
 
-    # --- Fault recovery at t=40s (background) ---
+    # --- Cycle 1: Path A recovery at t=40s ---
     (
-        sleep "$FAULT_RECOVER_SEC"
+        sleep "$FAULT_A_RECOVER_SEC"
         echo "[$(date +%T)] FAULT RECOVER ($SCHED): bringing up Path A"
         ip netns exec "$NS_CLIENT" ip link set "$VETH_A0" up
         ip netns exec "$NS_SERVER" ip link set "$VETH_A1" up
@@ -111,17 +131,44 @@ for SCHED in "${SCHEDULERS[@]}"; do
         ip netns exec "$NS_CLIENT" ip addr add "$IP_A_CLIENT" dev "$VETH_A0" 2>/dev/null || true
         ip netns exec "$NS_SERVER" ip addr add "$IP_A_SERVER" dev "$VETH_A1" 2>/dev/null || true
         # Re-apply netem on restored interfaces
-        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem delay 10ms rate 300mbit 2>/dev/null || true
-        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem delay 10ms rate 300mbit 2>/dev/null || true
+        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem delay 10ms rate 150mbit 2>/dev/null || true
+        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem delay 10ms rate 150mbit 2>/dev/null || true
     ) &
-    FAULT_RECOVER_PID=$!
+    FAULT_A_RECOVER_PID=$!
+
+    # --- Cycle 2: Path B fault injection at t=55s ---
+    (
+        sleep "$FAULT_B_INJECT_SEC"
+        echo "[$(date +%T)] FAULT INJECT ($SCHED): bringing down Path B"
+        ip netns exec "$NS_CLIENT" ip link set "$VETH_B0" down
+        ip netns exec "$NS_SERVER" ip link set "$VETH_B1" down
+    ) &
+    FAULT_B_INJECT_PID=$!
+
+    # --- Cycle 2: Path B recovery at t=75s ---
+    (
+        sleep "$FAULT_B_RECOVER_SEC"
+        echo "[$(date +%T)] FAULT RECOVER ($SCHED): bringing up Path B"
+        ip netns exec "$NS_CLIENT" ip link set "$VETH_B0" up
+        ip netns exec "$NS_SERVER" ip link set "$VETH_B1" up
+        # Re-add IPs lost when link went down
+        ip netns exec "$NS_CLIENT" ip addr add "$IP_B_CLIENT" dev "$VETH_B0" 2>/dev/null || true
+        ip netns exec "$NS_SERVER" ip addr add "$IP_B_SERVER" dev "$VETH_B1" 2>/dev/null || true
+        # Re-apply netem on restored interfaces
+        ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem delay 30ms rate 150mbit 2>/dev/null || true
+        ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem delay 30ms rate 150mbit 2>/dev/null || true
+    ) &
+    FAULT_B_RECOVER_PID=$!
 
     # --- Wait for iperf3 to finish ---
     echo "Waiting for iperf3 to complete..."
     wait "$IPERF_CLIENT_PID" || true
+    kill "$IPERF_SERVER_PID" 2>/dev/null || true
     wait "$IPERF_SERVER_PID" 2>/dev/null || true
-    wait "$FAULT_INJECT_PID" 2>/dev/null || true
-    wait "$FAULT_RECOVER_PID" 2>/dev/null || true
+    wait "$FAULT_A_INJECT_PID" 2>/dev/null || true
+    wait "$FAULT_A_RECOVER_PID" 2>/dev/null || true
+    wait "$FAULT_B_INJECT_PID" 2>/dev/null || true
+    wait "$FAULT_B_RECOVER_PID" 2>/dev/null || true
 
     # --- Parse iperf3 JSON ---
     PARSE_RESULT=$(python3 -c "
@@ -138,67 +185,139 @@ for iv in raw.get('intervals', []):
         'mbps': round(s['bits_per_second'] / 1e6, 1)
     })
 
-fault_inject = ${FAULT_INJECT_SEC}
-fault_recover = ${FAULT_RECOVER_SEC}
-
-# Pre-fault average (intervals before fault injection, both paths active)
-pre_fault = [iv['mbps'] for iv in intervals if iv['time_sec'] <= fault_inject]
-pre_fault_avg = sum(pre_fault) / len(pre_fault) if pre_fault else 0
-
-# Degraded average (during fault, surviving path only)
-degraded = [iv['mbps'] for iv in intervals
-            if iv['time_sec'] > fault_inject and iv['time_sec'] <= fault_recover]
-degraded_avg = sum(degraded) / len(degraded) if degraded else 0
-
-# TTF (Time-To-Fallback): time from fault injection until throughput reaches
-# 50% of surviving path capacity. Measures how fast traffic shifts to Path B.
-surviving_path_mbps = 80  # Path B rate
-ttf_threshold = surviving_path_mbps * 0.5
-ttf = None
-for iv in intervals:
-    if iv['time_sec'] > fault_inject and iv['mbps'] >= ttf_threshold:
-        ttf = round(iv['time_sec'] - fault_inject, 2)
-        break
-
-# TTR (Time-To-Recovery): time from fault recovery until throughput reaches
-# 80% of pre-fault average. Measures how fast full multipath resumes.
-ttr_threshold = pre_fault_avg * 0.8
-ttr = None
-for iv in intervals:
-    if iv['time_sec'] > fault_recover and iv['mbps'] >= ttr_threshold:
-        ttr = round(iv['time_sec'] - fault_recover, 2)
-        break
-
-# Post-recover average (last 10s of test — path revalidation takes ~10-15s)
+fault_a_inject = ${FAULT_A_INJECT_SEC}
+fault_a_recover = ${FAULT_A_RECOVER_SEC}
+fault_b_inject = ${FAULT_B_INJECT_SEC}
+fault_b_recover = ${FAULT_B_RECOVER_SEC}
 duration = ${DURATION}
-post_recover = [iv['mbps'] for iv in intervals if iv['time_sec'] > duration - 10]
+
+# ── Cycle 1: Path A fault ──
+
+# Pre-fault A average (t<=20, both paths active)
+pre_fault_a = [iv['mbps'] for iv in intervals if iv['time_sec'] <= fault_a_inject]
+pre_fault_a_avg = sum(pre_fault_a) / len(pre_fault_a) if pre_fault_a else 0
+
+# Degraded A average (20<t<=40, Path B only)
+degraded_a = [iv['mbps'] for iv in intervals
+              if iv['time_sec'] > fault_a_inject and iv['time_sec'] <= fault_a_recover]
+degraded_a_avg = sum(degraded_a) / len(degraded_a) if degraded_a else 0
+
+# TTF A: time from fault A injection until throughput >= 50% of surviving Path B (150*0.5=75)
+# Bounded to degraded-A window (20<t<=40) to avoid false match after recovery
+surviving_a_mbps = 150  # Path B rate (symmetric)
+ttf_a_threshold = surviving_a_mbps * 0.5
+ttf_a = None
+for iv in intervals:
+    if iv['time_sec'] > fault_a_inject and iv['time_sec'] <= fault_a_recover and iv['mbps'] >= ttf_a_threshold:
+        ttf_a = round(iv['time_sec'] - fault_a_inject, 2)
+        break
+
+# TTR A: time from fault A recovery until throughput >= 90% of pre-fault A average
+# Bounded to recovery-A window (40<t<=55) to avoid contamination by Path B fault
+ttr_a_threshold = pre_fault_a_avg * 0.9
+ttr_a = None
+for iv in intervals:
+    if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject and iv['mbps'] >= ttr_a_threshold:
+        ttr_a = round(iv['time_sec'] - fault_a_recover, 2)
+        break
+
+# ── Cycle 2: Path B fault ──
+
+# Pre-fault B average (40<t<=55, after A recovery, before B fault)
+pre_fault_b = [iv['mbps'] for iv in intervals
+               if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject]
+pre_fault_b_avg = sum(pre_fault_b) / len(pre_fault_b) if pre_fault_b else 0
+
+# Degraded B average (55<t<=75, Path A only)
+degraded_b = [iv['mbps'] for iv in intervals
+              if iv['time_sec'] > fault_b_inject and iv['time_sec'] <= fault_b_recover]
+degraded_b_avg = sum(degraded_b) / len(degraded_b) if degraded_b else 0
+
+# TTF B: time from fault B injection until throughput >= 50% of surviving Path A (150*0.5=75)
+# Bounded to degraded-B window (55<t<=75)
+surviving_b_mbps = 150  # Path A rate (symmetric)
+ttf_b_threshold = surviving_b_mbps * 0.5
+ttf_b = None
+for iv in intervals:
+    if iv['time_sec'] > fault_b_inject and iv['time_sec'] <= fault_b_recover and iv['mbps'] >= ttf_b_threshold:
+        ttf_b = round(iv['time_sec'] - fault_b_inject, 2)
+        break
+
+# TTR B: time from fault B recovery until throughput >= 90% of pre-fault B average
+# Bounded to recovery-B window (75<t<=90)
+ttr_b_threshold = pre_fault_b_avg * 0.9
+ttr_b = None
+for iv in intervals:
+    if iv['time_sec'] > fault_b_recover and iv['time_sec'] <= 90 and iv['mbps'] >= ttr_b_threshold:
+        ttr_b = round(iv['time_sec'] - fault_b_recover, 2)
+        break
+
+# Recovery A average (40<t<=55, Path A recovering, Path B healthy)
+recovery_a = [iv['mbps'] for iv in intervals
+              if iv['time_sec'] > fault_a_recover and iv['time_sec'] <= fault_b_inject]
+recovery_a_avg = sum(recovery_a) / len(recovery_a) if recovery_a else 0
+
+# Recovery B average (75<t<=90, Path B recovering, Path A healthy)
+recovery_b = [iv['mbps'] for iv in intervals
+              if iv['time_sec'] > fault_b_recover and iv['time_sec'] <= 90]
+recovery_b_avg = sum(recovery_b) / len(recovery_b) if recovery_b else 0
+
+# Post-recover average (t>90, both paths fully active)
+post_recover = [iv['mbps'] for iv in intervals if iv['time_sec'] > 90]
 post_recover_avg = sum(post_recover) / len(post_recover) if post_recover else 0
 
-print(f'{pre_fault_avg:.1f}')
-print(f'{degraded_avg:.1f}')
-print(f'{ttf}')
-print(f'{ttr}')
+print(f'{pre_fault_a_avg:.1f}')
+print(f'{degraded_a_avg:.1f}')
+print(f'{ttf_a}')
+print(f'{ttr_a}')
+print(f'{recovery_a_avg:.1f}')
+print(f'{pre_fault_b_avg:.1f}')
+print(f'{degraded_b_avg:.1f}')
+print(f'{ttf_b}')
+print(f'{ttr_b}')
+print(f'{recovery_b_avg:.1f}')
 print(f'{post_recover_avg:.1f}')
 ")
 
-    PRE_FAULT=$(echo "$PARSE_RESULT" | sed -n '1p')
-    DEGRADED=$(echo "$PARSE_RESULT" | sed -n '2p')
-    TTF=$(echo "$PARSE_RESULT" | sed -n '3p')
-    TTR=$(echo "$PARSE_RESULT" | sed -n '4p')
-    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '5p')
+    PRE_FAULT_A=$(echo "$PARSE_RESULT" | sed -n '1p')
+    DEGRADED_A=$(echo "$PARSE_RESULT" | sed -n '2p')
+    TTF_A=$(echo "$PARSE_RESULT" | sed -n '3p')
+    TTR_A=$(echo "$PARSE_RESULT" | sed -n '4p')
+    RECOVERY_A=$(echo "$PARSE_RESULT" | sed -n '5p')
+    PRE_FAULT_B=$(echo "$PARSE_RESULT" | sed -n '6p')
+    DEGRADED_B=$(echo "$PARSE_RESULT" | sed -n '7p')
+    TTF_B=$(echo "$PARSE_RESULT" | sed -n '8p')
+    TTR_B=$(echo "$PARSE_RESULT" | sed -n '9p')
+    RECOVERY_B=$(echo "$PARSE_RESULT" | sed -n '10p')
+    POST_RECOVER=$(echo "$PARSE_RESULT" | sed -n '11p')
 
-    echo "  Pre-fault avg:     ${PRE_FAULT} Mbps"
-    echo "  Degraded avg:      ${DEGRADED} Mbps"
-    echo "  TTF:               ${TTF} sec"
-    echo "  TTR:               ${TTR} sec"
+    echo "  ── Path A fault (t=${FAULT_A_INJECT_SEC}-${FAULT_A_RECOVER_SEC}) ──"
+    echo "  Pre-fault avg:     ${PRE_FAULT_A} Mbps"
+    echo "  Degraded avg:      ${DEGRADED_A} Mbps"
+    echo "  TTF:               ${TTF_A} sec"
+    echo "  TTR:               ${TTR_A} sec"
+    echo "  Recovery avg:      ${RECOVERY_A} Mbps"
+    echo "  ── Path B fault (t=${FAULT_B_INJECT_SEC}-${FAULT_B_RECOVER_SEC}) ──"
+    echo "  Pre-fault avg:     ${PRE_FAULT_B} Mbps"
+    echo "  Degraded avg:      ${DEGRADED_B} Mbps"
+    echo "  TTF:               ${TTF_B} sec"
+    echo "  TTR:               ${TTR_B} sec"
+    echo "  Recovery avg:      ${RECOVERY_B} Mbps"
+    echo "  ── Post-recover (t>90) ──"
     echo "  Post-recover avg:  ${POST_RECOVER} Mbps"
 
-    RESULT_PRE_FAULT[$SCHED]="$PRE_FAULT"
-    RESULT_DEGRADED[$SCHED]="$DEGRADED"
-    RESULT_TTF[$SCHED]="$TTF"
-    RESULT_TTR[$SCHED]="$TTR"
+    RESULT_A_PRE_FAULT[$SCHED]="$PRE_FAULT_A"
+    RESULT_A_DEGRADED[$SCHED]="$DEGRADED_A"
+    RESULT_A_TTF[$SCHED]="$TTF_A"
+    RESULT_A_TTR[$SCHED]="$TTR_A"
+    RESULT_A_RECOVERY[$SCHED]="$RECOVERY_A"
+    RESULT_B_PRE_FAULT[$SCHED]="$PRE_FAULT_B"
+    RESULT_B_DEGRADED[$SCHED]="$DEGRADED_B"
+    RESULT_B_TTF[$SCHED]="$TTF_B"
+    RESULT_B_TTR[$SCHED]="$TTR_B"
+    RESULT_B_RECOVERY[$SCHED]="$RECOVERY_B"
     RESULT_POST_RECOVER[$SCHED]="$POST_RECOVER"
-    echo "$SCHED $PRE_FAULT $DEGRADED $TTF $TTR $POST_RECOVER" >> "$RESULTS_TMP"
+    echo "$SCHED $PRE_FAULT_A $DEGRADED_A $TTF_A $TTR_A $RECOVERY_A $PRE_FAULT_B $DEGRADED_B $TTF_B $TTR_B $RECOVERY_B $POST_RECOVER" >> "$RESULTS_TMP"
 
     rm -f "$IPERF_JSON"
 
@@ -223,15 +342,25 @@ sched_results = {}
 with open('${RESULTS_TMP}') as f:
     for line in f:
         parts = line.strip().split()
-        if len(parts) != 6:
+        if len(parts) != 12:
             continue
-        sched, pre_fault, degraded, ttf, ttr, post_recover = parts
+        sched, pre_a, deg_a, ttf_a, ttr_a, rec_a, pre_b, deg_b, ttf_b, ttr_b, rec_b, post = parts
         sched_results[sched] = {
-            'pre_fault_avg_mbps': float(pre_fault),
-            'degraded_avg_mbps': float(degraded),
-            'ttf_sec': None if ttf == 'None' else float(ttf),
-            'ttr_sec': None if ttr == 'None' else float(ttr),
-            'post_recover_avg_mbps': float(post_recover)
+            'fault_a': {
+                'pre_fault_avg_mbps': float(pre_a),
+                'degraded_avg_mbps': float(deg_a),
+                'ttf_sec': None if ttf_a == 'None' else float(ttf_a),
+                'ttr_sec': None if ttr_a == 'None' else float(ttr_a),
+                'recovery_avg_mbps': float(rec_a)
+            },
+            'fault_b': {
+                'pre_fault_avg_mbps': float(pre_b),
+                'degraded_avg_mbps': float(deg_b),
+                'ttf_sec': None if ttf_b == 'None' else float(ttf_b),
+                'ttr_sec': None if ttr_b == 'None' else float(ttr_b),
+                'recovery_avg_mbps': float(rec_b)
+            },
+            'post_recover_avg_mbps': float(post)
         }
 
 result = {
@@ -239,8 +368,8 @@ result = {
     'commit': '${CI_BENCH_COMMIT}',
     'timestamp': '${TIMESTAMP}',
     'netem': {
-        'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 300},
-        'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 80}
+        'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 150},
+        'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 150}
     },
     'schedulers': schedulers,
     'results': {sched: sched_results.get(sched, {}) for sched in schedulers},

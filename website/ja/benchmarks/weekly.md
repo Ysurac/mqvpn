@@ -1,5 +1,5 @@
 ---
-layout: page
+layout: doc
 ---
 
 <script setup>
@@ -9,13 +9,15 @@ import { usePerfData } from '../../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, flowScalingRows, udpSweepSummaryRows, udpSweepRows, ntnRows
+  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows
 } = usePerfData('/perf-data/weekly')
 
 const foSchedFilter = ref('wlb')
+const foPathFilter = ref('A')
 const filteredFailoverRows = computed(() => {
   return failoverRows.value.filter(r => {
     if (foSchedFilter.value && r.scheduler !== foSchedFilter.value) return false
+    if (foPathFilter.value && r.fault_path !== foPathFilter.value) return false
     return true
   })
 })
@@ -26,16 +28,6 @@ const filteredAggregateRows = computed(() => {
   return aggregateRows.value.filter(r => {
     if (aggSchedFilter.value && r.scheduler !== aggSchedFilter.value) return false
     if (aggStreamsFilter.value && String(r.streams) !== aggStreamsFilter.value) return false
-    return true
-  })
-})
-
-const fsSchedFilter = ref('')
-const fsStreamsFilter = ref('')
-const filteredFlowScalingRows = computed(() => {
-  return flowScalingRows.value.filter(r => {
-    if (fsSchedFilter.value && r.scheduler !== fsSchedFilter.value) return false
-    if (fsStreamsFilter.value && String(r.streams) !== fsStreamsFilter.value) return false
     return true
   })
 })
@@ -53,6 +45,7 @@ const filteredUdpSweepRows = computed(() => {
 
 <p class="page-desc">毎週日曜日 3:00 UTC に実行される拡張ベンチマーク。<br>コミットごとのテストに加え、シナリオベースのテストを含みます。</p>
 
+<ClientOnly>
 <div v-if="loading">読み込み中...</div>
 <div v-else-if="error && !error.includes('404')" style="color: red;">エラー: {{ error }}</div>
 <div v-else-if="rawRows.length === 0 && multipathSchedulerRows.length === 0" class="no-data-block">
@@ -76,16 +69,19 @@ const filteredUdpSweepRows = computed(() => {
 
 ## フェイルオーバー
 
+<p class="section-desc">対称帯域 (150Mbps + 150Mbps)、非対称遅延 (10ms + 30ms RTT)。Path A → Path B の順に障害注入。</p>
+
 <div v-if="failoverRows.length === 0">データなし。</div>
 <template v-else>
 <div class="filter-bar">
   <label>スケジューラ: <select v-model="foSchedFilter"><option value="">すべて</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
+  <label>障害パス: <select v-model="foPathFilter"><option value="">すべて</option><option value="A">パス A</option><option value="B">パス B</option></select></label>
 </div>
 <table>
-  <thead><tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>TTF (s)</th><th>TTR (s)</th><th>障害前 (Mbps)</th><th>障害中 (Mbps)</th><th>復旧後 (Mbps)</th></tr></thead>
+  <thead><tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>障害パス</th><th>TTF (s)</th><th>TTR (s)</th><th>障害前 (Mbps)</th><th>障害中 (Mbps)</th><th>復旧 (Mbps)</th><th>復旧後 (Mbps)</th></tr></thead>
   <tbody>
     <tr v-for="(r, i) in filteredFailoverRows" :key="'fo-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.post }}</td>
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.fault_path }}</td><td>{{ r.ttf }}</td><td>{{ r.ttr }}</td><td>{{ r.pre }}</td><td>{{ r.degraded }}</td><td>{{ r.recovery }}</td><td>{{ r.post }}</td>
     </tr>
   </tbody>
 </table>
@@ -139,29 +135,9 @@ const filteredUdpSweepRows = computed(() => {
   </tbody>
 </table>
 
-## フロースケーリング
-
-<p class="section-desc">並列 TCP ストリーム数を増やしたときのスループットを計測。</p>
-
-<div v-if="flowScalingRows.length === 0">データなし。</div>
-<template v-else>
-<div class="filter-bar">
-  <label>スケジューラ: <select v-model="fsSchedFilter"><option value="">すべて</option><option value="wlb">WLB</option><option value="minrtt">MinRTT</option></select></label>
-  <label>ストリーム数: <select v-model="fsStreamsFilter"><option value="">すべて</option><option value="1">1</option><option value="4">4</option><option value="16">16</option><option value="64">64</option></select></label>
-</div>
-<table>
-  <thead><tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>ストリーム数</th><th>スループット (Mbps)</th></tr></thead>
-  <tbody>
-    <tr v-for="(r, i) in filteredFlowScalingRows" :key="'fs-' + i">
-      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.streams }}</td><td>{{ r.mbps }}</td>
-    </tr>
-  </tbody>
-</table>
-</template>
-
 ## UDP レートスイープ
 
-<p class="section-desc">UDP 送信レートを 200〜380 Mbps でスイープし、飽和点（ロス > 5%）を特定。ペイロード: 1100B、DL 方向。</p>
+<p class="section-desc">Path A: 300Mbps/10ms, Path B: 80Mbps/30ms。UDP 送信レートを 200〜380 Mbps でスイープし、飽和点（ロス > 5%）を特定。ペイロード: 1100B、DL 方向。</p>
 
 <div v-if="udpSweepSummaryRows.length === 0">データなし。</div>
 <template v-else>
@@ -221,6 +197,7 @@ const filteredUdpSweepRows = computed(() => {
 </table>
 
 </template>
+</ClientOnly>
 
 <style scoped>
 .page-desc {

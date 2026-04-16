@@ -13,26 +13,41 @@
 
 static int g_pass = 0, g_fail = 0;
 
-#define ASSERT_EQ_INT(a, b, msg) do { \
-    if ((a) == (b)) { g_pass++; } \
-    else { g_fail++; fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); } \
-} while(0)
+#define ASSERT_EQ_INT(a, b, msg)                                               \
+    do {                                                                       \
+        if ((a) == (b)) {                                                      \
+            g_pass++;                                                          \
+        } else {                                                               \
+            g_fail++;                                                          \
+            fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); \
+        }                                                                      \
+    } while (0)
 
-#define ASSERT_EQ_STR(a, b, msg) do { \
-    if (strcmp((a), (b)) == 0) { g_pass++; } \
-    else { g_fail++; fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); } \
-} while(0)
+#define ASSERT_EQ_STR(a, b, msg)                                         \
+    do {                                                                 \
+        if (strcmp((a), (b)) == 0) {                                     \
+            g_pass++;                                                    \
+        } else {                                                         \
+            g_fail++;                                                    \
+            fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); \
+        }                                                                \
+    } while (0)
 
-#define ASSERT_TRUE(cond, msg) do { \
-    if (cond) { g_pass++; } \
-    else { g_fail++; fprintf(stderr, "FAIL [%s]\n", msg); } \
-} while(0)
+#define ASSERT_TRUE(cond, msg)                   \
+    do {                                         \
+        if (cond) {                              \
+            g_pass++;                            \
+        } else {                                 \
+            g_fail++;                            \
+            fprintf(stderr, "FAIL [%s]\n", msg); \
+        }                                        \
+    } while (0)
 
-static void test_offset_calculation(void)
+static void
+test_offset_calculation(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
-                  "pool init");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "pool init");
 
     /* Base is 10.0.0.0 */
     char base_str[INET_ADDRSTRLEN];
@@ -64,61 +79,67 @@ static void test_offset_calculation(void)
     ASSERT_TRUE(offset1 != offset2, "offsets are different");
 }
 
-static void test_offset_boundary(void)
+static void
+test_offset_boundary(void)
 {
     mqvpn_addr_pool_t pool;
     ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
                   "pool init for boundary test");
 
-    /* Server IP (.1) offset should be 1 */
     struct in_addr server_ip;
     mqvpn_addr_pool_server_addr(&pool, &server_ip);
     uint32_t server_offset = ntohl(server_ip.s_addr) - ntohl(pool.base.s_addr);
     ASSERT_EQ_INT(server_offset, 1, "server offset is 1");
 
-    /* Offset 0 = network address (out of range for sessions) */
-    /* Offset 255 = broadcast (out of range for sessions) */
-    /* Valid session offsets: 2-254 */
-
-    /* Allocate all IPs and verify offsets stay in range */
-    struct in_addr ips[253]; /* .2 through .254 */
+    uint8_t seen[255] = {0};
+    struct in_addr ip;
     int count = 0;
     for (int i = 0; i < 253; i++) {
-        if (mqvpn_addr_pool_alloc(&pool, &ips[i]) < 0) break;
-        uint32_t off = ntohl(ips[i].s_addr) - ntohl(pool.base.s_addr);
-        if (off >= 2 && off <= 254) count++;
+        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc");
+        uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
+        ASSERT_TRUE(off >= 2 && off <= 254, "offset in valid range");
+        ASSERT_EQ_INT(seen[off], 0, "offset not seen before");
+        seen[off] = 1;
+        count++;
     }
-    ASSERT_EQ_INT(count, 253, "all 253 IPs have valid offsets (2-254)");
+    ASSERT_EQ_INT(count, 253, "all 253 IPs allocated");
 
-    /* Pool should be exhausted now */
+    for (int off = 2; off <= 254; off++) {
+        ASSERT_EQ_INT(seen[off], 1, "offset covered");
+    }
+
     struct in_addr extra;
     ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &extra) < 0,
                 "pool exhausted after 253 allocs");
 }
 
-static void test_release_and_realloc(void)
+static void
+test_release_and_realloc(void)
 {
+    /* Use /30: only 1 client slot (.2), so release + realloc MUST return same IP */
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "192.168.1.0/24"), 0,
-                  "pool init 192.168.1.0/24");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "192.168.1.0/30"), 0,
+                  "pool init 192.168.1.0/30");
 
-    struct in_addr ip1, ip2;
+    struct in_addr ip1;
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip1), 0, "alloc ip1");
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "alloc ip2");
 
-    /* Release ip1 */
+    uint32_t off1 = ntohl(ip1.s_addr) - ntohl(pool.base.s_addr);
+    ASSERT_TRUE(off1 >= 2 && off1 <= 254, "ip1 has valid offset");
+
+    /* Pool exhausted: only 1 client slot */
+    struct in_addr tmp;
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &tmp) < 0, "pool exhausted");
+
     mqvpn_addr_pool_release(&pool, &ip1);
 
-    /* Offset of released IP should still be calculable */
-    uint32_t off1 = ntohl(ip1.s_addr) - ntohl(pool.base.s_addr);
-    ASSERT_TRUE(off1 >= 2 && off1 <= 254, "released IP has valid offset");
-
-    /* Re-alloc should eventually give back ip1's offset */
-    struct in_addr ip3;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip3), 0, "realloc after release");
+    struct in_addr ip2;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "realloc after release");
+    ASSERT_EQ_INT(ip2.s_addr, ip1.s_addr, "realloc reuses released IP");
 }
 
-static void test_session_table_simulation(void)
+static void
+test_session_table_simulation(void)
 {
     /* Simulate what the server does: sessions[offset] = conn */
     mqvpn_addr_pool_t pool;
@@ -170,127 +191,126 @@ static void test_session_table_simulation(void)
 
 /* ---- CIDR parsing error tests ---- */
 
-static void test_invalid_cidr_no_slash(void)
+static void
+test_invalid_cidr_no_slash(void)
 {
     mqvpn_addr_pool_t pool;
     ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0") < 0,
                 "CIDR without slash rejected");
 }
 
-static void test_invalid_cidr_bad_prefix(void)
+static void
+test_invalid_cidr_bad_prefix(void)
 {
     mqvpn_addr_pool_t pool;
 
     /* Prefix > 30 → rejected */
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/31") < 0,
-                "prefix /31 rejected");
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/32") < 0,
-                "prefix /32 rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/31") < 0, "prefix /31 rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/32") < 0, "prefix /32 rejected");
 
     /* Prefix < 16 → rejected */
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/15") < 0,
-                "prefix /15 rejected");
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/8") < 0,
-                "prefix /8 rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/15") < 0, "prefix /15 rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/8") < 0, "prefix /8 rejected");
 
     /* Prefix > 32 → rejected */
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/33") < 0,
-                "prefix /33 rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/33") < 0, "prefix /33 rejected");
 }
 
-static void test_invalid_cidr_bad_ip(void)
+static void
+test_invalid_cidr_bad_ip(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "999.0.0.0/24") < 0,
-                "invalid IP rejected");
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "not.an.ip/24") < 0,
-                "non-IP rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "999.0.0.0/24") < 0, "invalid IP rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "not.an.ip/24") < 0, "non-IP rejected");
 }
 
-static void test_invalid_cidr_empty_prefix(void)
+static void
+test_invalid_cidr_empty_prefix(void)
 {
     mqvpn_addr_pool_t pool;
     /* "10.0.0.0/" → strtol on empty string → endptr == slash+1 → rejected */
-    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/") < 0,
-                "empty prefix rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/") < 0, "empty prefix rejected");
     /* Non-numeric prefix */
     ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.0/abc") < 0,
                 "non-numeric prefix rejected");
 }
 
-static void test_subnet_size_28(void)
+static void
+test_subnet_size_28(void)
 {
     /* /28 = 16 addresses, 14 usable (minus network + broadcast) */
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0,
-                  "pool init /28");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
     ASSERT_EQ_INT(pool.pool_size, 14, "/28 has 14 usable addresses");
 
     /* Allocate all client IPs (skip .1 server → 13 client IPs: .2 through .14) */
     struct in_addr ip;
     int count = 0;
-    while (mqvpn_addr_pool_alloc(&pool, &ip) == 0) count++;
+    while (mqvpn_addr_pool_alloc(&pool, &ip) == 0)
+        count++;
     ASSERT_EQ_INT(count, 13, "/28 yields 13 client IPs");
 
     /* Exhausted */
-    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &ip) < 0,
-                "/28 pool exhausted");
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &ip) < 0, "/28 pool exhausted");
 }
 
-static void test_subnet_size_16(void)
+static void
+test_subnet_size_16(void)
 {
     /* /16 = 65534 usable, but capped at MQVPN_ADDR_POOL_MAX (254) */
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "172.16.0.0/16"), 0,
-                  "pool init /16");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "172.16.0.0/16"), 0, "pool init /16");
     ASSERT_EQ_INT(pool.pool_size, MQVPN_ADDR_POOL_MAX,
                   "/16 capped at MQVPN_ADDR_POOL_MAX");
 }
 
-static void test_release_outside_range(void)
+static void
+test_release_outside_range(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
-                  "pool init for release test");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
 
-    /* Release an IP that's outside the pool range → should be a no-op */
+    struct in_addr ip1;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip1), 0, "alloc ip1");
+
+    uint8_t used_before[MQVPN_ADDR_POOL_MAX + 1];
+    memcpy(used_before, pool.used, sizeof(used_before));
+    uint32_t next_before = pool.next;
+
     struct in_addr outside;
-    inet_pton(AF_INET, "192.168.1.1", &outside);
-    mqvpn_addr_pool_release(&pool, &outside); /* should not crash */
+    inet_pton(AF_INET, "172.16.0.1", &outside);
+    mqvpn_addr_pool_release(&pool, &outside);
 
-    /* Release an IP below the base → underflow check */
-    struct in_addr below;
-    inet_pton(AF_INET, "9.255.255.255", &below);
-    mqvpn_addr_pool_release(&pool, &below); /* should not crash */
-
-    /* Pool should still work normally after bad releases */
-    struct in_addr ip;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0,
-                  "alloc works after bad releases");
+    ASSERT_EQ_INT(memcmp(pool.used, used_before, sizeof(used_before)), 0,
+                  "used bitmap unchanged after outside release");
+    ASSERT_EQ_INT(pool.next, next_before, "next pointer unchanged");
 }
 
-static void test_release_double_free(void)
+static void
+test_release_double_free(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
-                  "pool init for double-free test");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
 
-    struct in_addr ip;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc for double-free");
+    /* /28 = 16 addrs total; pool_size=14 usable (exclude .0 network, .15 broadcast) */
+    struct in_addr ip1, ip2;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip1), 0, "alloc ip1");
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0, "alloc ip2");
 
-    /* Release once */
-    mqvpn_addr_pool_release(&pool, &ip);
+    mqvpn_addr_pool_release(&pool, &ip1);
+    mqvpn_addr_pool_release(&pool, &ip1); /* double free — should be no-op */
 
-    /* Release again → should not crash, just set used[off]=0 again */
-    mqvpn_addr_pool_release(&pool, &ip);
+    int remaining = 0;
+    struct in_addr tmp;
+    while (mqvpn_addr_pool_alloc(&pool, &tmp) == 0)
+        remaining++;
 
-    /* Verify pool still works: should be able to allocate the same IP */
-    struct in_addr ip2;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip2), 0,
-                  "alloc after double release");
+    /* 13 client slots (offsets 2-14) - 1 (ip2 in use at offset 3) = 12 available */
+    ASSERT_EQ_INT(remaining, 12, "double free didn't create phantom slot");
 }
 
-static void test_fragmented_allocation(void)
+static void
+test_fragmented_allocation(void)
 {
     /* Exhaust the pool, release 2, then verify those 2 are reusable */
     mqvpn_addr_pool_t pool;
@@ -300,8 +320,7 @@ static void test_fragmented_allocation(void)
     /* Allocate all 13 client IPs (.2-.14) */
     struct in_addr ips[13];
     for (int i = 0; i < 13; i++) {
-        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ips[i]), 0,
-                      "alloc for frag test");
+        ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ips[i]), 0, "alloc for frag test");
     }
 
     /* Pool is exhausted */
@@ -329,15 +348,14 @@ static void test_fragmented_allocation(void)
                 "first fill reuses released offset");
     ASSERT_TRUE((fill2_off == rel1_off || fill2_off == rel2_off),
                 "second fill reuses released offset");
-    ASSERT_TRUE(fill1_off != fill2_off,
-                "fills are different offsets");
+    ASSERT_TRUE(fill1_off != fill2_off, "fills are different offsets");
 
     /* Pool is exhausted again */
-    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &extra) < 0,
-                "pool exhausted after re-fill");
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &extra) < 0, "pool exhausted after re-fill");
 }
 
-static void test_server_addr(void)
+static void
+test_server_addr(void)
 {
     mqvpn_addr_pool_t pool;
     ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "172.16.5.0/24"), 0,
@@ -350,20 +368,20 @@ static void test_server_addr(void)
     ASSERT_EQ_STR(str, "172.16.5.1", "server addr is .1");
 }
 
-static void test_prefix_boundary_16(void)
+static void
+test_prefix_boundary_16(void)
 {
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/16"), 0,
-                  "prefix /16 accepted");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/16"), 0, "prefix /16 accepted");
     ASSERT_EQ_INT(pool.prefix_len, 16, "prefix_len is 16");
 }
 
-static void test_prefix_boundary_30(void)
+static void
+test_prefix_boundary_30(void)
 {
     /* /30 = 4 addresses, 2 usable */
     mqvpn_addr_pool_t pool;
-    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/30"), 0,
-                  "prefix /30 accepted");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/30"), 0, "prefix /30 accepted");
     ASSERT_EQ_INT(pool.pool_size, 2, "/30 has 2 usable addresses");
 
     /* .1 is server, .2 is the only client */
@@ -375,24 +393,24 @@ static void test_prefix_boundary_30(void)
     ASSERT_EQ_STR(str, "10.0.0.2", "/30 first alloc is .2");
 
     /* Pool should be exhausted now (.1 is server) */
-    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &ip) < 0,
-                "/30 exhausted after 1 client");
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &ip) < 0, "/30 exhausted after 1 client");
 }
 
 /* ---- IPv6 pool tests ---- */
 
-static void test_ipv6_pool_init(void)
+static void
+test_ipv6_pool_init(void)
 {
     mqvpn_addr_pool_t pool;
     ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0,
                   "v4 pool init for v6 test");
-    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/112"), 0,
-                  "v6 pool init");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/112"), 0, "v6 pool init");
     ASSERT_EQ_INT(pool.has_v6, 1, "has_v6 set");
     ASSERT_EQ_INT(pool.prefix6, 112, "prefix6 is 112");
 }
 
-static void test_ipv6_pool_get6(void)
+static void
+test_ipv6_pool_get6(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
@@ -417,7 +435,8 @@ static void test_ipv6_pool_get6(void)
     ASSERT_EQ_STR(str, "fd00:abcd::64", "offset 100 → ::64");
 }
 
-static void test_ipv6_pool_offset6(void)
+static void
+test_ipv6_pool_offset6(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
@@ -440,25 +459,24 @@ static void test_ipv6_pool_offset6(void)
     ASSERT_EQ_INT(off, 0, "out-of-range v6 addr → offset 0");
 }
 
-static void test_ipv6_pool_init_bad_prefix(void)
+static void
+test_ipv6_pool_init_bad_prefix(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
 
     /* Too small prefix */
-    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/64") < 0,
-                "/64 prefix rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/64") < 0, "/64 prefix rejected");
 
     /* Too large prefix */
-    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0,
-                "/127 prefix rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0, "/127 prefix rejected");
 
     /* No slash */
-    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::1") < 0,
-                "no slash rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::1") < 0, "no slash rejected");
 }
 
-static void test_ipv6_shared_offset(void)
+static void
+test_ipv6_shared_offset(void)
 {
     /* Verify IPv4 and IPv6 share the same offset */
     mqvpn_addr_pool_t pool;
@@ -475,7 +493,8 @@ static void test_ipv6_shared_offset(void)
     ASSERT_EQ_INT(off4, off6, "IPv4 and IPv6 share same offset");
 }
 
-static void test_ipv6_pool_exhaustion_shared(void)
+static void
+test_ipv6_pool_exhaustion_shared(void)
 {
     /* IPv6 pool shares offsets with IPv4; exhaust IPv4 and verify v6 works
      * for all allocated offsets */
@@ -495,8 +514,7 @@ static void test_ipv6_pool_exhaustion_shared(void)
 
     /* Pool exhausted */
     struct in_addr extra;
-    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &extra) < 0,
-                "v4 pool exhausted");
+    ASSERT_TRUE(mqvpn_addr_pool_alloc(&pool, &extra) < 0, "v4 pool exhausted");
 
     /* Verify every IPv4 offset has a corresponding valid IPv6 address */
     for (int i = 0; i < 13; i++) {
@@ -508,7 +526,8 @@ static void test_ipv6_pool_exhaustion_shared(void)
     }
 }
 
-static void test_ipv6_release_realloc_shared(void)
+static void
+test_ipv6_release_realloc_shared(void)
 {
     /* Release IPv4, realloc, verify IPv6 offset is correct for new alloc */
     mqvpn_addr_pool_t pool;
@@ -528,8 +547,7 @@ static void test_ipv6_release_realloc_shared(void)
 
     /* Realloc — should get ip1's offset back */
     struct in_addr ip3;
-    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip3), 0,
-                  "realloc after release");
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip3), 0, "realloc after release");
     uint32_t off3 = ntohl(ip3.s_addr) - ntohl(pool.base.s_addr);
 
     /* ip3 should reuse ip1's offset (it's the only one free below next) */
@@ -539,18 +557,17 @@ static void test_ipv6_release_realloc_shared(void)
     ASSERT_EQ_INT(off3, off6_after, "v6 offset correct after v4 realloc");
 }
 
-static void test_ipv6_pool_init_prefix_boundaries(void)
+static void
+test_ipv6_pool_init_prefix_boundaries(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
 
     /* /95 → rejected (below [96,126]) */
-    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/95") < 0,
-                "/95 prefix rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/95") < 0, "/95 prefix rejected");
 
     /* /96 → accepted (lower bound) */
-    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/96"), 0,
-                  "/96 prefix accepted");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/96"), 0, "/96 prefix accepted");
 
     /* Reset has_v6 for next test */
     pool.has_v6 = 0;
@@ -562,14 +579,13 @@ static void test_ipv6_pool_init_prefix_boundaries(void)
     pool.has_v6 = 0;
 
     /* /127 → rejected (above [96,126]) */
-    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0,
-                "/127 prefix rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0, "/127 prefix rejected");
     /* /128 → rejected */
-    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/128") < 0,
-                "/128 prefix rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/128") < 0, "/128 prefix rejected");
 }
 
-static void test_ipv6_pool_init_bad_addr(void)
+static void
+test_ipv6_pool_init_bad_addr(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
@@ -591,7 +607,8 @@ static void test_ipv6_pool_init_bad_addr(void)
                 "non-numeric v6 prefix rejected");
 }
 
-static void test_ipv6_offset6_below_base(void)
+static void
+test_ipv6_offset6_below_base(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
@@ -604,7 +621,8 @@ static void test_ipv6_offset6_below_base(void)
     ASSERT_EQ_INT(off, 0, "v6 addr below base → offset 0");
 }
 
-static void test_ipv6_get6_offset_zero(void)
+static void
+test_ipv6_get6_offset_zero(void)
 {
     mqvpn_addr_pool_t pool;
     mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
@@ -621,7 +639,8 @@ static void test_ipv6_get6_offset_zero(void)
     ASSERT_EQ_INT(off, 0, "base v6 addr → offset 0");
 }
 
-static void test_ipv6_get6_large_offset(void)
+static void
+test_ipv6_get6_large_offset(void)
 {
     /* /96 prefix → up to 2^32 host addresses; test large offset */
     mqvpn_addr_pool_t pool;
@@ -644,7 +663,58 @@ static void test_ipv6_get6_large_offset(void)
     ASSERT_EQ_INT(off, 65534, "offset 65534 round-trip");
 }
 
-int main(void)
+static void
+test_pool_max_boundary(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "init /24");
+    ASSERT_EQ_INT(pool.pool_size, 254, "/24 pool_size is 254");
+
+    mqvpn_addr_pool_t pool16;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool16, "172.16.0.0/16"), 0, "init /16");
+    ASSERT_EQ_INT(pool16.pool_size, 254, "/16 capped to 254");
+}
+
+static void
+test_ipv6_large_offset_no_overflow(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "init v4");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/96"), 0, "init v6 /96");
+
+    struct in6_addr addr;
+    mqvpn_addr_pool_get6(&pool, 254, &addr);
+    char str[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &addr, str, sizeof(str));
+    ASSERT_EQ_STR(str, "fd00::fe", "offset 254 is fd00::fe");
+
+    ASSERT_EQ_INT(addr.s6_addr[0], 0xfd, "prefix byte 0");
+    ASSERT_EQ_INT(addr.s6_addr[1], 0x00, "prefix byte 1");
+    for (int i = 2; i < 12; i++) {
+        ASSERT_EQ_INT(addr.s6_addr[i], 0, "prefix byte zeroed");
+    }
+}
+
+static void
+test_cidr_non_aligned(void)
+{
+    /* Non-aligned base 10.0.0.5/24 — init succeeds, base stored as-is (no mask) */
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.5/24"), 0, "init non-aligned CIDR");
+
+    char base_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &pool.base, base_str, sizeof(base_str));
+    ASSERT_EQ_STR(base_str, "10.0.0.5", "base stored as-is without masking");
+
+    /* First alloc = base + 2 = 10.0.0.7 */
+    struct in_addr ip;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc from non-aligned");
+    uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
+    ASSERT_EQ_INT(off, 2, "first alloc offset is 2");
+}
+
+int
+main(void)
 {
     test_offset_calculation();
     test_offset_boundary();
@@ -676,6 +746,11 @@ int main(void)
     test_ipv6_offset6_below_base();
     test_ipv6_get6_offset_zero();
     test_ipv6_get6_large_offset();
+
+    /* IP pool boundary tests */
+    test_pool_max_boundary();
+    test_ipv6_large_offset_no_overflow();
+    test_cidr_non_aligned();
 
     printf("\n=== test_session: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
