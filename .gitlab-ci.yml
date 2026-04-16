@@ -1,0 +1,69 @@
+# Performance Tests
+# Runner requires: cmake gcc make git libevent-dev golang iptables
+#                  iproute2 iperf3 python3 jq openssl
+
+stages:
+  - perf
+
+perf-test:
+  stage: perf
+  tags:
+    - perf-test
+  timeout: 30 minutes
+  # Prevents concurrent runs; combined with interruptible, a newer pipeline
+  # cancels an in-progress one (mirrors GitHub's cancel-in-progress: true).
+  resource_group: perf-test
+  interruptible: true
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+  rules:
+    - when: manual
+
+  before_script:
+    - sudo rm -rf ci_bench_results bench_results
+
+  script:
+    # --- Cleanup stale state ---
+    - sudo pkill -f 'mqvpn.*ci-bench' || true
+    - sudo ip netns del ci-bench-server 2>/dev/null || true
+    - sudo ip netns del ci-bench-client 2>/dev/null || true
+    - sudo pkill -f 'iperf3' || true
+
+    # --- Clean previous build ---
+    - rm -rf third_party/xquic/third_party/boringssl third_party/xquic/build build
+
+    # --- Build BoringSSL ---
+    - git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
+    - cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+    - mkdir -p build && cd build
+    - cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+    - make -j$(nproc) ssl crypto
+
+    # --- Build xquic ---
+    - cd "$CI_PROJECT_DIR/third_party/xquic" && mkdir -p build && cd build
+    - cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl
+            -DXQC_ENABLE_BBR2=ON
+            -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+    - make -j$(nproc)
+
+    # --- Build mqvpn (Release) ---
+    - cd "$CI_PROJECT_DIR" && mkdir -p build && cd build
+    - cmake -DCMAKE_BUILD_TYPE=Release -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+    - make -j$(nproc)
+    - cd "$CI_PROJECT_DIR"
+
+    # --- Benchmarks ---
+    - sudo bash scripts/ci_benchmarks/ci_bench_raw_throughput.sh build/mqvpn
+    - sudo bash scripts/ci_benchmarks/ci_bench_failover.sh build/mqvpn
+    - sudo bash scripts/ci_benchmarks/ci_bench_aggregate.sh build/mqvpn
+
+
+  after_script:
+    - sudo rm -rf ci_bench_results
+
+  artifacts:
+    name: "perf-results-$CI_COMMIT_SHA"
+    paths:
+      - ci_bench_results/*.json
+    expire_in: 90 days
+    when: always
