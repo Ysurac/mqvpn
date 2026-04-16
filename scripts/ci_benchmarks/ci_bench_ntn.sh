@@ -14,7 +14,7 @@
 #   4. WiFi + LEO                 — home/office + satellite backup
 #   5. Dual-LEO                   — satellite-only (maritime/aviation)
 #
-# For each scenario, both WLB and MinRTT schedulers are tested.
+# For each scenario, all schedulers (minrtt, wlb, backup, backup_fec, rap) are tested.
 #
 # Output: ci_bench_results/ntn_<timestamp>.json
 #
@@ -30,6 +30,7 @@ MQVPN="${1:-${MQVPN}}"
 DURATION=15
 PARALLEL=4
 TUNNEL_TIMEOUT=30  # longer for high-RTT satellite paths (GEO RTT ~600ms)
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 # ── Preflight ──
 
@@ -78,7 +79,7 @@ echo "================================================================"
 echo "  mqvpn NTN (Non-Terrestrial Network) Benchmark (CI)"
 echo "  Binary:     $MQVPN"
 echo "  Scenarios:  ${NUM_SCENARIOS}"
-echo "  Schedulers: wlb, minrtt"
+echo "  Schedulers: ${SCHEDULERS[*]}"
 echo "  iperf3:     -P ${PARALLEL} -t ${DURATION}"
 echo "  Commit:     ${CI_BENCH_COMMIT:0:12}"
 echo "  Date:       $(date '+%Y-%m-%d %H:%M')"
@@ -87,8 +88,7 @@ echo "================================================================"
 # ── Per-scenario results ──
 
 declare -A RESULT_SINGLE
-declare -A RESULT_WLB
-declare -A RESULT_MINRTT
+declare -A RESULT_SCHED   # keyed as "${name}_${sched}"
 
 for ((i = 0; i < NUM_SCENARIOS; i++)); do
     name="${SCENARIO_NAMES[$i]}"
@@ -135,8 +135,8 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
         ci_bench_cleanup_stale
     fi
 
-    # Multipath (WLB + MinRTT)
-    for sched in wlb minrtt; do
+    # Multipath (all schedulers)
+    for sched in "${SCHEDULERS[@]}"; do
         echo ""
         echo "  => Scheduler: ${sched}"
 
@@ -145,8 +145,7 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
 
         if ! ci_bench_start_server "$sched"; then
             echo "    SKIP: VPN server failed for ${sched}"
-            [ "$sched" = "wlb" ] && RESULT_WLB[$name]="0.0"
-            [ "$sched" = "minrtt" ] && RESULT_MINRTT[$name]="0.0"
+            RESULT_SCHED["${name}_${sched}"]="0.0"
             ci_bench_stop_vpn
             ci_bench_cleanup_stale
             continue
@@ -154,8 +153,7 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
 
         if ! ci_bench_start_client "--path $VETH_A0 --path $VETH_B0" "$sched"; then
             echo "    SKIP: VPN client failed for ${sched}"
-            [ "$sched" = "wlb" ] && RESULT_WLB[$name]="0.0"
-            [ "$sched" = "minrtt" ] && RESULT_MINRTT[$name]="0.0"
+            RESULT_SCHED["${name}_${sched}"]="0.0"
             ci_bench_stop_vpn
             ci_bench_cleanup_stale
             continue
@@ -163,8 +161,7 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
 
         if ! ci_bench_wait_tunnel "$TUNNEL_TIMEOUT"; then
             echo "    SKIP: tunnel not established for ${sched}"
-            [ "$sched" = "wlb" ] && RESULT_WLB[$name]="0.0"
-            [ "$sched" = "minrtt" ] && RESULT_MINRTT[$name]="0.0"
+            RESULT_SCHED["${name}_${sched}"]="0.0"
             ci_bench_stop_vpn
             ci_bench_cleanup_stale
             continue
@@ -175,12 +172,7 @@ for ((i = 0; i < NUM_SCENARIOS; i++)); do
         rm -f "$iperf_json"
 
         echo "    Throughput: ${mbps} Mbps"
-
-        if [ "$sched" = "wlb" ]; then
-            RESULT_WLB[$name]="$mbps"
-        else
-            RESULT_MINRTT[$name]="$mbps"
-        fi
+        RESULT_SCHED["${name}_${sched}"]="$mbps"
 
         ci_bench_stop_vpn
         ci_bench_cleanup_stale
@@ -198,9 +190,7 @@ OUTPUT_FILE="${CI_BENCH_RESULTS}/ntn_$(date -u '+%Y%m%d_%H%M%S').json"
 python3 <<PYEOF
 import json
 
-scenarios = []
-
-names = ${NUM_SCENARIOS}
+schedulers = "${SCHEDULERS[*]}".split()
 scenario_names = $(printf '%s\n' "${SCENARIO_NAMES[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 scenario_descs = $(printf '%s\n' "${SCENARIO_DESCS[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 scenario_netem_a = $(printf '%s\n' "${SCENARIO_NETEM_A[@]}" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
@@ -213,36 +203,34 @@ $(for ((i = 0; i < NUM_SCENARIOS; i++)); do
 done)
 }
 
-wlb_results = {
+sched_results = {
 $(for ((i = 0; i < NUM_SCENARIOS; i++)); do
     name="${SCENARIO_NAMES[$i]}"
-    echo "    \"${name}\": ${RESULT_WLB[$name]:-0.0},"
+    for sched in "${SCHEDULERS[@]}"; do
+        echo "    \"${name}_${sched}\": ${RESULT_SCHED[${name}_${sched}]:-0.0},"
+    done
 done)
 }
 
-minrtt_results = {
-$(for ((i = 0; i < NUM_SCENARIOS; i++)); do
-    name="${SCENARIO_NAMES[$i]}"
-    echo "    \"${name}\": ${RESULT_MINRTT[$name]:-0.0},"
-done)
-}
-
+scenarios = []
 for i in range(len(scenario_names)):
     name = scenario_names[i]
-    scenarios.append({
+    entry = {
         "name": name,
         "description": scenario_descs[i],
         "netem_a": scenario_netem_a[i],
         "netem_b": scenario_netem_b[i],
         "single_mbps": single_results.get(name, 0.0),
-        "wlb_mbps": wlb_results.get(name, 0.0),
-        "minrtt_mbps": minrtt_results.get(name, 0.0),
-    })
+    }
+    for sched in schedulers:
+        entry[f"{sched}_mbps"] = sched_results.get(f"{name}_{sched}", 0.0)
+    scenarios.append(entry)
 
 result = {
     "test": "ntn",
     "commit": "${CI_BENCH_COMMIT}",
     "timestamp": "${TIMESTAMP}",
+    "schedulers": schedulers,
     "scenarios": scenarios,
 }
 
@@ -263,14 +251,14 @@ echo "================================================================"
 echo "  NTN Benchmark Results"
 echo "================================================================"
 echo ""
-printf "  %-22s | %12s | %10s | %10s\n" "Scenario" "Single (Mbps)" "WLB (Mbps)" "MinRTT (Mbps)"
-echo "  ───────────────────────┼──────────────┼────────────┼──────────────"
 for ((i = 0; i < NUM_SCENARIOS; i++)); do
     name="${SCENARIO_NAMES[$i]}"
-    printf "  %-22s | %12s | %10s | %10s\n" \
-        "$name" "${RESULT_SINGLE[$name]:-N/A}" "${RESULT_WLB[$name]:-N/A}" "${RESULT_MINRTT[$name]:-N/A}"
+    printf "  %-22s  single=%-7s" "$name" "${RESULT_SINGLE[$name]:-N/A}"
+    for sched in "${SCHEDULERS[@]}"; do
+        printf "  %s=%-7s" "$sched" "${RESULT_SCHED[${name}_${sched}]:-N/A}"
+    done
+    echo ""
 done
-echo "  ───────────────────────┴──────────────┴────────────┴──────────────"
 
 echo ""
 echo "Result: ${OUTPUT_FILE}"

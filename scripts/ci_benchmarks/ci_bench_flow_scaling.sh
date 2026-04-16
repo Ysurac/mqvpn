@@ -1,7 +1,8 @@
 #!/bin/bash
 # ci_bench_flow_scaling.sh — CI flow scaling benchmark
 #
-# Tests WLB vs MinRTT with varying parallel stream counts on asymmetric paths.
+# Tests all schedulers (minrtt, wlb, backup, backup_fec, rap) with varying
+# parallel stream counts on asymmetric paths.
 #
 # Netem: Path A = 100 Mbps / 5 ms OWD (10 ms RTT)
 #        Path B =  50 Mbps / 20 ms OWD (40 ms RTT)
@@ -9,7 +10,7 @@
 #
 # Stream counts: 1 4 8 16 32 64
 #
-# For each stream count, for each scheduler (wlb, minrtt):
+# For each stream count, for each scheduler:
 #   - Start server+client with multipath, run iperf3 TCP DL for 15s with -P $N
 #   - Parse throughput
 #
@@ -29,7 +30,7 @@ MQVPN="${1:-${MQVPN}}"
 
 IPERF_DURATION=15
 STREAM_COUNTS=(1 4 8 16 32 64)
-SCHEDULERS=(wlb minrtt)
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 NETEM_A="delay 5ms rate 100mbit"
 NETEM_B="delay 20ms rate 50mbit"
@@ -113,9 +114,10 @@ OUTPUT_FILE="${CI_BENCH_RESULTS}/flow_scaling_$(date +%Y%m%d_%H%M%S).json"
 
 python3 <<PYEOF
 import json
+from collections import defaultdict
 
-wlb_results = []
-minrtt_results = []
+schedulers = "${SCHEDULERS[*]}".split()
+results = defaultdict(list)
 
 with open('${RESULTS_TMP}') as f:
     for line in f:
@@ -123,16 +125,7 @@ with open('${RESULTS_TMP}') as f:
         if len(parts) != 3:
             continue
         sched, streams, mbps = parts
-
-        entry = {
-            'streams': int(streams),
-            'mbps': float(mbps)
-        }
-
-        if sched == 'wlb':
-            wlb_results.append(entry)
-        elif sched == 'minrtt':
-            minrtt_results.append(entry)
+        results[sched].append({'streams': int(streams), 'mbps': float(mbps)})
 
 output = {
     'test': 'flow_scaling',
@@ -142,10 +135,8 @@ output = {
         'path_a': {'one_way_delay_ms': 5, 'rtt_ms': 10, 'rate_mbit': 100},
         'path_b': {'one_way_delay_ms': 20, 'rtt_ms': 40, 'rate_mbit': 50}
     },
-    'results': {
-        'wlb': wlb_results,
-        'minrtt': minrtt_results
-    }
+    'schedulers': schedulers,
+    'results': {sched: results[sched] for sched in schedulers}
 }
 
 with open('${OUTPUT_FILE}', 'w') as f:

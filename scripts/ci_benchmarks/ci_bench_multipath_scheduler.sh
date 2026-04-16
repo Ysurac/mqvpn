@@ -1,7 +1,8 @@
 #!/bin/bash
-# ci_bench_multipath_scheduler.sh — Multipath scheduler comparison (WLB vs MinRTT)
+# ci_bench_multipath_scheduler.sh — Multipath scheduler comparison
 #
-# Compares WLB vs MinRTT across 8 network scenarios with varied netem parameters.
+# Compares all schedulers (minrtt, wlb, backup, backup_fec, rap) across 8 network
+# scenarios with varied netem parameters.
 # Each scenario applies tc netem on both ends of each veth pair (RTT = 2x delay).
 #
 # Scenarios:
@@ -26,6 +27,8 @@ MQVPN="${1:-${MQVPN}}"
 
 DURATION=15
 PARALLEL=4
+
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 # ── Preflight ──
 
@@ -83,7 +86,7 @@ ci_bench_setup_netns
 
 echo ""
 echo "================================================================"
-echo "  CI Multipath Scheduler Benchmark (WLB vs MinRTT)"
+echo "  CI Multipath Scheduler Benchmark (minrtt / wlb / backup / backup_fec / rap)"
 echo "  Binary:    $MQVPN"
 echo "  Duration:  ${DURATION}s per test"
 echo "  Parallel:  ${PARALLEL} streams"
@@ -139,8 +142,8 @@ for scenario in "${SCENARIO_NAMES[@]}"; do
         ci_bench_cleanup_stale
     fi
 
-    # Multipath (WLB + MinRTT)
-    for sched in wlb minrtt; do
+    # Multipath (all schedulers)
+    for sched in "${SCHEDULERS[@]}"; do
         echo ""
         echo "    [${sched}] Starting VPN..."
 
@@ -195,15 +198,22 @@ mkdir -p "$CI_BENCH_RESULTS"
 SCENARIOS_JSON=""
 for scenario in "${SCENARIO_NAMES[@]}"; do
     single_val="${RESULT_MBPS[${scenario}_single]:-0.0}"
-    wlb_val="${RESULT_MBPS[${scenario}_wlb]:-0.0}"
-    minrtt_val="${RESULT_MBPS[${scenario}_minrtt]:-0.0}"
     netem_a="${NETEM_A[$scenario]}"
     netem_b="${NETEM_B[$scenario]}"
+
+    sched_json=""
+    for sched in "${SCHEDULERS[@]}"; do
+        val="${RESULT_MBPS[${scenario}_${sched}]:-0.0}"
+        if [ -n "$sched_json" ]; then
+            sched_json="${sched_json},"
+        fi
+        sched_json="${sched_json}\"${sched}_mbps\":${val}"
+    done
 
     if [ -n "$SCENARIOS_JSON" ]; then
         SCENARIOS_JSON="${SCENARIOS_JSON},"
     fi
-    SCENARIOS_JSON="${SCENARIOS_JSON}{\"name\":\"${scenario}\",\"netem_a\":\"${netem_a}\",\"netem_b\":\"${netem_b}\",\"single_mbps\":${single_val},\"wlb_mbps\":${wlb_val},\"minrtt_mbps\":${minrtt_val}}"
+    SCENARIOS_JSON="${SCENARIOS_JSON}{\"name\":\"${scenario}\",\"netem_a\":\"${netem_a}\",\"netem_b\":\"${netem_b}\",\"single_mbps\":${single_val},${sched_json}}"
 done
 
 python3 <<PYEOF
@@ -211,22 +221,26 @@ import json
 
 raw = json.loads('[${SCENARIOS_JSON}]')
 
+schedulers = "${SCHEDULERS[*]}".split()
+
 result = {
     "test": "multipath_scheduler",
     "commit": "${CI_BENCH_COMMIT}",
     "timestamp": "${TIMESTAMP}",
+    "schedulers": schedulers,
     "scenarios": []
 }
 
 for s in raw:
-    result["scenarios"].append({
+    entry = {
         "name": s["name"],
         "netem_a": s["netem_a"],
         "netem_b": s["netem_b"],
         "single_mbps": s["single_mbps"],
-        "wlb_mbps": s["wlb_mbps"],
-        "minrtt_mbps": s["minrtt_mbps"]
-    })
+    }
+    for sched in schedulers:
+        entry[f"{sched}_mbps"] = s[f"{sched}_mbps"]
+    result["scenarios"].append(entry)
 
 with open("${OUTPUT_FILE}", "w") as f:
     json.dump(result, f, indent=2)

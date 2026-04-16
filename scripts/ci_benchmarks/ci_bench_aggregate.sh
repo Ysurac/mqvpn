@@ -2,7 +2,7 @@
 # ci_bench_aggregate.sh — CI bandwidth aggregation benchmark
 #
 # Measures throughput for single-path vs multipath across varying
-# parallel stream counts for both WLB and MinRTT schedulers.
+# parallel stream counts for all schedulers (minrtt, wlb, backup, backup_fec, rap).
 #
 # Netem: Path A = 300 Mbps / 10 ms, Path B = 80 Mbps / 30 ms
 # Theoretical max = 380 Mbps
@@ -19,7 +19,7 @@ source "${SCRIPT_DIR}/ci_bench_env.sh"
 MQVPN="${1:-${MQVPN}}"
 IPERF_DURATION=10
 STREAM_COUNTS=(1 4 16 64)
-SCHEDULERS=(wlb minrtt)
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 trap ci_bench_cleanup EXIT
 
@@ -95,11 +95,12 @@ done
 TIMESTAMP="$(date -Iseconds)"
 OUTPUT_FILE="${CI_BENCH_RESULTS}/aggregate_$(date +%Y%m%d_%H%M%S).json"
 
-python3 -c "
+python3 <<PYEOF
 import json
+from collections import defaultdict
 
-wlb_results = []
-minrtt_results = []
+schedulers = "${SCHEDULERS[*]}".split()
+results = defaultdict(list)
 
 with open('${RESULTS_TMP}') as f:
     for line in f:
@@ -110,18 +111,12 @@ with open('${RESULTS_TMP}') as f:
         single_f = float(single)
         multi_f = float(multi)
         gain = ((multi_f / single_f) - 1.0) * 100.0 if single_f > 0 else 0.0
-
-        entry = {
+        results[sched].append({
             'streams': int(streams),
             'single_path_mbps': single_f,
             'multipath_mbps': multi_f,
             'gain_pct': round(gain, 1)
-        }
-
-        if sched == 'wlb':
-            wlb_results.append(entry)
-        elif sched == 'minrtt':
-            minrtt_results.append(entry)
+        })
 
 output = {
     'test': 'aggregate',
@@ -132,10 +127,8 @@ output = {
         'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 80}
     },
     'theoretical_max_mbps': 380,
-    'results': {
-        'wlb': wlb_results,
-        'minrtt': minrtt_results
-    }
+    'schedulers': schedulers,
+    'results': {sched: results[sched] for sched in schedulers}
 }
 
 with open('${OUTPUT_FILE}', 'w') as f:
@@ -143,13 +136,14 @@ with open('${OUTPUT_FILE}', 'w') as f:
 
 print()
 print('Results summary:')
-for sched_name, sched_data in [('wlb', wlb_results), ('minrtt', minrtt_results)]:
-    print(f'  [{sched_name}]')
-    print(f\"  {'Streams':>8}  {'Single':>10}  {'Multi':>10}  {'Gain':>8}\")
+for sched in schedulers:
+    sched_data = results[sched]
+    print(f'  [{sched}]')
+    print(f"  {'Streams':>8}  {'Single':>10}  {'Multi':>10}  {'Gain':>8}")
     for r in sched_data:
-        print(f\"  {r['streams']:>8}  {r['single_path_mbps']:>8.1f} M  {r['multipath_mbps']:>8.1f} M  {r['gain_pct']:>+7.1f}%\")
+        print(f"  {r['streams']:>8}  {r['single_path_mbps']:>8.1f} M  {r['multipath_mbps']:>8.1f} M  {r['gain_pct']:>+7.1f}%")
     print()
-"
+PYEOF
 
 rm -f "$RESULTS_TMP"
 

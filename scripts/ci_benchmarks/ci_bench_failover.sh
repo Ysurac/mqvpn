@@ -1,7 +1,7 @@
 #!/bin/bash
 # ci_bench_failover.sh — CI failover benchmark (TTF + TTR)
 #
-# Measures failover TTF and TTR for both WLB and MinRTT schedulers.
+# Measures failover TTF and TTR for all schedulers (minrtt, wlb, backup, backup_fec, rap).
 #
 # For each scheduler:
 #   1. Setup netns with netem: Path A = 300Mbps/10ms, Path B = 80Mbps/30ms
@@ -36,7 +36,7 @@ INTERVAL=0.5
 FAULT_INJECT_SEC=20
 FAULT_RECOVER_SEC=40
 IPERF_PARALLEL=4
-SCHEDULERS="wlb minrtt"
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 TTF_DEFINITION="seconds from fault injection until throughput reaches 50% of surviving path capacity (fallback detection)"
 TTR_DEFINITION="seconds from fault recovery until throughput reaches 80% of pre-fault average (full recovery)"
@@ -48,7 +48,7 @@ ci_bench_check_deps
 echo "================================================================"
 echo "  mqvpn Failover TTR Benchmark (CI)"
 echo "  Binary:     $MQVPN"
-echo "  Schedulers: $SCHEDULERS"
+echo "  Schedulers: ${SCHEDULERS[*]}"
 echo "  Commit:     ${CI_BENCH_COMMIT:0:12}"
 echo "  Date:       $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
@@ -60,8 +60,9 @@ declare -A RESULT_DEGRADED
 declare -A RESULT_TTF
 declare -A RESULT_TTR
 declare -A RESULT_POST_RECOVER
+RESULTS_TMP="$(mktemp)"
 
-for SCHED in $SCHEDULERS; do
+for SCHED in "${SCHEDULERS[@]}"; do
     echo ""
     echo "────────────────────────────────────────"
     echo "  Scheduler: $SCHED"
@@ -197,6 +198,7 @@ print(f'{post_recover_avg:.1f}')
     RESULT_TTF[$SCHED]="$TTF"
     RESULT_TTR[$SCHED]="$TTR"
     RESULT_POST_RECOVER[$SCHED]="$POST_RECOVER"
+    echo "$SCHED $PRE_FAULT $DEGRADED $TTF $TTR $POST_RECOVER" >> "$RESULTS_TMP"
 
     rm -f "$IPERF_JSON"
 
@@ -212,18 +214,25 @@ done
 TIMESTAMP="$(date -Iseconds)"
 OUTPUT_FILE="${CI_BENCH_RESULTS}/failover_$(date +%Y%m%d_%H%M%S).json"
 
-# Convert "None" to Python None (json.dump serializes as null)
-ttf_wlb="${RESULT_TTF[wlb]}"
-ttf_minrtt="${RESULT_TTF[minrtt]}"
-ttr_wlb="${RESULT_TTR[wlb]}"
-ttr_minrtt="${RESULT_TTR[minrtt]}"
-[ "$ttf_wlb" = "None" ] && ttf_wlb="None"
-[ "$ttf_minrtt" = "None" ] && ttf_minrtt="None"
-[ "$ttr_wlb" = "None" ] && ttr_wlb="None"
-[ "$ttr_minrtt" = "None" ] && ttr_minrtt="None"
-
-python3 -c "
+python3 <<PYEOF
 import json
+
+schedulers = "${SCHEDULERS[*]}".split()
+sched_results = {}
+
+with open('${RESULTS_TMP}') as f:
+    for line in f:
+        parts = line.strip().split()
+        if len(parts) != 6:
+            continue
+        sched, pre_fault, degraded, ttf, ttr, post_recover = parts
+        sched_results[sched] = {
+            'pre_fault_avg_mbps': float(pre_fault),
+            'degraded_avg_mbps': float(degraded),
+            'ttf_sec': None if ttf == 'None' else float(ttf),
+            'ttr_sec': None if ttr == 'None' else float(ttr),
+            'post_recover_avg_mbps': float(post_recover)
+        }
 
 result = {
     'test': 'failover',
@@ -233,22 +242,8 @@ result = {
         'path_a': {'one_way_delay_ms': 10, 'rtt_ms': 20, 'rate_mbit': 300},
         'path_b': {'one_way_delay_ms': 30, 'rtt_ms': 60, 'rate_mbit': 80}
     },
-    'results': {
-        'wlb': {
-            'pre_fault_avg_mbps': ${RESULT_PRE_FAULT[wlb]},
-            'degraded_avg_mbps': ${RESULT_DEGRADED[wlb]},
-            'ttf_sec': ${ttf_wlb},
-            'ttr_sec': ${ttr_wlb},
-            'post_recover_avg_mbps': ${RESULT_POST_RECOVER[wlb]}
-        },
-        'minrtt': {
-            'pre_fault_avg_mbps': ${RESULT_PRE_FAULT[minrtt]},
-            'degraded_avg_mbps': ${RESULT_DEGRADED[minrtt]},
-            'ttf_sec': ${ttf_minrtt},
-            'ttr_sec': ${ttr_minrtt},
-            'post_recover_avg_mbps': ${RESULT_POST_RECOVER[minrtt]}
-        }
-    },
+    'schedulers': schedulers,
+    'results': {sched: sched_results.get(sched, {}) for sched in schedulers},
     'ttf_definition': '${TTF_DEFINITION}',
     'ttr_definition': '${TTR_DEFINITION}'
 }
@@ -257,7 +252,9 @@ with open('${OUTPUT_FILE}', 'w') as f:
     json.dump(result, f, indent=2)
 
 print(json.dumps(result, indent=2))
-"
+PYEOF
+
+rm -f "$RESULTS_TMP"
 
 ci_bench_sanity_check "$OUTPUT_FILE" "failover benchmark"
 

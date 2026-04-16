@@ -1,8 +1,8 @@
 #!/bin/bash
 # benchmark_flow_scaling.sh — WLB flow-scaling benchmark
 #
-# Tests how WLB performance scales with the number of concurrent flows.
-# Runs MinRTT vs WLB with -P 32 and -P 64 across key scenarios.
+# Tests how scheduler performance scales with the number of concurrent flows.
+# Runs all schedulers (minrtt, wlb, backup, backup_fec, rap) with -P 32 and -P 64 across key scenarios.
 #
 # Hypothesis: WLB's flow-affinity scheduling improves with more flows
 # because WRR granularity increases (1 flow = smaller % of total traffic).
@@ -42,6 +42,7 @@ PSK=$("$MQVPN" --genkey 2>/dev/null)
 IPERF_DURATION=15
 PARALLEL_COUNTS=(32 64)
 TUNNEL_WAIT=5
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 # Result storage — indexed by "scenario_scheduler_P" keys
 declare -A R_BW      # throughput Mbps
@@ -282,11 +283,11 @@ run_scenario() {
     apply_tc_full "$rate_a" "$netem_a" "$rate_b" "$netem_b"
 
     local total=${#PARALLEL_COUNTS[@]}
-    total=$((total * 2))
+    total=$((total * ${#SCHEDULERS[@]}))
     local step=0
 
     for P in "${PARALLEL_COUNTS[@]}"; do
-        for sched in minrtt wlb; do
+        for sched in "${SCHEDULERS[@]}"; do
             step=$((step + 1))
             echo ""
             echo "    [${step}/${total}] ${sched} / P=${P}..."
@@ -320,9 +321,10 @@ run_scenario() {
 # ================================================================
 
 echo "================================================================"
-echo "  mqvpn Flow-Scaling Benchmark (WLB vs MinRTT)"
-echo "  Binary:    $MQVPN"
-echo "  Parallel:  ${PARALLEL_COUNTS[*]}"
+echo "  mqvpn Flow-Scaling Benchmark"
+echo "  Binary:      $MQVPN"
+echo "  Schedulers:  ${SCHEDULERS[*]}"
+echo "  Parallel:    ${PARALLEL_COUNTS[*]}"
 echo "  Duration:  ${IPERF_DURATION}s per run"
 echo "  Date:      $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
@@ -383,26 +385,17 @@ for P in "${PARALLEL_COUNTS[@]}"; do
     echo ""
     echo "  ── P = ${P} parallel flows ──────────────────────────────────"
     echo ""
-    printf "  %-16s │ %10s %7s │ %10s %7s │ %s\n" \
-        "Scenario" "MinRTT" "Retr" "WLB" "Retr" "Ratio"
-    echo "  ─────────────────┼────────────────────┼────────────────────┼───────"
+    printf "  %-16s  %-11s  %12s  %s\n" "Scenario" "Scheduler" "Throughput" "Retr"
+    echo "  ─────────────────────────────────────────────────────"
 
     for name in "${SCENARIOS[@]}"; do
-        bw_m="${R_BW[${name}_minrtt_${P}]:-N/A}"
-        bw_w="${R_BW[${name}_wlb_${P}]:-N/A}"
-        re_m="${R_RETR[${name}_minrtt_${P}]:-N/A}"
-        re_w="${R_RETR[${name}_wlb_${P}]:-N/A}"
-
-        ratio="-"
-        if [[ "$bw_m" =~ ^[0-9] ]] && [[ "$bw_w" =~ ^[0-9] ]]; then
-            ratio=$(awk "BEGIN { if ($bw_m > 0) printf \"%.2fx\", $bw_w / $bw_m; else print \"-\" }")
-        fi
-
-        printf "  %-16s │ %7s Mbps %5s │ %7s Mbps %5s │ %s\n" \
-            "$name" "$bw_m" "$re_m" "$bw_w" "$re_w" "$ratio"
+        for sched in "${SCHEDULERS[@]}"; do
+            bw="${R_BW[${name}_${sched}_${P}]:-N/A}"
+            retr="${R_RETR[${name}_${sched}_${P}]:-N/A}"
+            printf "  %-16s  %-11s  %7s Mbps  %s\n" "$name" "$sched" "$bw" "$retr"
+        done
+        echo ""
     done
-
-    echo "  ─────────────────┴────────────────────┴────────────────────┴───────"
 done
 
 echo ""

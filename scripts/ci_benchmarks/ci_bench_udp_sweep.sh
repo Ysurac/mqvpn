@@ -2,7 +2,7 @@
 # ci_bench_udp_sweep.sh — UDP rate sweep benchmark
 #
 # Sweeps UDP send rate from 200-380 Mbps to find the saturation point
-# (where loss exceeds 5%) for single-path, WLB, and MinRTT.
+# (where loss exceeds 5%) for single-path and all schedulers (minrtt, wlb, backup, backup_fec, rap).
 #
 # Netem: Path A = 300Mbps/10ms, Path B = 80Mbps/30ms
 # Payload: 1100B bulk (-l 1100)
@@ -26,7 +26,7 @@ LOSS_THRESHOLD=5.0
 
 SWEEP_RATES=(200 210 220 230 240 250 260 270 280 290 300 310 320 330 340 350 360 370 380)
 
-CONDITIONS=("single" "wlb" "minrtt")
+CONDITIONS=("single" "minrtt" "wlb" "backup" "backup_fec" "rap")
 
 trap 'rm -f "$RESULTS_TMP"; ci_bench_cleanup' EXIT
 
@@ -165,12 +165,13 @@ output = {
     'results': {},
 }
 
-for cond in ['single', 'wlb', 'minrtt']:
+for cond in "${CONDITIONS[*]}".split():
     pts = results.get(cond, [])
     output['results'][cond] = {
         'saturation_mbps': find_saturation(pts),
         'points': sorted(pts, key=lambda x: x['rate']),
     }
+output['conditions'] = "${CONDITIONS[*]}".split()
 
 with open('${OUTPUT_FILE}', 'w') as f:
     json.dump(output, f, indent=2)
@@ -193,11 +194,11 @@ python3 -c "
 import json
 with open('${OUTPUT_FILE}') as f:
     data = json.load(f)
-for cond in ['single', 'wlb', 'minrtt']:
+for cond in data.get('conditions', data['results'].keys()):
     r = data['results'][cond]
     sat = r['saturation_mbps']
     sat_str = f'{sat} Mbps' if sat else 'N/A'
-    print(f'  {cond:8s}: saturation = {sat_str}')
+    print(f'  {cond:12s}: saturation = {sat_str}')
 "
 
 echo ""

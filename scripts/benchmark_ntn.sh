@@ -1,7 +1,7 @@
 #!/bin/bash
 # benchmark_ntn.sh — NTN (Non-Terrestrial Network) multipath scheduler benchmark
 #
-# Tests MinRTT vs WLB across LTE + satellite NTN scenarios.
+# Tests all schedulers (minrtt, wlb, backup, backup_fec, rap) across LTE + satellite NTN scenarios.
 # Models LEO/GEO satellite link characteristics based on 3GPP NTN specs
 # and real-world Starlink measurements.
 #
@@ -50,6 +50,7 @@ PSK=$("$MQVPN" --genkey 2>/dev/null)
 IPERF_DURATION=15
 IPERF_PARALLEL=4
 TUNNEL_WAIT=6      # longer wait for high-RTT paths to establish
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 declare -A R_BW
 declare -A R_RETR
@@ -277,10 +278,9 @@ run_scenario() {
 
     apply_tc_full "$rate_a" "$netem_a" "$rate_b" "$netem_b"
 
-    local scheds=(minrtt wlb)
-    local total_s=${#scheds[@]}
+    local total_s=${#SCHEDULERS[@]}
     local si=0
-    for sched in "${scheds[@]}"; do
+    for sched in "${SCHEDULERS[@]}"; do
         si=$((si + 1))
         local step="${si}/${total_s}"
 
@@ -391,26 +391,17 @@ echo "================================================================"
 echo "  NTN Benchmark Results"
 echo "================================================================"
 echo ""
-printf "  %-18s │ %10s %7s │ %10s %7s │ %s\n" \
-    "Scenario" "MinRTT" "Retr" "WLB" "Retr" "Ratio"
-echo "  ───────────────────┼────────────────────┼────────────────────┼───────"
+printf "  %-18s  %-11s  %12s  %s\n" "Scenario" "Scheduler" "Throughput" "Retr"
+echo "  ─────────────────────────────────────────────────────"
 
 for name in "${SCENARIOS[@]}"; do
-    bw_m="${R_BW[${name}_minrtt]:-N/A}"
-    bw_w="${R_BW[${name}_wlb]:-N/A}"
-    re_m="${R_RETR[${name}_minrtt]:-N/A}"
-    re_w="${R_RETR[${name}_wlb]:-N/A}"
-
-    ratio="-"
-    if [[ "$bw_m" =~ ^[0-9] ]] && [[ "$bw_w" =~ ^[0-9] ]]; then
-        ratio=$(awk "BEGIN { if ($bw_m > 0) printf \"%.2fx\", $bw_w / $bw_m; else print \"-\" }")
-    fi
-
-    printf "  %-18s │ %7s Mbps %5s │ %7s Mbps %5s │ %s\n" \
-        "$name" "$bw_m" "$re_m" "$bw_w" "$re_w" "$ratio"
+    for sched in "${SCHEDULERS[@]}"; do
+        bw="${R_BW[${name}_${sched}]:-N/A}"
+        retr="${R_RETR[${name}_${sched}]:-N/A}"
+        printf "  %-18s  %-11s  %7s Mbps  %s\n" "$name" "$sched" "$bw" "$retr"
+    done
+    echo ""
 done
-
-echo "  ───────────────────┴────────────────────┴────────────────────┴───────"
 echo ""
 
 # NTN-specific notes

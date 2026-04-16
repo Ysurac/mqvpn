@@ -5,10 +5,9 @@
 # No tc netem is applied — veth pairs run at native kernel speed.
 #
 # Tests (per direction):
-#   1. Direct (no VPN)        — baseline veth throughput via iperf3 across netns
-#   2. Single-path VPN        — 1 path (ci-a0 only)
-#   3. Multipath VPN (MinRTT) — 2 paths
-#   4. Multipath VPN (WLB)    — 2 paths
+#   1. Direct (no VPN)             — baseline veth throughput via iperf3 across netns
+#   2. Single-path VPN             — 1 path (ci-a0 only)
+#   3. Multipath VPN (all scheds)  — 2 paths, one run per scheduler
 #
 # Output: ci_bench_results/raw_throughput_<timestamp>.json
 #
@@ -31,6 +30,7 @@ DURATION=10
 PARALLEL=4
 DIRECTIONS=("DL")
 [ "$FULL_MODE" -eq 1 ] && DIRECTIONS=("DL" "UL")
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 # ── Preflight ──
 
@@ -54,7 +54,7 @@ echo "  Date:      $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
 
 # Collect results per direction
-declare -A R_DIRECT R_SINGLE R_MINRTT R_WLB
+declare -A R_DIRECT R_SINGLE R_SCHED   # R_SCHED keyed as "${DIR}_${sched}"
 
 for DIR in "${DIRECTIONS[@]}"; do
     echo ""
@@ -98,35 +98,22 @@ for DIR in "${DIRECTIONS[@]}"; do
 
     ci_bench_stop_vpn
 
-    # ── Multipath MinRTT ──
-    echo ""
-    echo "==> Multipath VPN — MinRTT"
+    # ── Multipath (all schedulers) ──
+    for sched in "${SCHEDULERS[@]}"; do
+        echo ""
+        echo "==> Multipath VPN — ${sched}"
 
-    ci_bench_start_server "minrtt"
-    ci_bench_start_client "--path $VETH_A0 --path $VETH_B0" "minrtt"
-    ci_bench_wait_tunnel
+        ci_bench_start_server "$sched"
+        ci_bench_start_client "--path $VETH_A0 --path $VETH_B0" "$sched"
+        ci_bench_wait_tunnel
 
-    mr_json=$(ci_bench_run_iperf TCP "$DIR" "$DURATION" "$PARALLEL")
-    R_MINRTT[$DIR]=$(ci_bench_parse_throughput "$mr_json")
-    rm -f "$mr_json"
-    echo "    Multipath MinRTT:  ${R_MINRTT[$DIR]} Mbps"
+        mp_json=$(ci_bench_run_iperf TCP "$DIR" "$DURATION" "$PARALLEL")
+        R_SCHED["${DIR}_${sched}"]=$(ci_bench_parse_throughput "$mp_json")
+        rm -f "$mp_json"
+        echo "    Multipath ${sched}:  ${R_SCHED["${DIR}_${sched}"]} Mbps"
 
-    ci_bench_stop_vpn
-
-    # ── Multipath WLB ──
-    echo ""
-    echo "==> Multipath VPN — WLB"
-
-    ci_bench_start_server "wlb"
-    ci_bench_start_client "--path $VETH_A0 --path $VETH_B0" "wlb"
-    ci_bench_wait_tunnel
-
-    wlb_json=$(ci_bench_run_iperf TCP "$DIR" "$DURATION" "$PARALLEL")
-    R_WLB[$DIR]=$(ci_bench_parse_throughput "$wlb_json")
-    rm -f "$wlb_json"
-    echo "    Multipath WLB:  ${R_WLB[$DIR]} Mbps"
-
-    ci_bench_stop_vpn
+        ci_bench_stop_vpn
+    done
 done
 
 # ── Generate JSON output ──
@@ -145,34 +132,38 @@ def overhead(baseline, measured):
         return round((1 - measured / baseline) * 100, 1)
     return None
 
-directions = {}
+schedulers = "${SCHEDULERS[*]}".split()
+directions_list = "${DIRECTIONS[*]}".split()
+
+# Inject per-direction baseline values from bash
+raw = {}
 $(for DIR in "${DIRECTIONS[@]}"; do
 cat <<INNER
-directions["${DIR}"] = {
-    "direct_mbps": float("${R_DIRECT[$DIR]}"),
-    "single_path_mbps": float("${R_SINGLE[$DIR]}"),
-    "multipath_minrtt_mbps": float("${R_MINRTT[$DIR]}"),
-    "multipath_wlb_mbps": float("${R_WLB[$DIR]}"),
-}
+raw.setdefault("${DIR}", {})["direct_mbps"] = float("${R_DIRECT[$DIR]}")
+raw.setdefault("${DIR}", {})["single_path_mbps"] = float("${R_SINGLE[$DIR]}")
 INNER
+for sched in "${SCHEDULERS[@]}"; do
+echo "raw.setdefault(\"${DIR}\", {})[\"multipath_${sched}_mbps\"] = float(\"${R_SCHED[${DIR}_${sched}]:-0.0}\")"
+done
 done)
 
 results = {}
 overhead_pct = {}
-for d, v in directions.items():
+for d in directions_list:
+    v = raw[d]
     results[d] = v
-    overhead_pct[d] = {
-        "single_path": overhead(v["direct_mbps"], v["single_path_mbps"]),
-        "multipath_minrtt": overhead(v["direct_mbps"], v["multipath_minrtt_mbps"]),
-        "multipath_wlb": overhead(v["direct_mbps"], v["multipath_wlb_mbps"]),
-    }
+    overhead_pct[d] = {"single_path": overhead(v["direct_mbps"], v["single_path_mbps"])}
+    for sched in schedulers:
+        key = f"multipath_{sched}_mbps"
+        overhead_pct[d][f"multipath_{sched}"] = overhead(v["direct_mbps"], v.get(key, 0))
 
 output = {
     "test": "raw_throughput",
     "commit": "${CI_BENCH_COMMIT}",
     "timestamp": "${TIMESTAMP}",
     "protocol": "tcp",
-    "directions": list(directions.keys()),
+    "directions": directions_list,
+    "schedulers": schedulers,
     "duration_sec": ${DURATION},
     "parallel_streams": ${PARALLEL},
     "results": results,

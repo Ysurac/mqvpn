@@ -1,7 +1,8 @@
 #!/bin/bash
 # benchmark_udp_scheduler.sh — UDP multipath scheduler benchmark
 #
-# Measures UDP-specific metrics (throughput, jitter, loss%) for MinRTT vs WLB.
+# Measures UDP-specific metrics (throughput, jitter, loss%) for all schedulers
+# (minrtt, wlb, backup, backup_fec, rap).
 # UDP packets use per-packet WRR (no flow pinning) under WLB, so bandwidth
 # aggregation should be better than TCP in most scenarios.
 #
@@ -45,6 +46,7 @@ PSK=$("$MQVPN" --genkey 2>/dev/null)
 IPERF_DURATION=15
 IPERF_PARALLEL=4
 TUNNEL_WAIT=5
+SCHEDULERS=(minrtt wlb backup backup_fec rap)
 
 # Per-stream UDP target bandwidth (-b).  Total = value × IPERF_PARALLEL.
 # Set to ~1.2× combined link capacity / P to mildly oversubscribe
@@ -311,10 +313,9 @@ run_scenario() {
 
     apply_tc_full "$rate_a" "$netem_a" "$rate_b" "$netem_b"
 
-    local scheds=(minrtt wlb)
-    local total_s=${#scheds[@]}
+    local total_s=${#SCHEDULERS[@]}
     local si=0
-    for sched in "${scheds[@]}"; do
+    for sched in "${SCHEDULERS[@]}"; do
         si=$((si + 1))
         local step="${si}/${total_s}"
 
@@ -427,27 +428,18 @@ echo "================================================================"
 echo "  UDP Benchmark Results"
 echo "================================================================"
 echo ""
-printf "  %-14s │ %10s %7s %7s │ %10s %7s %7s │ %s\n" \
-    "Scenario" "MinRTT" "Jitter" "Loss" "WLB" "Jitter" "Loss" "Ratio"
-echo "  ───────────────┼───────────────────────────┼───────────────────────────┼───────"
+printf "  %-16s  %-11s  %12s  %8s  %6s\n" "Scenario" "Scheduler" "Throughput" "Jitter" "Loss"
+echo "  ──────────────────────────────────────────────────────────────────"
 
 for name in "${SCENARIOS[@]}"; do
-    bw_m="${R_BW[${name}_minrtt]:-N/A}"
-    bw_w="${R_BW[${name}_wlb]:-N/A}"
-    ji_m="${R_JITTER[${name}_minrtt]:-N/A}"
-    ji_w="${R_JITTER[${name}_wlb]:-N/A}"
-    lo_m="${R_LOSS[${name}_minrtt]:-N/A}"
-    lo_w="${R_LOSS[${name}_wlb]:-N/A}"
-
-    ratio="-"
-    if [[ "$bw_m" =~ ^[0-9] ]] && [[ "$bw_w" =~ ^[0-9] ]]; then
-        ratio=$(awk "BEGIN { if ($bw_m > 0) printf \"%.2fx\", $bw_w / $bw_m; else print \"-\" }")
-    fi
-
-    printf "  %-14s │ %7s Mbps %5s %5s%% │ %7s Mbps %5s %5s%% │ %s\n" \
-        "$name" "$bw_m" "$ji_m" "$lo_m" "$bw_w" "$ji_w" "$lo_w" "$ratio"
+    for sched in "${SCHEDULERS[@]}"; do
+        bw="${R_BW[${name}_${sched}]:-N/A}"
+        jitter="${R_JITTER[${name}_${sched}]:-N/A}"
+        loss="${R_LOSS[${name}_${sched}]:-N/A}"
+        printf "  %-16s  %-11s  %7s Mbps  %5s ms  %5s%%\n" \
+            "$name" "$sched" "$bw" "$jitter" "$loss"
+    done
+    echo ""
 done
-
-echo "  ───────────────┴───────────────────────────┴───────────────────────────┴───────"
 echo ""
 echo "================================================================"
