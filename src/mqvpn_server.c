@@ -1773,6 +1773,7 @@ mqvpn_server_destroy(mqvpn_server_t *s)
 
     /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
     if (s->engine) {
+        xqc_h3_ctx_destroy(s->engine);
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
     }
