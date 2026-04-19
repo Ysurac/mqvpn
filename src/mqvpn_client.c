@@ -1606,6 +1606,7 @@ mqvpn_client_destroy(mqvpn_client_t *client)
     if (!client) return;
 
     if (client->engine) {
+        xqc_h3_ctx_destroy(client->engine);
         xqc_engine_destroy(client->engine);
         client->engine = NULL;
     }
