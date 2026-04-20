@@ -6,6 +6,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "path_rotation.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -158,6 +159,7 @@ struct mqvpn_client_s {
     int n_paths;
     int64_t next_path_handle;
     int multipath_ready; /* 1 after cb_ready_to_create_path */
+    int primary_path_idx; /* index of path used for initial connection; rotated on reconnect */
 
     /* Reconnect */
     int reconnect_attempts;
@@ -347,7 +349,7 @@ get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
     if (p) return p->fd;
     /* Fallback to primary path */
-    if (c->n_paths > 0) return c->paths[0].fd;
+    if (c->n_paths > 0) return c->paths[c->primary_path_idx].fd;
     return -1;
 }
 
@@ -614,7 +616,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
-    int fd = (c->n_paths > 0) ? c->paths[0].fd : -1;
+    int fd = (c->n_paths > 0) ? c->paths[c->primary_path_idx].fd : -1;
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
@@ -626,7 +628,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
-    if (c->n_paths > 0) c->paths[0].bytes_tx += (uint64_t)res;
+    if (c->n_paths > 0) c->paths[c->primary_path_idx].bytes_tx += (uint64_t)res;
     return res;
 }
 
@@ -1009,10 +1011,11 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             }
 
             /* Primary path is now active */
-            if (c->n_paths > 0 && c->paths[0].active) {
-                c->paths[0].status = MQVPN_PATH_ACTIVE;
+            if (c->n_paths > 0 && c->paths[c->primary_path_idx].active) {
+                c->paths[c->primary_path_idx].status = MQVPN_PATH_ACTIVE;
                 if (c->cbs.path_event)
-                    c->cbs.path_event(c->paths[0].handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+                    c->cbs.path_event(c->paths[c->primary_path_idx].handle,
+                                      MQVPN_PATH_ACTIVE, c->user_ctx);
             }
 
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
@@ -1228,7 +1231,8 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     c->multipath_ready = 1;
     if (!c->config.multipath) return;
 
-    for (int i = 1; i < c->n_paths; i++) {
+    for (int i = 0; i < c->n_paths; i++) {
+        if (i == c->primary_path_idx) continue; /* already the initial path */
         path_entry_t *p = &c->paths[i];
         if (p->in_use || !p->active) continue;
         if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
@@ -1460,8 +1464,8 @@ cli_start_connection(mqvpn_client_t *c)
 
     /* Mark primary path */
     if (c->n_paths > 0) {
-        c->paths[0].xqc_path_id = 0;
-        c->paths[0].in_use = 1;
+        c->paths[c->primary_path_idx].xqc_path_id = 0;
+        c->paths[c->primary_path_idx].in_use = 1;
     }
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
@@ -1967,6 +1971,20 @@ mqvpn_client_tick(mqvpn_client_t *c)
                 c->paths[i].recreate_after_us = 0;
                 c->paths[i].recreate_retries = 0;
                 c->paths[i].path_stable_since_us = 0;
+            }
+
+            /* Rotate primary path index among non-backup paths so that a
+             * dead first interface does not permanently block reconnection. */
+            {
+                uint32_t flags[MQVPN_MAX_PATHS];
+                for (int i = 0; i < c->n_paths; i++) flags[i] = c->paths[i].flags;
+                int next =
+                    mqvpn_rotate_primary_path(c->primary_path_idx, flags, c->n_paths);
+                if (next != c->primary_path_idx) {
+                    LOG_I(c, "reconnect: rotating primary path %d -> %d (%s)",
+                          c->primary_path_idx, next, c->paths[next].name);
+                    c->primary_path_idx = next;
+                }
             }
 
             if (cli_start_connection(c) < 0) {

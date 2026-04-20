@@ -114,6 +114,7 @@ set(MQVPN_LIB_SOURCES
     src/addr_pool.c
     src/auth.c
     src/log.c
+    src/path_rotation.c
 )
 
 # ---------- libmqvpn (static library — no libevent, no platform I/O) ----------
@@ -261,8 +262,9 @@ if(BUILD_TESTING)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
     add_executable(test_status tests/test_status.c)
+    add_executable(test_path_rotation tests/test_path_rotation.c src/path_rotation.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_rotation)
         target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/linux)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
