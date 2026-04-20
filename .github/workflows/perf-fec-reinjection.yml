@@ -1,0 +1,210 @@
+name: FEC and Reinjection Performance Tests
+
+# Benchmarks FEC scheme throughput under packet loss and reinjection mode
+# throughput under asymmetric/lossy path conditions.
+#
+# Triggers:
+#   - Push to main when FEC/reinjection source files change
+#   - Manual dispatch (for on-demand comparisons)
+#
+# Security: never runs on PRs — prevents fork code execution on self-hosted runner.
+# Runner requires: cmake gcc make git libevent-dev golang iptables
+#                  iproute2 iperf3 python3 openssl bc tc
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/mqvpn_config.c'
+      - 'src/config.c'
+      - 'include/libmqvpn.h'
+      - 'third_party/xquic/src/transport/xqc_fec.c'
+      - 'third_party/xquic/src/transport/xqc_fec.h'
+      - 'third_party/xquic/src/transport/fec_schemes/**'
+      - 'third_party/xquic/src/transport/xqc_reinjection.c'
+      - 'third_party/xquic/src/transport/reinjection_control/**'
+      - 'scripts/ci_benchmarks/ci_bench_fec.sh'
+      - 'scripts/ci_benchmarks/ci_bench_reinjection.sh'
+      - 'scripts/ci_benchmarks/ci_bench_env.sh'
+      - '.github/workflows/perf-fec-reinjection.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perf-test
+  cancel-in-progress: true
+
+jobs:
+  perf-fec-reinjection:
+    runs-on: perf-test
+    timeout-minutes: 90
+    steps:
+      - name: Pre-checkout cleanup (root-owned files)
+        run: sudo rm -rf ci_bench_results bench_results
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cleanup stale state
+        run: |
+          sudo pkill -f 'mqvpn.*ci-bench' || true
+          sudo ip netns del ci-bench-server 2>/dev/null || true
+          sudo ip netns del ci-bench-client 2>/dev/null || true
+          sudo pkill -f 'iperf3' || true
+
+      - name: Clean previous build
+        run: |
+          rm -rf third_party/xquic/third_party/boringssl
+          rm -rf third_party/xquic/build
+          rm -rf build
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (Release)
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      # ── FEC benchmarks ──
+
+      - name: FEC scheme benchmark (4 schemes × 4 loss levels)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_fec.sh build/mqvpn
+
+      # ── Reinjection benchmarks ──
+
+      - name: Reinjection mode benchmark (3 modes × 5 scenarios)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_reinjection.sh build/mqvpn
+
+      # ── Artifacts ──
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-fec-reinjection-${{ github.sha }}
+          path: ci_bench_results/*.json
+          retention-days: 90
+
+      # ── Publish to website (same retry pattern as perf.yml) ──
+
+      - name: Publish results to website
+        if: success()
+        run: |
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+          mkdir -p website/public/perf-data/fec-reinjection
+          cp ci_bench_results/fec_*.json     website/public/perf-data/fec-reinjection/ 2>/dev/null || true
+          cp ci_bench_results/reinjection_*.json website/public/perf-data/fec-reinjection/ 2>/dev/null || true
+
+          cd website/public/perf-data/fec-reinjection
+          python3 -c "
+          import json, glob, os
+          index_path = 'index.json'
+          index = json.load(open(index_path)) if os.path.exists(index_path) else []
+          existing_files = set()
+          for e in index:
+              existing_files.update(e.get('files', []))
+          new_files = [os.path.basename(f) for f in glob.glob('*.json')
+                       if os.path.basename(f) != 'index.json'
+                       and os.path.basename(f) not in existing_files]
+          if new_files:
+              index.insert(0, {
+                  'commit': '${COMMIT_SHORT}',
+                  'timestamp': '${TIMESTAMP}',
+                  'type': 'fec-reinjection',
+                  'files': new_files
+              })
+          index = index[:100]
+          with open(index_path, 'w') as f:
+              json.dump(index, f, indent=2)
+          indexed_files = set()
+          for e in index:
+              indexed_files.update(e.get('files', []))
+          for f in glob.glob('*.json'):
+              if f != 'index.json' and f not in indexed_files:
+                  os.remove(f)
+          "
+
+          cd $GITHUB_WORKSPACE
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          push_ok=false
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            mkdir -p website/public/perf-data/fec-reinjection
+            cp ci_bench_results/fec_*.json     website/public/perf-data/fec-reinjection/ 2>/dev/null || true
+            cp ci_bench_results/reinjection_*.json website/public/perf-data/fec-reinjection/ 2>/dev/null || true
+
+            cd website/public/perf-data/fec-reinjection
+            python3 -c "
+          import json, glob, os
+          index_path = 'index.json'
+          index = json.load(open(index_path)) if os.path.exists(index_path) else []
+          existing_files = set()
+          for e in index:
+              existing_files.update(e.get('files', []))
+          new_files = [os.path.basename(f) for f in glob.glob('*.json')
+                       if os.path.basename(f) != 'index.json'
+                       and os.path.basename(f) not in existing_files]
+          if new_files:
+              index.insert(0, {
+                  'commit': '${COMMIT_SHORT}',
+                  'timestamp': '${TIMESTAMP}',
+                  'type': 'fec-reinjection',
+                  'files': new_files
+              })
+          index = index[:100]
+          with open(index_path, 'w') as f:
+              json.dump(index, f, indent=2)
+          indexed_files = set()
+          for e in index:
+              indexed_files.update(e.get('files', []))
+          for f in glob.glob('*.json'):
+              if f != 'index.json' and f not in indexed_files:
+                  os.remove(f)
+            "
+            cd $GITHUB_WORKSPACE
+
+            git add website/public/perf-data/
+            git diff --cached --quiet && { push_ok=true; break; }
+            git commit -m "perf: update FEC/reinjection benchmark results (${COMMIT_SHORT}) [skip ci]"
+            git push && { push_ok=true; break; }
+            echo "Push failed (attempt $attempt), retrying..."
+            sleep 5
+          done
+          if [ "$push_ok" = false ]; then
+            echo "::error::Failed to publish FEC/reinjection benchmark results after 3 attempts"
+            exit 1
+          fi
+
+      - name: Trigger Cloudflare Pages deploy
+        if: success()
+        run: curl -sS -X POST "${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}" || true
+
+      - name: Post-job cleanup (root-owned files)
+        if: always()
+        run: sudo rm -rf ci_bench_results
