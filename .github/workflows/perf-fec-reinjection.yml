@@ -7,9 +7,8 @@ name: FEC and Reinjection Performance Tests
 #   - Push to main when FEC/reinjection source files change
 #   - Manual dispatch (for on-demand comparisons)
 #
-# Security: never runs on PRs — prevents fork code execution on self-hosted runner.
-# Runner requires: cmake gcc make git libevent-dev golang iptables
-#                  iproute2 iperf3 python3 openssl bc tc
+# Runs on standard GitHub-hosted ubuntu-latest runners (ephemeral).
+# Dependencies installed inline.
 
 on:
   push:
@@ -33,33 +32,23 @@ permissions:
   contents: write
 
 concurrency:
-  group: perf-test
+  group: perf-fec-reinjection
   cancel-in-progress: true
 
 jobs:
   perf-fec-reinjection:
-    runs-on: perf-test
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Pre-checkout cleanup (root-owned files)
-        run: sudo rm -rf ci_bench_results bench_results
-
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Cleanup stale state
+      - name: Install dependencies
         run: |
-          sudo pkill -f 'mqvpn.*ci-bench' || true
-          sudo ip netns del ci-bench-server 2>/dev/null || true
-          sudo ip netns del ci-bench-client 2>/dev/null || true
-          sudo pkill -f 'iperf3' || true
-
-      - name: Clean previous build
-        run: |
-          rm -rf third_party/xquic/third_party/boringssl
-          rm -rf third_party/xquic/build
-          rm -rf build
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake gcc make libevent-dev golang \
+            iptables iproute2 iperf3 python3 openssl bc
 
       - name: Build BoringSSL
         run: |
@@ -205,6 +194,3 @@ jobs:
         if: success()
         run: curl -sS -X POST "${{ secrets.CLOUDFLARE_DEPLOY_HOOK }}" || true
 
-      - name: Post-job cleanup (root-owned files)
-        if: always()
-        run: sudo rm -rf ci_bench_results
