@@ -1,0 +1,172 @@
+name: Standby Backup Path Tests and Benchmark
+
+# Validates the xquic-standby backup path feature:
+#
+#   Unit test (test_standby_backup):
+#     Exercises backup path flag storage, state, path_event callbacks, and
+#     tick() safety — all without a live QUIC connection.
+#     Requires a full mqvpn_lib + xquic build.
+#
+#   Perf benchmark (ci_bench_standby_backup):
+#     Measures TTF (Time-To-Failover) and TTR (Time-To-Recovery) for the
+#     backup and backup_fec schedulers using a primary + backup path setup.
+#     Two fault cycles are measured:
+#       - fault1: cold standby  (path probed since startup)
+#       - fault2: warm standby  (path re-probed after first recovery)
+#     Runs on every push to main; results uploaded as CI artifact.
+#
+# Triggers
+#   - Push to main when related source files change
+#   - Pull requests touching the same files (unit test only)
+#   - Manual dispatch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'include/libmqvpn.h'
+      - 'tests/test_standby_backup.c'
+      - 'scripts/ci_benchmarks/ci_bench_standby_backup.sh'
+      - 'scripts/ci_benchmarks/ci_bench_env.sh'
+      - 'CMakeLists.txt'
+      - '.github/workflows/test-standby-backup.yml'
+  pull_request:
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'include/libmqvpn.h'
+      - 'tests/test_standby_backup.c'
+      - 'CMakeLists.txt'
+      - '.github/workflows/test-standby-backup.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: test-standby-backup-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Unit tests ────────────────────────────────────────────────────────────
+  unit-test:
+    name: Build and run test_standby_backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake gcc make libssl-dev
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (Release + tests)
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_TESTING=ON \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) test_standby_backup
+
+      - name: Run test_standby_backup
+        run: ./build/tests/test_standby_backup
+
+      # ASan + UBSan build
+      - name: Build with ASan + UBSan
+        run: |
+          mkdir -p build_asan && cd build_asan
+          cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DBUILD_TESTING=ON \
+                -DENABLE_SANITIZERS=ON \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) test_standby_backup
+
+      - name: Run test_standby_backup (ASan + UBSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./build_asan/tests/test_standby_backup
+
+  # ── Performance benchmark ─────────────────────────────────────────────────
+  perf-standby-backup:
+    name: Standby backup failover benchmark
+    # Only run on pushes to main — benchmark requires networking primitives
+    # (ip netns, tc netem) that are available on ubuntu-latest but we do not
+    # want this to run on every PR.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake gcc make libevent-dev \
+            iptables iproute2 iperf3 python3 openssl bc
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn (Release)
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Run standby backup benchmark
+        run: sudo bash scripts/ci_benchmarks/ci_bench_standby_backup.sh build/mqvpn
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: standby-backup-perf-${{ github.sha }}
+          path: ci_bench_results/standby_backup_*.json
+          retention-days: 90
