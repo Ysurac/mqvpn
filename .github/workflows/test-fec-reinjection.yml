@@ -1,0 +1,92 @@
+name: FEC and Reinjection Unit Tests
+
+# Lightweight workflow that validates every FEC scheme (reed_solomon, xor,
+# packet_mask, galois_calculation) and every reinjection control mode
+# (default, deadline, dgram) through both the INI and JSON config parsers.
+#
+# test_fec_reinj links only config.c + log.c — no xquic or BoringSSL needed,
+# so this completes in well under a minute.
+
+on:
+  push:
+    paths:
+      - 'src/config.c'
+      - 'src/config.h'
+      - 'src/mqvpn_config.c'
+      - 'include/libmqvpn.h'
+      - 'tests/test_fec_reinj.c'
+      - 'CMakeLists.txt'
+      - '.github/workflows/test-fec-reinjection.yml'
+  pull_request:
+    paths:
+      - 'src/config.c'
+      - 'src/config.h'
+      - 'src/mqvpn_config.c'
+      - 'include/libmqvpn.h'
+      - 'tests/test_fec_reinj.c'
+      - 'CMakeLists.txt'
+      - '.github/workflows/test-fec-reinjection.yml'
+  workflow_dispatch:
+
+jobs:
+  test-fec-reinjection:
+    name: Build and run test_fec_reinj
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        # No submodules needed — test links only config.c + log.c
+
+      # Direct compilation — avoids the full cmake configure (which needs xquic).
+      - name: Compile test_fec_reinj
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -D_DEFAULT_SOURCE \
+             -I src -I include \
+             tests/test_fec_reinj.c \
+             src/config.c \
+             src/log.c \
+             -o test_fec_reinj
+
+      - name: Run test_fec_reinj
+        run: ./test_fec_reinj
+
+      # Verify it compiles and passes under ASan + UBSan
+      - name: Compile with ASan + UBSan
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -D_DEFAULT_SOURCE \
+             -fsanitize=address,undefined -fno-omit-frame-pointer \
+             -I src -I include \
+             tests/test_fec_reinj.c \
+             src/config.c \
+             src/log.c \
+             -o test_fec_reinj_asan
+
+      - name: Run with ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./test_fec_reinj_asan
+
+      # Verify it also compiles clean under MSan (no xquic → MSan-instrumented
+      # libc is sufficient, no need for a custom libevent build)
+      - name: Install clang
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang
+
+      - name: Compile with MSan
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -D_DEFAULT_SOURCE \
+             -fsanitize=memory -fno-omit-frame-pointer \
+             -fsanitize-memory-track-origins \
+             -I src -I include \
+             tests/test_fec_reinj.c \
+             src/config.c \
+             src/log.c \
+             -o test_fec_reinj_msan
+
+      - name: Run with MSan
+        env:
+          MSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./test_fec_reinj_msan

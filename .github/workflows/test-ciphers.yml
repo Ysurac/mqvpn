@@ -1,0 +1,85 @@
+name: Cipher Suite Tests
+
+# Verifies that TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, and
+# TLS_CHACHA20_POLY1305_SHA256 each establish a working VPN tunnel.
+#
+# Triggers on changes to cipher-related source files and the workflow itself.
+
+on:
+  push:
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/mqvpn_server.c'
+      - 'src/mqvpn_config.c'
+      - 'src/config.c'
+      - 'include/libmqvpn.h'
+      - 'scripts/ci_e2e/run_cipher_test.sh'
+      - 'scripts/ci_e2e/sanitizer_check.sh'
+      - '.github/workflows/test-ciphers.yml'
+  pull_request:
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/mqvpn_server.c'
+      - 'src/mqvpn_config.c'
+      - 'src/config.c'
+      - 'include/libmqvpn.h'
+      - 'scripts/ci_e2e/run_cipher_test.sh'
+      - 'scripts/ci_e2e/sanitizer_check.sh'
+      - '.github/workflows/test-ciphers.yml'
+  workflow_dispatch:
+
+jobs:
+  test-ciphers:
+    name: E2E cipher suite test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake gcc make libevent-dev golang \
+            iptables iproute2 openssl
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc)
+
+      - name: Cipher suite E2E test (3 suites)
+        run: sudo bash scripts/ci_e2e/run_cipher_test.sh build/mqvpn
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cipher-test-logs-${{ github.sha }}
+          path: /tmp/tmp.*/
+          retention-days: 7

@@ -59,7 +59,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y cmake gcc make libssl-dev
+          sudo apt-get install -y cmake gcc make libssl-dev libevent-dev
 
       - name: Build BoringSSL
         run: |
