@@ -377,7 +377,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.1.0 — TLS verification, WLB scheduler, multi-client, PSK auth, DNS, config file
 - [x] v0.2.0 — Reconnection, kill switch, IPv6, ICMP PTB, systemd service
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
-- [ ] Per-client token auth
+- [x] Per-client token auth
 - [x] resolvectl DNS support (with resolv.conf fallback)
 - [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
