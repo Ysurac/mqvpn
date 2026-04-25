@@ -1,4 +1,21 @@
-mqvpn (0.5.0-1) unstable; urgency=medium
+mqvpn (0.3.1-1) unstable; urgency=medium
+
+  * Add FEC (Forward Error Correction) and packet reinjection support.
+  * Add support for all xquic schedulers and congestion control settings.
+  * Add cipher suite configuration options.
+  * Add user authentication support (username in addition to pre-shared key).
+  * Add path rotation on startup.
+  * Add ICMP handling support.
+  * Backup mode: use xquic standby API for schedulers that support it.
+  * Add routes management options (--gateway, --no-gateway).
+  * Refactor tick() and client_new() into focused helper functions.
+  * Fix memory leaks in client teardown path.
+  * Fix multipath route detection errors.
+  * Merge main: CMakeLists.txt now includes icmp.c.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sat, 25 Apr 2026 00:00:00 +0000
+
+mqvpn (0.3.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.
   * Add backup/failover path support (--backup-path).
