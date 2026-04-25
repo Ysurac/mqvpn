@@ -149,10 +149,14 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Scheduler` | Scheduler algorithm (`minrtt` or `wlb`) | `wlb` |
+| `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, or `backup_fec`) | `wlb` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 
 See [Multipath](./multipath) for scheduler details.
+
+> `backup_fec` is experimental and requires both peers to run mqvpn ≥ 0.4.0
+> with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
+> See [Multipath](./multipath#backup-fec-experimental).
 
 ## Control API
 

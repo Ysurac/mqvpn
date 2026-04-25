@@ -40,10 +40,14 @@ cd third_party/xquic
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
       -DSSL_PATH=../third_party/boringssl \
-      -DXQC_ENABLE_BBR2=ON ..
+      -DXQC_ENABLE_BBR2=ON \
+      -DXQC_ENABLE_FEC=ON \
+      -DXQC_ENABLE_XOR=ON ..
 make -j$(nproc)
 cd ../../..
 ```
+
+> FEC ビルドフラグ (`XQC_ENABLE_FEC`, `XQC_ENABLE_XOR`) は `--scheduler backup_fec` を使うために必要です。配布されている `.deb` パッケージはデフォルトで有効になっています。
 
 #### 3. mqvpn のビルド
 
@@ -131,7 +135,9 @@ cmake -G "Visual Studio 17 2022" -A x64 ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DSSL_TYPE=boringssl ^
   -DSSL_PATH=%cd%\..\..\xquic\third_party\boringssl ^
-  -DXQC_ENABLE_BBR2=ON ..
+  -DXQC_ENABLE_BBR2=ON ^
+  -DXQC_ENABLE_FEC=ON ^
+  -DXQC_ENABLE_XOR=ON ..
 cmake --build . --config Release
 ```
 

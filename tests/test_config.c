@@ -158,6 +158,29 @@ test_parse_client_config(void)
 }
 
 static void
+test_parse_scheduler_backup_fec(void)
+{
+    const char *ini = "[Server]\n"
+                      "Address = vpn.example.com:443\n"
+                      "\n"
+                      "[Auth]\n"
+                      "Key = myclientkey\n"
+                      "\n"
+                      "[Multipath]\n"
+                      "Scheduler = backup_fec\n"
+                      "Path = eth0\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "scheduler backup_fec config parse ok");
+    ASSERT_EQ_STR(cfg.scheduler, "backup_fec", "scheduler backup_fec");
+}
+
+static void
 test_comments_whitespace(void)
 {
     const char *ini = "# This is a comment\n"
@@ -991,6 +1014,7 @@ main(void)
     test_defaults();
     test_parse_server_config();
     test_parse_client_config();
+    test_parse_scheduler_backup_fec();
     test_comments_whitespace();
     test_unknown_key_warns();
     test_missing_file_error();

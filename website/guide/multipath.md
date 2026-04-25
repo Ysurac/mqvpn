@@ -58,6 +58,34 @@ MinRTT sends each packet on the path with the lowest current RTT. It is simpler 
 --scheduler minrtt
 ```
 
+### Backup FEC (experimental)
+
+Sends regular traffic on the AVAILABLE path and FEC repair symbols on the
+STANDBY path. Designed for lossy primary links (e.g., spotty WiFi) backed by
+a more reliable standby (e.g., LTE).
+
+```
+--scheduler backup_fec
+```
+
+**When to use**: WiFi+LTE multipath in lossy environments. Repair symbols on
+the standby path enable instant recovery from primary-path losses without
+waiting for retransmission RTTs.
+
+**When NOT to use**:
+
+- Single-path setups (no standby path = no place for repair symbols)
+- High-bandwidth scenarios where you want bandwidth aggregation (use `wlb` instead)
+- Both endpoints must be on mqvpn ≥ 0.4.0 with FEC build enabled
+  (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`)
+
+**Tuning**: Default config uses XOR FEC with ~33% per-block overhead (see
+`src/mqvpn_scheduler.h` `MQVPN_FEC_*` macros). No CLI flags exposed for FEC
+parameters in this experimental release.
+
+**Performance**: See [weekly benchmarks](../benchmarks/weekly) for measured
+throughput vs WLB across loss rates 1%–10%.
+
 ### Which Scheduler to Use?
 
 | Scenario | Recommended |
@@ -66,6 +94,7 @@ MinRTT sends each packet on the path with the lowest current RTT. It is simpler 
 | Latency-sensitive applications | MinRTT |
 | Asymmetric paths (different speeds) | **WLB** |
 | Similar-speed paths | Either works well |
+| Lossy primary + reliable standby (experimental) | `backup_fec` |
 
 ## Dynamic Path Management
 

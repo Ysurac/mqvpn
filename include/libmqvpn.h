@@ -94,6 +94,8 @@ typedef enum {
 typedef enum {
     MQVPN_SCHED_MINRTT = 0,
     MQVPN_SCHED_WLB = 1,
+    MQVPN_SCHED_BACKUP_FEC =
+        2, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
 } mqvpn_scheduler_t;
 
 typedef enum {

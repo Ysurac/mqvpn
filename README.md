@@ -309,7 +309,9 @@ cd third_party/xquic
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
       -DSSL_PATH=../third_party/boringssl \
-      -DXQC_ENABLE_BBR2=ON ..
+      -DXQC_ENABLE_BBR2=ON \
+      -DXQC_ENABLE_FEC=ON \
+      -DXQC_ENABLE_XOR=ON ..
 make -j$(nproc)
 cd ../../..
 
@@ -365,7 +367,8 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-  --scheduler minrtt|wlb Multipath scheduler (default: wlb)
+  --scheduler minrtt|wlb|backup_fec
+                         Multipath scheduler (default: wlb)
   --control-port PORT    TCP port for JSON control API (server)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit
@@ -379,6 +382,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
 - [x] Per-client token auth
 - [x] resolvectl DNS support (with resolv.conf fallback)
+- [ ] v0.4.0 — Experimental backup_fec scheduler, Windows client, server control API support
 - [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
 - [ ] Interop testing (masque-go, QUICHE)
