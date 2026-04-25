@@ -2,14 +2,28 @@
 # sanitizer_check.sh — Check if a process exited cleanly (no sanitizer errors)
 #
 # Usage: source sanitizer_check.sh
-#        stop_and_check_sanitizer PID "description"
+#        stop_and_check_sanitizer PID "description" [log_file]
 #
 # Sends SIGTERM, waits, checks exit code. ASan/UBSan cause non-zero exit.
 # Exit code 1 = sanitizer error detected.
+#
+# If log_file is given and the sanitizer trips, the log is dumped to stderr
+# so CI output captures the actual ASan/UBSan diagnostic instead of just
+# "exited with code 1".
+
+_dump_sanitizer_log() {
+    local desc="$1" log_file="$2"
+    [ -z "$log_file" ] && return
+    [ ! -f "$log_file" ] && return
+    echo "--- ${desc} log: ${log_file} (last 200 lines) ---" >&2
+    tail -200 "$log_file" >&2
+    echo "--- end ${desc} log ---" >&2
+}
 
 stop_and_check_sanitizer() {
     local pid="$1"
     local desc="${2:-process}"
+    local log_file="${3:-}"
     local rc=0
 
     if [ -z "$pid" ]; then return 0; fi
@@ -19,6 +33,7 @@ stop_and_check_sanitizer() {
         rc=$?
         if [ $rc -ne 0 ]; then
             echo "SANITIZER FAIL: $desc (PID $pid) exited with code $rc"
+            _dump_sanitizer_log "$desc" "$log_file"
             return 1
         fi
         return 0
@@ -31,6 +46,7 @@ stop_and_check_sanitizer() {
     # SIGTERM causes exit code 143 (128+15) which is normal
     if [ $rc -ne 0 ] && [ $rc -ne 143 ]; then
         echo "SANITIZER FAIL: $desc (PID $pid) exited with code $rc"
+        _dump_sanitizer_log "$desc" "$log_file"
         return 1
     fi
     return 0

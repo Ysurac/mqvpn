@@ -64,8 +64,10 @@ PASS=0
 FAIL=0
 
 cleanup_processes() {
-    stop_and_check_sanitizer "$CLIENT_PID" "client" || SANITIZER_FAIL=1
-    stop_and_check_sanitizer "$SERVER_PID" "server" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$CLIENT_PID" "client" \
+        "${WORK_DIR}/client.log" || SANITIZER_FAIL=1
+    stop_and_check_sanitizer "$SERVER_PID" "server" \
+        "${WORK_DIR}/server.log" || SANITIZER_FAIL=1
     SERVER_PID=""
     CLIENT_PID=""
     sleep 1
