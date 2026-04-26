@@ -9,7 +9,8 @@ import { usePerfData } from '../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows
+  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows,
+  backupFecRows
 } = usePerfData('/perf-data/weekly')
 
 // Failover filter
@@ -231,6 +232,32 @@ const filteredUdpSweepRows = computed(() => {
       <td>{{ r.single }}</td>
       <td>{{ r.wlb }}</td>
       <td>{{ r.minrtt }}</td>
+    </tr>
+  </tbody>
+</table>
+
+## Backup FEC scheduler (lossy primary)
+
+<p class="section-desc">Compares <code>wlb</code> vs <code>backup_fec</code> throughput on a 2-path topology with primary-path packet loss injected via <code>tc netem</code>. Standby path is clean. Median of 3 × 30s TCP DL runs per cell. <em>Experimental — see <a href="../guide/multipath#backup-fec-experimental">Multipath guide</a>.</em></p>
+
+<div v-if="backupFecRows.length === 0">No data.</div>
+<table v-else>
+  <thead>
+    <tr>
+      <th>Commit</th>
+      <th>Date</th>
+      <th>Scheduler</th>
+      <th>Loss %</th>
+      <th>Throughput (Mbps, median)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr v-for="(r, i) in backupFecRows" :key="'fec-' + i">
+      <td><code>{{ r.commit }}</code></td>
+      <td>{{ r.date }}</td>
+      <td>{{ r.scheduler }}</td>
+      <td>{{ r.loss_pct }}</td>
+      <td>{{ r.throughput_mbps }}</td>
     </tr>
   </tbody>
 </table>

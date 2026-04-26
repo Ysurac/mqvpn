@@ -10,6 +10,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "mqvpn_scheduler.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1237,16 +1238,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
         break;
     }
-    if (cfg->scheduler == MQVPN_SCHED_WLB)
-        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
-    else if (cfg->scheduler == MQVPN_SCHED_BACKUP)
-        conn_settings.scheduler_callback = xqc_backup_scheduler_cb;
-    else if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC)
-        conn_settings.scheduler_callback = xqc_backup_fec_scheduler_cb;
-    else if (cfg->scheduler == MQVPN_SCHED_RAP)
-        conn_settings.scheduler_callback = xqc_rap_scheduler_cb;
-    else
-        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+#if !defined(XQC_ENABLE_FEC) || !defined(XQC_ENABLE_XOR)
+    if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC) {
+        LOG_W(s, "backup_fec scheduler requested but library built without FEC "
+                 "support (XQC_ENABLE_FEC/XQC_ENABLE_XOR); downgrading to minrtt");
+    }
+#endif
+    mqvpn_apply_scheduler(&conn_settings, cfg->scheduler);
 
     if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
         conn_settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;

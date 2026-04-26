@@ -45,7 +45,10 @@ jobs:
           cd third_party/xquic
           mkdir -p build && cd build
           CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-            -DXQC_ENABLE_BBR2=ON -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
+            -DXQC_ENABLE_BBR2=ON \
+            -DXQC_ENABLE_FEC=ON \
+            -DXQC_ENABLE_XOR=ON \
+            -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 
       - name: Build mqvpn (ASan + UBSan)

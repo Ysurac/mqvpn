@@ -149,10 +149,14 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Scheduler` | スケジューラアルゴリズム（`minrtt` または `wlb`） | `wlb` |
+| `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, または `backup_fec`） | `wlb` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
 
 スケジューラの詳細は[マルチパス](./multipath)を参照してください。
+
+> `backup_fec` は実験的機能で、両ピアが mqvpn 0.4.0 以降かつ FEC ビルド
+> (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
+> 詳細は[マルチパス](./multipath#backup-fec-experimental)を参照。
 
 ## Control API
 

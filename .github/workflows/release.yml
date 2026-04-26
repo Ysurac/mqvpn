@@ -62,6 +62,8 @@ jobs:
           mkdir -p build && cd build
           cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
                 -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
@@ -137,9 +139,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # Body intentionally left empty — auto-generated notes are too noisy
+          # (auto-sync upstream PRs, perf bench commits, etc. clutter the changelog).
+          # Edit release notes manually after publish via GitHub UI or:
+          #   gh release edit "$GITHUB_REF_NAME" --notes "..."
           gh release create "$GITHUB_REF_NAME" \
             --title "mqvpn v${VERSION}" \
-            --generate-notes \
+            --notes "" \
             artifacts/mqvpn_*.tar.gz \
             artifacts/mqvpn_*.deb \
             artifacts/SHA256SUMS \

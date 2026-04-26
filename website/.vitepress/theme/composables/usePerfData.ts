@@ -237,6 +237,23 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     return rows
   })
 
+  const backupFecRows = computed(() => {
+    const rows: any[] = []
+    for (const item of items.value) {
+      if (item.data.test !== 'backup_fec') continue
+      for (const r of item.data.results || []) {
+        rows.push({
+          commit: fmtCommit(item.commit),
+          date: fmtDate(item.timestamp),
+          scheduler: r.scheduler,
+          loss_pct: r.loss_pct,
+          throughput_mbps: fmtNum(r.throughput_mbps_median),
+        })
+      }
+    }
+    return rows
+  })
+
   return {
     loading,
     error,
@@ -248,5 +265,6 @@ export function usePerfData(basePath: string, maxEntries = 10) {
     udpSweepSummaryRows,
     udpSweepRows,
     ntnRows,
+    backupFecRows,
   }
 }

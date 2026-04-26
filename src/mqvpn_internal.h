@@ -8,6 +8,7 @@
 #define MQVPN_INTERNAL_H
 
 #include "libmqvpn.h"
+#include <stdbool.h>
 
 /* ─── Constants ─── */
 /* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
@@ -54,5 +55,12 @@ struct mqvpn_config_s {
 /* ─── State transition validation (M0-5) ─── */
 
 int mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to);
+
+/* ─── Scheduler precondition predicate ─── */
+
+/* Returns true if the scheduler+path combination warrants a warning.
+ * Pure predicate — caller emits the actual log via LOG_W() to keep
+ * level filtering and connection-id prefixing consistent. */
+bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths);
 
 #endif /* MQVPN_INTERNAL_H */

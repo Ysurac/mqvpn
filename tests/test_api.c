@@ -236,6 +236,8 @@ TEST(config_set_scheduler)
     ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_MINRTT), MQVPN_OK);
     ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_WLB), MQVPN_OK);
     ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_WLB);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_BACKUP_FEC), MQVPN_OK);
+    ASSERT_EQ(cfg->scheduler, MQVPN_SCHED_BACKUP_FEC);
     ASSERT_EQ(mqvpn_config_set_scheduler(NULL, MQVPN_SCHED_WLB), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }

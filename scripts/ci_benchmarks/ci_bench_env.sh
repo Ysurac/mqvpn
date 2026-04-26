@@ -106,8 +106,35 @@ ci_bench_setup_netns() {
     ip netns exec "$NS_CLIENT" ip link set lo up
     ip netns exec "$NS_SERVER" ip link set lo up
 
-    # IP forwarding
+    # IP forwarding + relax rp_filter so Path B can deliver packets destined
+    # to IP_A_SERVER_ADDR (which is owned by veth-a1) when they arrive on
+    # veth-b1. Without rp_filter=0, strict reverse-path checking drops them.
+    # Linux uses MAX(all, <iface>), so all/default alone don't lower the
+    # value of already-existing interfaces (default only applies to NEW
+    # interfaces). Set per-interface rp_filter=0 explicitly on every veth
+    # in both namespaces.
     ip netns exec "$NS_SERVER" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    for iface in all default lo "$VETH_A1" "$VETH_B1"; do
+        ip netns exec "$NS_SERVER" \
+            sysctl -w "net.ipv4.conf.${iface}.rp_filter=0" >/dev/null
+    done
+    for iface in all default lo "$VETH_A0" "$VETH_B0"; do
+        ip netns exec "$NS_CLIENT" \
+            sysctl -w "net.ipv4.conf.${iface}.rp_filter=0" >/dev/null
+    done
+
+    # Server address as /32 on lo, so the server accepts traffic for
+    # IP_A_SERVER_ADDR no matter which veth it arrives on (Path A or Path B).
+    # This is required for any scheduler that drives traffic out Path B
+    # toward the same server address (WLB cross-path packets, backup_fec
+    # repair symbols on STANDBY, failover after Path A loss).
+    ip netns exec "$NS_SERVER" ip addr add "${IP_A_SERVER_ADDR}/32" dev lo
+
+    # Backup route on the client so Path B can carry traffic to the server
+    # address even when Path A is down. metric 200 keeps it as a fallback
+    # under normal conditions.
+    ip netns exec "$NS_CLIENT" ip route add 10.100.0.0/24 via 10.200.0.1 \
+        dev "$VETH_B0" metric 200
 
     # Verify
     ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$IP_A_SERVER_ADDR" >/dev/null

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.3.1 LANGUAGES C)
+project(mqvpn VERSION 0.3.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -297,6 +297,13 @@ if(BUILD_TESTING)
     target_include_directories(test_standby_backup PRIVATE ${CMAKE_SOURCE_DIR}/src)
     set_target_properties(test_standby_backup PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_standby_backup COMMAND test_standby_backup)
+
+    # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
+    add_executable(test_scheduler tests/test_scheduler.c)
+    target_link_libraries(test_scheduler mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_scheduler PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_scheduler PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_scheduler COMMAND test_scheduler)
 endif()
 
 # ---------- Install ----------

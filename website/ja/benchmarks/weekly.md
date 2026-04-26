@@ -9,7 +9,8 @@ import { usePerfData } from '../../.vitepress/theme/composables/usePerfData'
 const {
   loading, error,
   rawRows, failoverRows, aggregateRows,
-  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows
+  multipathSchedulerRows, udpSweepSummaryRows, udpSweepRows, ntnRows,
+  backupFecRows
 } = usePerfData('/perf-data/weekly')
 
 const foSchedFilter = ref('wlb')
@@ -192,6 +193,22 @@ const filteredUdpSweepRows = computed(() => {
   <tbody>
     <tr v-for="(r, i) in ntnRows" :key="'ntn-' + i">
       <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scenario }}</td><td>{{ r.single }}</td><td>{{ r.wlb }}</td><td>{{ r.minrtt }}</td>
+    </tr>
+  </tbody>
+</table>
+
+## Backup FEC スケジューラ（ロスのあるプライマリ）
+
+<p class="section-desc">プライマリパスに <code>tc netem</code> でパケットロスを注入した 2-path トポロジで、<code>wlb</code> と <code>backup_fec</code> のスループットを比較。スタンバイパスはクリーン。各セルあたり 30 秒 × 3 回の TCP DL ランの中央値。<em>実験的機能 — 詳細は<a href="../guide/multipath#backup-fec-experimental">マルチパスガイド</a>。</em></p>
+
+<div v-if="backupFecRows.length === 0">データなし。</div>
+<table v-else>
+  <thead>
+    <tr><th>コミット</th><th>日付</th><th>スケジューラ</th><th>ロス %</th><th>スループット (Mbps, 中央値)</th></tr>
+  </thead>
+  <tbody>
+    <tr v-for="(r, i) in backupFecRows" :key="'fec-' + i">
+      <td><code>{{ r.commit }}</code></td><td>{{ r.date }}</td><td>{{ r.scheduler }}</td><td>{{ r.loss_pct }}</td><td>{{ r.throughput_mbps }}</td>
     </tr>
   </tbody>
 </table>

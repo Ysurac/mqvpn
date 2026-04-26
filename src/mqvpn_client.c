@@ -7,6 +7,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "path_rotation.h"
+#include "mqvpn_scheduler.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1068,16 +1069,24 @@ client_count_active_primaries(mqvpn_client_t *c)
     return n;
 }
 
-/* Create an xquic path for a secondary path entry and mark it ACTIVE. */
+/* Create an xquic path for a secondary path entry and mark it ACTIVE.
+ *
+ * For MQVPN_SCHED_BACKUP_FEC the secondary path must be created in STANDBY
+ * (path_status=1) so that xquic's backup_fec scheduler routes only FEC repair
+ * symbols to it, while the primary path stays AVAILABLE. Per xquic's public
+ * API: 1 = STANDBY, anything else = AVAILABLE (xquic.h L2210). */
 static void
 client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
     uint64_t new_id = 0;
-    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
+    int path_status = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) ? 1 : 0;
+    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
         return;
     }
+    LOG_I(c, "path[%d] created (id=%llu, app_path_status=%s)", idx,
+          (unsigned long long)new_id, path_status == 1 ? "STANDBY" : "AVAILABLE");
     p->xqc_path_id = new_id;
     p->in_use = 1;
     p->status = MQVPN_PATH_ACTIVE;
@@ -1324,6 +1333,49 @@ cli_conn_destroy(mqvpn_client_t *c)
     c->conn = NULL;
 }
 
+/* ─── Scheduler precondition predicate (used by client + server) ─── */
+
+bool
+mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
+{
+    return scheduler == MQVPN_SCHED_BACKUP_FEC && n_paths < 2;
+}
+
+/* ─── Scheduler dispatch helper (shared with mqvpn_server.c) ─── */
+
+void
+mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
+{
+    switch (sched) {
+    case MQVPN_SCHED_WLB:    cs->scheduler_callback = xqc_wlb_scheduler_cb;    break;
+    case MQVPN_SCHED_BACKUP: cs->scheduler_callback = xqc_backup_scheduler_cb; break;
+    case MQVPN_SCHED_RAP:    cs->scheduler_callback = xqc_rap_scheduler_cb;    break;
+    case MQVPN_SCHED_BACKUP_FEC:
+#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
+        cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
+        cs->enable_encode_fec = 1;
+        cs->enable_decode_fec = 1;
+        cs->fec_params.fec_encoder_schemes_num = 1;
+        cs->fec_params.fec_encoder_schemes[0] = MQVPN_FEC_SCHEME;
+        cs->fec_params.fec_decoder_schemes_num = 1;
+        cs->fec_params.fec_decoder_schemes[0] = MQVPN_FEC_SCHEME;
+        cs->fec_params.fec_code_rate = MQVPN_FEC_CODE_RATE;
+        cs->fec_params.fec_max_symbol_num_per_block = MQVPN_FEC_BLOCK_SIZE;
+        cs->fec_params.fec_mp_mode = XQC_FEC_MP_USE_STB;
+        /* fec_callback intentionally left zero — xqc_set_valid_*_scheme_cb()
+           fills it after FEC scheme negotiation completes. */
+#else
+        /* Built without FEC — silently degrade to MINRTT. main.c parser
+           also rejects "backup_fec" at the CLI surface in this case, so this
+           branch only protects against direct API callers. */
+        cs->scheduler_callback = xqc_minrtt_scheduler_cb;
+#endif
+        break;
+    case MQVPN_SCHED_MINRTT:
+    default: cs->scheduler_callback = xqc_minrtt_scheduler_cb; break;
+    }
+}
+
 /* ─── Start a QUIC/H3 connection ─── */
 
 static int
@@ -1388,16 +1440,7 @@ cli_start_connection(mqvpn_client_t *c)
     cs.so_sndbuf = 8 * 1024 * 1024;
     cs.idle_time_out = 120000;
     cs.init_idle_time_out = 10000;
-    if (c->config.scheduler == MQVPN_SCHED_WLB)
-        cs.scheduler_callback = xqc_wlb_scheduler_cb;
-    else if (c->config.scheduler == MQVPN_SCHED_BACKUP)
-        cs.scheduler_callback = xqc_backup_scheduler_cb;
-    else if (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
-        cs.scheduler_callback = xqc_backup_fec_scheduler_cb;
-    else if (c->config.scheduler == MQVPN_SCHED_RAP)
-        cs.scheduler_callback = xqc_rap_scheduler_cb;
-    else
-        cs.scheduler_callback = xqc_minrtt_scheduler_cb;
+    mqvpn_apply_scheduler(&cs, c->config.scheduler);
 
     if (c->config.reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
         cs.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
@@ -1613,6 +1656,31 @@ mqvpn_client_connect(mqvpn_client_t *c)
 
     if (!mqvpn_state_transition_valid(c->state, MQVPN_STATE_CONNECTING))
         return MQVPN_ERR_INVALID_ARG;
+
+    /* Warn if the scheduler choice has unmet path-count preconditions.
+     * This is a snapshot at connect time — adding a second path later via
+     * mqvpn_client_add_path_fd() resolves the underlying issue but does
+     * not retract the warning. Acceptable tradeoff: the warning is
+     * informational only and the typical backup_fec deployment configures
+     * both paths before connect(). */
+    if (mqvpn_check_scheduler_preconditions(c->config.scheduler, c->n_paths)) {
+        LOG_W(c,
+              "backup_fec scheduler is most effective with >=2 paths; "
+              "currently %d path(s) configured",
+              c->n_paths);
+    }
+
+    /* Warn if backup_fec was selected via the public API on a build that
+     * lacks FEC — mqvpn_apply_scheduler() will silently downgrade to MINRTT.
+     * The CLI parser rejects "backup_fec" earlier in this case, but direct
+     * libmqvpn API consumers (e.g. JNI/Kotlin SDK in M3) don't go through
+     * the parser. */
+#if !defined(XQC_ENABLE_FEC) || !defined(XQC_ENABLE_XOR)
+    if (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) {
+        LOG_W(c, "backup_fec scheduler requested but library built without FEC "
+                 "support (XQC_ENABLE_FEC/XQC_ENABLE_XOR); downgrading to minrtt");
+    }
+#endif
 
     if (cli_start_connection(c) < 0) return MQVPN_ERR_ENGINE;
 
