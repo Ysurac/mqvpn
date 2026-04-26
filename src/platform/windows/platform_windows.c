@@ -443,8 +443,13 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         lib_log = MQVPN_LOG_ERROR;
     mqvpn_config_set_log_level(lib_cfg, lib_log);
 
-    mqvpn_config_set_scheduler(lib_cfg, cfg->scheduler == 1 ? MQVPN_SCHED_WLB
-                                                            : MQVPN_SCHED_MINRTT);
+    mqvpn_scheduler_t lib_sched;
+    switch (cfg->scheduler) {
+    case 1: lib_sched = MQVPN_SCHED_WLB; break;
+    case 2: lib_sched = MQVPN_SCHED_BACKUP_FEC; break;
+    default: lib_sched = MQVPN_SCHED_MINRTT; break;
+    }
+    mqvpn_config_set_scheduler(lib_cfg, lib_sched);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;

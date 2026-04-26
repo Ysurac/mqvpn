@@ -89,6 +89,13 @@ for ABI in $ABIS; do
 
     # ── 2. xquic ──
     XQC_BUILD="${BUILD_DIR}/xquic"
+    # Wipe cached build that lacks FEC flags (older checkouts of this script).
+    if [[ -f "${XQC_BUILD}/CMakeCache.txt" ]] \
+       && { ! grep -q "^XQC_ENABLE_FEC:BOOL=ON" "${XQC_BUILD}/CMakeCache.txt" \
+            || ! grep -q "^XQC_ENABLE_XOR:BOOL=ON" "${XQC_BUILD}/CMakeCache.txt"; }; then
+        echo "  [2/3] Existing xquic build lacks FEC flags — wiping"
+        rm -rf "$XQC_BUILD"
+    fi
     if [[ ! -f "${XQC_BUILD}/libxquic-static.a" ]]; then
         echo "  [2/3] Building xquic..."
         mkdir -p "$XQC_BUILD"
@@ -104,6 +111,8 @@ for ABI in $ABIS; do
             -DSSL_PATH="$BSSL_BUILD" \
             -DSSL_INC_PATH="${BORINGSSL_DIR}/include" \
             -DXQC_ENABLE_BBR2=ON \
+            -DXQC_ENABLE_FEC=ON \
+            -DXQC_ENABLE_XOR=ON \
             -DXQC_ENABLE_TH3=ON \
             -DXQC_ENABLE_TESTING=OFF \
             -DXQC_BUILD_SAMPLE=OFF \

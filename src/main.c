@@ -54,7 +54,8 @@ usage(const char *prog)
         "  --control-port PORT       TCP port for JSON control API (server mode)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
         "  --status                  Query server status via control API and exit\n"
-        "  --scheduler minrtt|wlb    Multipath scheduler (default wlb)\n"
+        "  --scheduler minrtt|wlb|backup_fec\n"
+        "                            Multipath scheduler (default wlb)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --help                    Show this help\n"
@@ -352,8 +353,16 @@ main(int argc, char *argv[])
     int scheduler = MQVPN_SCHED_MINRTT;
     if (strcmp(eff_scheduler, "wlb") == 0) {
         scheduler = MQVPN_SCHED_WLB;
+    } else if (strcmp(eff_scheduler, "backup_fec") == 0) {
+#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
+        scheduler = MQVPN_SCHED_BACKUP_FEC;
+#else
+        fprintf(stderr, "error: --scheduler 'backup_fec' requires rebuild with "
+                        "-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON in xquic\n");
+        return 1;
+#endif
     } else if (strcmp(eff_scheduler, "minrtt") != 0) {
-        fprintf(stderr, "error: --scheduler must be 'minrtt' or 'wlb'\n");
+        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', or 'backup_fec'\n");
         return 1;
     }
 

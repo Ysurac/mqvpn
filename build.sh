@@ -64,12 +64,26 @@ XQUIC_BUILD="$XQUIC_DIR/build"
 
 echo "=== Building xquic ==="
 mkdir -p "$XQUIC_BUILD"
+# Re-configure if cache is missing OR if FEC flags weren't enabled in a prior
+# configure (older checkouts had this script without FEC flags).
+NEED_CONFIGURE=0
 if [ ! -f "$XQUIC_BUILD/CMakeCache.txt" ]; then
+    NEED_CONFIGURE=1
+elif ! grep -q "^XQC_ENABLE_FEC:BOOL=ON" "$XQUIC_BUILD/CMakeCache.txt" \
+   || ! grep -q "^XQC_ENABLE_XOR:BOOL=ON" "$XQUIC_BUILD/CMakeCache.txt"; then
+    echo "  Existing xquic build lacks FEC flags — wiping and reconfiguring"
+    rm -rf "$XQUIC_BUILD"
+    mkdir -p "$XQUIC_BUILD"
+    NEED_CONFIGURE=1
+fi
+if [ "$NEED_CONFIGURE" -eq 1 ]; then
     cmake -S "$XQUIC_DIR" -B "$XQUIC_BUILD" \
         -DCMAKE_BUILD_TYPE=Release \
         -DSSL_TYPE=boringssl \
         -DSSL_PATH="$BSSL_DIR" \
-        -DXQC_ENABLE_BBR2=ON
+        -DXQC_ENABLE_BBR2=ON \
+        -DXQC_ENABLE_FEC=ON \
+        -DXQC_ENABLE_XOR=ON
 fi
 make -C "$XQUIC_BUILD" -j"$NPROC"
 

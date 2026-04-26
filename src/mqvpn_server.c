@@ -6,6 +6,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "mqvpn_scheduler.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1137,10 +1138,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
     conn_settings.cc_params.cc_optimization_flags =
         XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
-    if (cfg->scheduler == MQVPN_SCHED_WLB)
-        conn_settings.scheduler_callback = xqc_wlb_scheduler_cb;
-    else
-        conn_settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+#if !defined(XQC_ENABLE_FEC) || !defined(XQC_ENABLE_XOR)
+    if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC) {
+        LOG_W(s, "backup_fec scheduler requested but library built without FEC "
+                 "support (XQC_ENABLE_FEC/XQC_ENABLE_XOR); downgrading to minrtt");
+    }
+#endif
+    mqvpn_apply_scheduler(&conn_settings, cfg->scheduler);
     conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     conn_settings.so_sndbuf = 8 * 1024 * 1024;
     conn_settings.idle_time_out = 120000;
