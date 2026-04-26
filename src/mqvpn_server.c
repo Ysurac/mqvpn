@@ -1255,8 +1255,13 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
 
     if (cfg->fec_enable) {
 #ifdef XQC_ENABLE_FEC
+#ifdef XQC_ENABLE_RSC
         xqc_fec_schemes_e fec_scheme = XQC_REED_SOLOMON_CODE;
         conn_settings.fec_callback = xqc_reed_solomon_code_cb;
+#else
+        xqc_fec_schemes_e fec_scheme = XQC_XOR_CODE;
+        conn_settings.fec_callback = xqc_xor_code_cb;
+#endif
 
         if (cfg->fec_scheme == MQVPN_FEC_SCHEME_XOR) {
             fec_scheme = XQC_XOR_CODE;
@@ -1267,6 +1272,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             conn_settings.fec_callback = xqc_packet_mask_code_cb;
 #else
             LOG_W(s, "packet_mask FEC unavailable in xquic build; using reed_solomon");
+#endif
+        } else if (cfg->fec_scheme == MQVPN_FEC_SCHEME_REED_SOLOMON) {
+#ifndef XQC_ENABLE_RSC
+            LOG_W(s, "reed_solomon FEC unavailable in xquic build; using xor");
 #endif
         }
 
