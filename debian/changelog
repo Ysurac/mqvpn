@@ -1,3 +1,12 @@
+mqvpn (0.3.2-1) unstable; urgency=medium
+
+  * Add experimental backup_fec multipath scheduler (FEC repair on standby path).
+  * Bump xquic to 4b93fb1 (fix FEC memory leak in repair symbol cleanup).
+  * Refactor scheduler dispatch into mqvpn_apply_scheduler() shared helper.
+  * Add test_scheduler unit test for scheduler dispatch.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sat, 26 Apr 2026 00:00:00 +0000
+
 mqvpn (0.3.1-1) unstable; urgency=medium
 
   * Add FEC (Forward Error Correction) and packet reinjection support.
