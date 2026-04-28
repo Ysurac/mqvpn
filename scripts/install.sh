@@ -14,9 +14,19 @@ INSTALL_PREFIX="/usr/local"
 DEFAULT_PORT=443
 DEFAULT_SUBNET="10.0.0.0/24"
 
+# Generate a per-install ULA prefix per RFC 4193: fd + 40 random bits, /112.
+# /112 keeps the 16-bit host pool (matches IPv4 /24) and stays within the
+# [96,126] range required by mqvpn_addr_pool_init6.
+gen_subnet6() {
+    local hex
+    hex=$(openssl rand -hex 5)
+    printf 'fd%s:%s:%s::/112' "${hex:0:2}" "${hex:2:4}" "${hex:6:4}"
+}
+
 # --- Parse arguments ---
 PORT="$DEFAULT_PORT"
 SUBNET="$DEFAULT_SUBNET"
+SUBNET6=""
 UNINSTALL=0
 PURGE=0
 START=0
@@ -25,11 +35,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --port)    PORT="$2"; shift 2 ;;
         --subnet)  SUBNET="$2"; shift 2 ;;
+        --subnet6) SUBNET6="$2"; shift 2 ;;
         --start)   START=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --purge)   PURGE=1; UNINSTALL=1; shift ;;
         --help|-h)
-            echo "Usage: install.sh [--port PORT] [--subnet CIDR] [--start] [--uninstall] [--purge]"
+            echo "Usage: install.sh [--port PORT] [--subnet CIDR] [--subnet6 CIDR6] [--start] [--uninstall] [--purge]"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -162,10 +173,13 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
     AUTH_KEY=$("$INSTALL_PREFIX/bin/mqvpn" --genkey) || err "Failed to generate auth key"
     [ -n "$AUTH_KEY" ] || err "Empty auth key generated"
 
+    [ -n "$SUBNET6" ] || SUBNET6=$(gen_subnet6)
+
     cat > /etc/mqvpn/server.conf <<CONF
 [Interface]
 Listen = 0.0.0.0:$PORT
 Subnet = $SUBNET
+Subnet6 = $SUBNET6
 TunName = mqvpn0
 LogLevel = info
 
@@ -188,7 +202,8 @@ else
     # AUTH_KEY must come from [Auth] section, not [TLS] (which also has Key=)
     AUTH_KEY=$(sed -n '/^\[Auth\]/,/^\[/{ s/^[[:space:]]*Key[[:space:]]*=[[:space:]]*\(.*\)/\1/p; }' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
     PORT=$(sed -n 's/^[[:space:]]*Listen[[:space:]]*=[[:space:]]*[^:]*:\([0-9]*\)/\1/p' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
-    SUBNET=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\(.*\)/\1/p' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
+    SUBNET=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\([^[:space:]].*\)/\1/p' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
+    SUBNET6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\([^[:space:]].*\)/\1/p' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
     PORT="${PORT:-443}"
     SUBNET="${SUBNET:-10.0.0.0/24}"
 fi
@@ -210,6 +225,7 @@ if [ "$START" -eq 1 ]; then
         echo "  Auth key:  $AUTH_KEY"
         echo "  Port:      ${PORT}/udp"
         echo "  Subnet:    $SUBNET"
+        [ -n "${SUBNET6:-}" ] && echo "  Subnet6:   $SUBNET6"
         echo ""
         echo "  Client:"
         echo "    sudo mqvpn --mode client --server ${SERVER_IP}:${PORT} \\"
@@ -226,6 +242,7 @@ else
     echo "  Auth key:  $AUTH_KEY"
     echo "  Port:      ${PORT}/udp"
     echo "  Subnet:    $SUBNET"
+    [ -n "${SUBNET6:-}" ] && echo "  Subnet6:   $SUBNET6"
     echo ""
     echo "  To start now:"
     echo "    sudo systemctl start mqvpn-server"
