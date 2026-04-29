@@ -25,6 +25,10 @@ internal class PathManager(
     private val protector: (Int) -> Boolean,
     private val serverHost: String,
     private val serverPort: Int,
+    private val bindUdp: (Network, String, Int, (Int) -> Boolean) -> Int =
+        { network, host, port, prot ->
+            PathBinder.bindAndDetachUdp(network, host, port, prot)
+        },
 ) {
     private var connected = false
     private val pathHandles = mutableMapOf<Network, Long>()  // network → pathHandle
@@ -48,9 +52,7 @@ internal class PathManager(
         val name = event.path.name
 
         // Step 1: Create socket (blocking I/O, runs on IO thread)
-        val fd = PathBinder.bindAndDetachUdp(
-            network, serverHost, serverPort, protector,
-        )
+        val fd = bindUdp(network, serverHost, serverPort, protector)
         if (fd < 0) {
             Log.e(TAG, "Failed to bind socket for $name, will retry on next event")
             networkMonitor.removeNetwork(network)
