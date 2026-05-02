@@ -63,6 +63,7 @@ typedef struct cli_stream_s cli_stream_t;
 
 static int cli_start_connection(mqvpn_client_t *c);
 static void cli_conn_destroy(mqvpn_client_t *c);
+static uint64_t path_recreate_backoff(int retries);
 
 /* ─── Internal types ─── */
 

@@ -267,9 +267,11 @@ TEST(remove_pending_path_leaves_only_dead_primary)
     /* Platform removes path1 (PENDING, no internet). */
     ASSERT_EQ(mqvpn_client_remove_path(c, h1), MQVPN_OK);
 
-    /* Only path0 remains.  If path0 also loses internet the client is stuck
-     * until the platform re-adds path1 via add_path_fd(). */
-    ASSERT_EQ(count_paths(c), 1);
+    /* path1 slot is CLOSED+inactive; path0 is still PENDING.
+     * get_paths() still returns both slots (n_paths never decrements),
+     * so we check status rather than count.  If path0 also loses internet
+     * the client is stuck until the platform re-adds path1 via add_path_fd(). */
+    ASSERT_EQ(path_status(c, h1), MQVPN_PATH_CLOSED);
     ASSERT_EQ(path_status(c, h0), MQVPN_PATH_PENDING);
 
     mqvpn_client_destroy(c);
@@ -303,7 +305,9 @@ TEST(remove_last_path_allowed)
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
-    ASSERT_EQ(count_paths(c), 0);
+    /* remove_path() marks the slot CLOSED but does not decrement n_paths;
+     * the slot is reusable by the next add_path_fd() call. */
+    ASSERT_EQ(path_status(c, h), MQVPN_PATH_CLOSED);
 
     mqvpn_client_destroy(c);
 }

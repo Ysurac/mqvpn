@@ -48,7 +48,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            cmake gcc make golang openssl \
+            cmake gcc make golang openssl libevent-dev \
             iproute2 iptables netcat-openbsd
 
       - name: Build BoringSSL
