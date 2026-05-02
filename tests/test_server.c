@@ -468,6 +468,58 @@ drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
     mqvpn_client_tick(cli);
 }
 
+static void
+drain_and_tick_two_paths(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli,
+                         int cli_fd0, mqvpn_path_handle_t path_h0, int cli_fd1,
+                         mqvpn_path_handle_t path_h1)
+{
+    uint8_t buf[65536];
+    struct sockaddr_storage from;
+    socklen_t from_len;
+
+    for (;;) {
+        from_len = sizeof(from);
+        ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
+                             (struct sockaddr *)&from, &from_len);
+        if (n <= 0) break;
+        mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from,
+                                    from_len);
+    }
+
+    for (;;) {
+        from_len = sizeof(from);
+        ssize_t n = recvfrom(cli_fd0, buf, sizeof(buf), MSG_DONTWAIT,
+                             (struct sockaddr *)&from, &from_len);
+        if (n <= 0) break;
+        mqvpn_client_on_socket_recv(cli, path_h0, buf, (size_t)n,
+                                    (struct sockaddr *)&from, from_len);
+    }
+
+    for (;;) {
+        from_len = sizeof(from);
+        ssize_t n = recvfrom(cli_fd1, buf, sizeof(buf), MSG_DONTWAIT,
+                             (struct sockaddr *)&from, &from_len);
+        if (n <= 0) break;
+        mqvpn_client_on_socket_recv(cli, path_h1, buf, (size_t)n,
+                                    (struct sockaddr *)&from, from_len);
+    }
+
+    mqvpn_server_tick(svr);
+    mqvpn_client_tick(cli);
+}
+
+static mqvpn_path_status_t
+get_path_status_or_invalid(mqvpn_client_t *cli, mqvpn_path_handle_t h)
+{
+    mqvpn_path_info_t infos[MQVPN_MAX_PATHS];
+    int n = 0;
+    if (mqvpn_client_get_paths(cli, infos, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
+        return (mqvpn_path_status_t)-1;
+    for (int i = 0; i < n; i++)
+        if (infos[i].handle == h) return infos[i].status;
+    return (mqvpn_path_status_t)-1;
+}
+
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
  * This avoids timing issues on slow CI runners where QUIC PTO (1s+) can expire. */
 
@@ -789,6 +841,136 @@ TEST(server_session_quic_loopback)
     close(cli_fd);
 }
 
+/*
+ * Regression for issue #4273:
+ * runtime-added secondary path must not remain PENDING after tunnel is up.
+ */
+TEST(server_runtime_added_path_not_stuck_pending)
+{
+    reset_mocks();
+    g_client_connected_called = 0;
+    g_cli_tunnel_ready_called = 0;
+
+    int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(svr_fd, -1);
+    int cli_fd0 = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(cli_fd0, -1);
+    int cli_fd1 = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(cli_fd1, -1);
+
+    struct sockaddr_in svr_addr, cli_addr0, cli_addr1;
+    memset(&svr_addr, 0, sizeof(svr_addr));
+    svr_addr.sin_family = AF_INET;
+    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    svr_addr.sin_port = htons(0);
+    ASSERT_EQ(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
+
+    memset(&cli_addr0, 0, sizeof(cli_addr0));
+    cli_addr0.sin_family = AF_INET;
+    cli_addr0.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cli_addr0.sin_port = htons(0);
+    ASSERT_EQ(bind(cli_fd0, (struct sockaddr *)&cli_addr0, sizeof(cli_addr0)), 0);
+
+    memset(&cli_addr1, 0, sizeof(cli_addr1));
+    cli_addr1.sin_family = AF_INET;
+    cli_addr1.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cli_addr1.sin_port = htons(0);
+    ASSERT_EQ(bind(cli_fd1, (struct sockaddr *)&cli_addr1, sizeof(cli_addr1)), 0);
+
+    socklen_t alen = sizeof(svr_addr);
+    getsockname(svr_fd, (struct sockaddr *)&svr_addr, &alen);
+    alen = sizeof(cli_addr0);
+    getsockname(cli_fd0, (struct sockaddr *)&cli_addr0, &alen);
+    alen = sizeof(cli_addr1);
+    getsockname(cli_fd1, (struct sockaddr *)&cli_addr1, &alen);
+
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    svr_cbs.on_client_connected = mock_on_client_connected;
+    mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(svr);
+    mqvpn_config_free(svr_cfg);
+
+    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+                                         sizeof(svr_addr)),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
+
+    mqvpn_config_t *cli_cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
+    mqvpn_config_set_insecure(cli_cfg, 1);
+    mqvpn_config_set_multipath(cli_cfg, 1);
+    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_ERROR);
+
+    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cli_cbs.tun_output = mock_cli_tun_output;
+    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
+    ASSERT_NOT_NULL(cli);
+    mqvpn_config_free(cli_cfg);
+
+    mqvpn_path_desc_t d0;
+    memset(&d0, 0, sizeof(d0));
+    d0.struct_size = sizeof(d0);
+    memcpy(d0.local_addr, &cli_addr0, sizeof(cli_addr0));
+    d0.local_addr_len = sizeof(cli_addr0);
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(cli, cli_fd0, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+
+    mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
+
+    for (int elapsed = 0; elapsed < 10000; elapsed++) {
+        drain_and_tick(svr, svr_fd, cli, cli_fd0, h0);
+        if (g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0) break;
+
+        struct pollfd pfds[2] = {
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd0, .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+    ASSERT_EQ(g_client_connected_called, 1);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(cli, 1, -1);
+    ASSERT_EQ(mqvpn_client_get_state(cli), MQVPN_STATE_ESTABLISHED);
+
+    mqvpn_path_desc_t d1;
+    memset(&d1, 0, sizeof(d1));
+    d1.struct_size = sizeof(d1);
+    memcpy(d1.local_addr, &cli_addr1, sizeof(cli_addr1));
+    d1.local_addr_len = sizeof(cli_addr1);
+    snprintf(d1.iface, sizeof(d1.iface), "eth1");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(cli, cli_fd1, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+    for (int elapsed = 0; elapsed < 12000; elapsed++) {
+        drain_and_tick_two_paths(svr, svr_fd, cli, cli_fd0, h0, cli_fd1, h1);
+        st = get_path_status_or_invalid(cli, h1);
+        if (st != MQVPN_PATH_PENDING) break;
+
+        struct pollfd pfds[3] = {
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd0, .events = POLLIN},
+            {.fd = cli_fd1, .events = POLLIN},
+        };
+        int w = poll(pfds, 3, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+    ASSERT_NE(st, MQVPN_PATH_PENDING);
+
+    mqvpn_client_disconnect(cli);
+    mqvpn_client_destroy(cli);
+    mqvpn_server_destroy(svr);
+    close(svr_fd);
+    close(cli_fd0);
+    close(cli_fd1);
+}
+
 /* ── max_clients config boundary ── */
 
 TEST(server_max_clients_config)
@@ -846,6 +1028,7 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+    run_server_runtime_added_path_not_stuck_pending();
 
     /* max_clients config boundary */
     run_server_max_clients_config();

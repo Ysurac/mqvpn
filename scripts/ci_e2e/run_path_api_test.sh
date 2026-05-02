@@ -1,24 +1,27 @@
 #!/bin/bash
-# run_path_api_test.sh — E2E regression test for issue #4271
+# run_path_api_test.sh — E2E regression test for issues #4271 and #4273
 #
-# Verifies that a second path added at runtime via the control-socket API:
-#   1. Becomes ACTIVE (not stuck PENDING) — Bug 1 fix in client_activate_path()
-#   2. Keeps the tunnel alive after the initial path is removed — Bug 2 fix
+# Verifies that runtime-added paths via the control-socket API:
+#   1. Become ACTIVE (not stuck PENDING) — Bug 1 fix in client_activate_path()
+#      plus issue #4273 coverage for multiple pending secondaries.
+#   2. Keep the tunnel alive after the initial path is removed — Bug 2 fix
 #      in tick_reconnect() which now rotates away from the dead path.
 #
-# Topology (dual-path, single-server):
+# Topology (triple-path, single-server):
 #   vpn-client                    vpn-server
 #     veth-a0 ──────────────────── veth-a1    Path A  10.100.0.0/24
 #     10.100.0.2/24                10.100.0.1/24
 #     veth-b0 ──────────────────── veth-b1    Path B  10.200.0.0/24
 #     10.200.0.2/24                10.200.0.1/24
+#     veth-c0 ──────────────────── veth-c1    Path C  10.210.0.0/24
+#     10.210.0.2/24                10.210.0.1/24
 #
 # Test sequence:
 #   Phase 1  Client starts with path A only — single-path tunnel established.
-#   Phase 2  Path B added via {"cmd":"add_path","iface":"veth-b0"} control API.
-#            Wait for library to activate it (verifies Bug 1 fix).
+#   Phase 2  Paths B and C added via control API.
+#            Wait for library to activate both (verifies Bug 1 + #4273).
 #   Phase 3  Path A removed via {"cmd":"remove_path","iface":"veth-a0"}.
-#            Verify tunnel still works on path B alone (verifies Bug 2 fix).
+#            Verify tunnel still works on secondary paths (verifies Bug 2 fix).
 #
 # Usage: sudo ./scripts/ci_e2e/run_path_api_test.sh [path-to-mqvpn-binary]
 # Requires: root, iproute2, openssl, netcat (nc)
@@ -43,9 +46,11 @@ NS_SERVER="vpn-server-pa"
 NS_CLIENT="vpn-client-pa"
 VETH_A0="veth-a0"  VETH_A1="veth-a1"
 VETH_B0="veth-b0"  VETH_B1="veth-b1"
+VETH_C0="veth-c0"  VETH_C1="veth-c1"
 
 IP_A_CLIENT="10.100.0.2/24"  IP_A_SERVER="10.100.0.1/24"
 IP_B_CLIENT="10.200.0.2/24"  IP_B_SERVER="10.200.0.1/24"
+IP_C_CLIENT="10.210.0.2/24"  IP_C_SERVER="10.210.0.1/24"
 SERVER_ADDR="10.100.0.1"
 TUNNEL_IP="10.0.0.1"
 
@@ -67,6 +72,7 @@ cleanup() {
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     ip link del "$VETH_A0"    2>/dev/null || true
     ip link del "$VETH_B0"    2>/dev/null || true
+    ip link del "$VETH_C0"    2>/dev/null || true
     rm -rf "$WORK_DIR"
     if [ "$SANITIZER_FAIL" -ne 0 ]; then
         echo "FAIL: sanitizer errors detected"
@@ -115,7 +121,7 @@ dump_logs() {
 # ── Setup: network namespaces ────────────────────────────────────────────────
 
 echo "================================================================"
-echo "  mqvpn E2E: runtime path add/remove via control API (#4271)"
+echo "  mqvpn E2E: runtime path add/remove via control API (#4271/#4273)"
 echo "  Binary: $MQVPN"
 echo "================================================================"
 
@@ -124,6 +130,7 @@ ip netns del "$NS_SERVER" 2>/dev/null || true
 ip netns del "$NS_CLIENT" 2>/dev/null || true
 ip link del "$VETH_A0" 2>/dev/null || true
 ip link del "$VETH_B0" 2>/dev/null || true
+ip link del "$VETH_C0" 2>/dev/null || true
 
 # Generate PSK and TLS certificate
 PSK=$("$MQVPN" --genkey 2>/dev/null)
@@ -154,6 +161,15 @@ ip netns exec "$NS_SERVER" ip addr add "$IP_B_SERVER" dev "$VETH_B1"
 ip netns exec "$NS_CLIENT" ip link set "$VETH_B0" up
 ip netns exec "$NS_SERVER" ip link set "$VETH_B1" up
 
+# Path C: 10.210.0.0/24
+ip link add "$VETH_C0" type veth peer name "$VETH_C1"
+ip link set "$VETH_C0" netns "$NS_CLIENT"
+ip link set "$VETH_C1" netns "$NS_SERVER"
+ip netns exec "$NS_CLIENT" ip addr add "$IP_C_CLIENT" dev "$VETH_C0"
+ip netns exec "$NS_SERVER" ip addr add "$IP_C_SERVER" dev "$VETH_C1"
+ip netns exec "$NS_CLIENT" ip link set "$VETH_C0" up
+ip netns exec "$NS_SERVER" ip link set "$VETH_C1" up
+
 # Loopback
 ip netns exec "$NS_CLIENT" ip link set lo up
 ip netns exec "$NS_SERVER" ip link set lo up
@@ -165,9 +181,11 @@ ip netns exec "$NS_SERVER" ip addr add "${SERVER_ADDR}/32" dev lo
 
 # Path B is a valid route to the server (metric 200 = lower priority than A)
 ip netns exec "$NS_CLIENT" ip route add 10.100.0.0/24 via 10.200.0.1 dev "$VETH_B0" metric 200
+ip netns exec "$NS_CLIENT" ip route add 10.100.0.0/24 via 10.210.0.1 dev "$VETH_C0" metric 220
 
 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$SERVER_ADDR" >/dev/null
 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 10.200.0.1 >/dev/null
+ip netns exec "$NS_CLIENT" ping -c 1 -W 1 10.210.0.1 >/dev/null
 echo "OK: underlay connectivity verified"
 
 # ── Start VPN server ─────────────────────────────────────────────────────────
@@ -235,15 +253,21 @@ if [ "$ELAPSED" -ge 10 ]; then
 fi
 echo "OK: control socket ready"
 
-# ── Phase 2: add path B via API ──────────────────────────────────────────────
+# ── Phase 2: add secondary paths via API ─────────────────────────────────────
 
 echo ""
-echo "=== Phase 2: add path B via control API ==="
+echo "=== Phase 2: add secondary paths via control API ==="
 if ! ctrl_ok '{"cmd":"add_path","iface":"veth-b0"}'; then
     echo "FAIL: add_path command rejected"
     dump_logs; exit 1
 fi
 echo "add_path veth-b0: accepted"
+
+if ! ctrl_ok '{"cmd":"add_path","iface":"veth-c0"}'; then
+    echo "FAIL: add_path command rejected for veth-c0"
+    dump_logs; exit 1
+fi
+echo "add_path veth-c0: accepted"
 
 # Bug 1 assertion: path B must become ACTIVE, not stay PENDING.
 # The library now transitions failed activations to DEGRADED+retry instead of
@@ -260,20 +284,33 @@ if ! wait_for_log "${WORK_DIR}/client.log" "path.*activated.*veth-b0|activated.*
 fi
 echo "OK: path B is active (not stuck PENDING)"
 
+echo "Waiting for path C activation (issue #4273 regression check)..."
+if ! wait_for_log "${WORK_DIR}/client.log" "path.*activated.*veth-c0|activated.*path_id.*veth-c0" 20; then
+    if ! wait_for_log "${WORK_DIR}/client.log" "path added.*veth-c0|veth-c0.*active" 10; then
+        echo "FAIL: path C never activated within 30s (issue #4273 still present?)"
+        dump_logs; exit 1
+    fi
+fi
+echo "OK: path C is active (not stuck PENDING)"
+
 if ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
-    echo "OK: tunnel ping works with both paths"
+    echo "OK: tunnel ping works with primary + secondary paths"
 else
-    echo "FAIL: tunnel ping failed after adding path B"
+    echo "FAIL: tunnel ping failed after adding secondary paths"
     dump_logs; exit 1
 fi
 
-# Verify list_paths shows both interfaces
+# Verify list_paths shows all interfaces
 LIST_RESP=$(ctrl_send '{"cmd":"list_paths"}')
 if ! echo "$LIST_RESP" | grep -q "veth-b0"; then
     echo "FAIL: list_paths does not include veth-b0: $LIST_RESP"
     dump_logs; exit 1
 fi
-echo "OK: list_paths shows veth-b0"
+if ! echo "$LIST_RESP" | grep -q "veth-c0"; then
+    echo "FAIL: list_paths does not include veth-c0: $LIST_RESP"
+    dump_logs; exit 1
+fi
+echo "OK: list_paths shows veth-b0 and veth-c0"
 
 # ── Phase 3: remove path A via API ───────────────────────────────────────────
 
@@ -291,19 +328,19 @@ if ! wait_for_log "${WORK_DIR}/client.log" "path removed.*veth-a0" 10; then
 fi
 echo "OK: path A removed"
 
-# Allow xquic a moment to reroute packets to path B
+# Allow xquic a moment to reroute packets to secondary paths
 sleep 2
 
-# Bug 2 assertion: tunnel must survive on path B alone.
-echo "Verifying tunnel on path B alone (Bug 2 regression check)..."
+# Bug 2 assertion: tunnel must survive on secondary paths.
+echo "Verifying tunnel on secondary paths (Bug 2 regression check)..."
 if ip netns exec "$NS_CLIENT" ping -c 5 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
-    echo "OK: tunnel ping works on path B alone"
+    echo "OK: tunnel ping works after removing path A"
 else
     echo "FAIL: tunnel ping failed after removing path A (Bug 2 still present?)"
     dump_logs; exit 1
 fi
 
-# Verify list_paths shows only path B
+# Verify list_paths shows only secondary paths
 LIST_RESP=$(ctrl_send '{"cmd":"list_paths"}')
 if echo "$LIST_RESP" | grep -q "veth-a0"; then
     echo "FAIL: list_paths still shows veth-a0 after removal: $LIST_RESP"
@@ -313,12 +350,16 @@ if ! echo "$LIST_RESP" | grep -q "veth-b0"; then
     echo "FAIL: list_paths does not show veth-b0: $LIST_RESP"
     dump_logs; exit 1
 fi
-echo "OK: list_paths shows only veth-b0"
+if ! echo "$LIST_RESP" | grep -q "veth-c0"; then
+    echo "FAIL: list_paths does not show veth-c0: $LIST_RESP"
+    dump_logs; exit 1
+fi
+echo "OK: list_paths shows veth-b0 and veth-c0"
 
 echo ""
 echo "================================================================"
 echo "  All tests PASSED"
 echo "  Phase 1: single-path tunnel established on path A"
-echo "  Phase 2: path B activated via API (Bug 1 fix verified)"
-echo "  Phase 3: tunnel survives on path B after removing path A (Bug 2)"
+echo "  Phase 2: paths B/C activated via API (Bug 1 + #4273 verified)"
+echo "  Phase 3: tunnel survives on secondary paths after removing path A (Bug 2)"
 echo "================================================================"

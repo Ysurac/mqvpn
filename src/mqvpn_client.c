@@ -2046,6 +2046,32 @@ tick_recover_degraded_path(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t
      * recreate_retries, and recreate_after_us. */
 }
 
+/*
+ * Fallback for paths stuck in PENDING when ready_to_create_path_notify is
+ * delayed or not fired by the transport.
+ *
+ * We intentionally do not gate on c->multipath_ready here: client_activate_path()
+ * already handles transient xquic errors by moving to DEGRADED and arming a
+ * backoff timer.
+ */
+static void
+tick_kick_pending_path(mqvpn_client_t *c, path_entry_t *p, int idx)
+{
+    if (p->status != MQVPN_PATH_PENDING || !p->active || p->in_use) return;
+    if (idx == c->primary_path_idx) return;
+
+    if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
+        if (client_scheduler_supports_standby(c))
+            client_create_standby_path(c, p, idx);
+        else
+            p->status = MQVPN_PATH_STANDBY;
+        return;
+    }
+
+    LOG_I(c, "path pending fallback: trying activation for %s", p->name);
+    client_activate_path(c, p, idx);
+}
+
 static void
 tick_confirm_stable_path(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 {
@@ -2061,11 +2087,12 @@ tick_confirm_stable_path(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 static void
 tick_path_recovery(mqvpn_client_t *c)
 {
-    if (!c->multipath_ready || c->state != MQVPN_STATE_ESTABLISHED) return;
+    if (c->state != MQVPN_STATE_ESTABLISHED || !c->config.multipath || !c->conn) return;
 
     uint64_t now = client_now_us(c);
     for (int i = 0; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
+        tick_kick_pending_path(c, p, i);
         tick_recover_degraded_path(c, p, i, now);
         tick_confirm_stable_path(c, p, now);
     }
@@ -2218,7 +2245,7 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
     }
 
     /* Account for path recovery and stability timers */
-    if (c->multipath_ready && c->state == MQVPN_STATE_ESTABLISHED) {
+    if (c->config.multipath && c->conn && c->state == MQVPN_STATE_ESTABLISHED) {
         uint64_t now_val = client_now_us(c);
         for (int i = 0; i < c->n_paths; i++) {
             const path_entry_t *p = &c->paths[i];

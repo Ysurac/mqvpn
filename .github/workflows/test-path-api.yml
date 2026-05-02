@@ -1,13 +1,13 @@
-name: Path API Live Connection Test
+name: Path API Live Connection Test (#4271/#4273)
 
-# Regression test for issue #4271.
+# Regression test for issues #4271 and #4273.
 #
 # Scenario (live client + server in network namespaces):
 #   1. Client starts with one path (veth-a0).
-#   2. A second path (veth-b0) is added at runtime via the control-socket API.
-#      → Bug 1 fix: path must activate (not stay PENDING indefinitely).
+#   2. Two secondary paths (veth-b0, veth-c0) are added at runtime.
+#      → Bug 1/#4273 fix: paths must activate (not stay PENDING indefinitely).
 #   3. The first path is removed via the control-socket API.
-#      → Bug 2 fix: tunnel must survive on the second path alone.
+#      → Bug 2 fix: tunnel must survive on secondary paths.
 
 on:
   push:
@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   path-api-e2e:
-    name: Runtime path add/remove live test
+    name: Runtime path add/remove live test (#4271/#4273)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

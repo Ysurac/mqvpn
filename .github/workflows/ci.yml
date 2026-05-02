@@ -180,7 +180,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_dellink_test.sh
 
-      - name: E2E runtime path add/remove API test (netns) [issue #4271]
+      - name: E2E runtime path add/remove API test (netns) [issue #4271/#4273]
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
@@ -323,7 +323,7 @@ jobs:
       - name: RTM_DELLINK test (netns)
         run: sudo scripts/ci_e2e/run_dellink_test.sh
 
-      - name: Runtime path add/remove API test (netns) [issue #4271]
+      - name: Runtime path add/remove API test (netns) [issue #4271/#4273]
         run: sudo scripts/ci_e2e/run_path_api_test.sh
 
   ipv6-tests:
