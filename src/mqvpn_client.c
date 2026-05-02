@@ -360,8 +360,9 @@ get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
     if (p) return p->fd;
-    /* Fallback to primary path */
-    if (c->n_paths > 0) return c->paths[c->primary_path_idx].fd;
+    /* Fallback: find any path whose fd is still active (primary may be gone). */
+    for (int i = 0; i < c->n_paths; i++)
+        if (c->paths[i].active) return c->paths[i].fd;
     return -1;
 }
 
@@ -501,7 +502,11 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
-    int fd = (c->n_paths > 0) ? c->paths[c->primary_path_idx].fd : -1;
+    int fd = -1;
+    int active_idx = -1;
+    for (int i = 0; i < c->n_paths; i++) {
+        if (c->paths[i].active) { fd = c->paths[i].fd; active_idx = i; break; }
+    }
     if (fd < 0) return XQC_SOCKET_ERROR;
 
     ssize_t res;
@@ -513,7 +518,7 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
         return XQC_SOCKET_ERROR;
     }
     c->bytes_tx += (uint64_t)res;
-    if (c->n_paths > 0) c->paths[c->primary_path_idx].bytes_tx += (uint64_t)res;
+    if (active_idx >= 0) c->paths[active_idx].bytes_tx += (uint64_t)res;
     return res;
 }
 
@@ -1818,8 +1823,14 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     p->recreate_after_us = 0;
     p->recreate_retries = 0;
     p->path_stable_since_us = 0;
-    if (p->in_use && c->engine && c->conn)
+    if (p->in_use && c->engine && c->conn) {
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+        /* Flush the close frame immediately so xquic sends it while the fd is
+         * still open.  The platform closes the fd right after this returns. */
+        xqc_engine_main_logic(c->engine);
+    }
+    p->in_use = 0;
+    p->xqc_path_id = 0;
     return MQVPN_OK;
 }
 
