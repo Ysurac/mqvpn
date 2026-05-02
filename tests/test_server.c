@@ -961,7 +961,13 @@ TEST(server_runtime_added_path_not_stuck_pending)
         int w = poll(pfds, 3, 10);
         elapsed += (w == 0) ? 10 : 1;
     }
-    ASSERT_NE(st, MQVPN_PATH_PENDING);
+    if (st != MQVPN_PATH_ACTIVE && st != MQVPN_PATH_DEGRADED) {
+        printf("FAIL\n    %s:%d: runtime-added path status=%d, expected ACTIVE(%d) "
+               "or DEGRADED(%d)\n",
+               __FILE__, __LINE__, (int)st, (int)MQVPN_PATH_ACTIVE,
+               (int)MQVPN_PATH_DEGRADED);
+        exit(1);
+    }
 
     mqvpn_client_disconnect(cli);
     mqvpn_client_destroy(cli);

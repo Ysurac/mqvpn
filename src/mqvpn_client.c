@@ -1076,6 +1076,26 @@ client_count_active_primaries(mqvpn_client_t *c)
     return n;
 }
 
+static void
+client_mark_path_degraded_for_retry(mqvpn_client_t *c, path_entry_t *p,
+                                    const char *reason)
+{
+    p->recreate_retries++;
+    if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
+        p->status = MQVPN_PATH_CLOSED;
+        p->recreate_after_us = 0;
+        LOG_W(c, "path closed: %s (retries exhausted at %s)", p->name, reason);
+    } else {
+        p->status = MQVPN_PATH_DEGRADED;
+        uint64_t delay = path_recreate_backoff(p->recreate_retries);
+        p->recreate_after_us = client_now_us(c) + delay;
+        LOG_I(c, "path degraded: %s (%s, retry %d/%d in %ds)", p->name, reason,
+              p->recreate_retries, PATH_RECREATE_MAX_RETRIES,
+              (int)(delay / 1000000));
+    }
+    if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
+}
+
 /* Create an xquic path for a secondary path entry and mark it ACTIVE.
  *
  * For MQVPN_SCHED_BACKUP_FEC the secondary path must be created in STANDBY
@@ -1094,19 +1114,7 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
          * PENDING indefinitely (issue #4271 Bug 1).  Common causes: server has
          * not yet distributed CIDs for additional paths (-XQC_EMP_NO_AVAIL_PATH_ID)
          * or the path was added before xquic multipath is fully negotiated. */
-        p->recreate_retries++;
-        if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
-            p->status = MQVPN_PATH_CLOSED;
-            p->recreate_after_us = 0;
-            LOG_W(c, "path closed: %s (retries exhausted at activation)", p->name);
-        } else {
-            p->status = MQVPN_PATH_DEGRADED;
-            uint64_t delay = path_recreate_backoff(p->recreate_retries);
-            p->recreate_after_us = client_now_us(c) + delay;
-            LOG_I(c, "path degraded: %s (retry %d/%d in %ds)", p->name,
-                  p->recreate_retries, PATH_RECREATE_MAX_RETRIES, (int)(delay / 1000000));
-        }
-        if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
+        client_mark_path_degraded_for_retry(c, p, "activation");
         return;
     }
     LOG_I(c, "path[%d] created (id=%llu, app_path_status=%s)", idx,
@@ -2058,7 +2066,6 @@ static void
 tick_kick_pending_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
     if (p->status != MQVPN_PATH_PENDING || !p->active || p->in_use) return;
-    if (idx == c->primary_path_idx) return;
 
     if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
         if (client_scheduler_supports_standby(c))
@@ -2070,6 +2077,11 @@ tick_kick_pending_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 
     LOG_I(c, "path pending fallback: trying activation for %s", p->name);
     client_activate_path(c, p, idx);
+
+    /* Defensive: if activation path returned without status transition,
+     * force retry scheduling so the path cannot stay PENDING forever. */
+    if (p->status == MQVPN_PATH_PENDING && !p->in_use)
+        client_mark_path_degraded_for_retry(c, p, "pending fallback");
 }
 
 static void

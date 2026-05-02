@@ -1,0 +1,76 @@
+name: Pending Path Regression Test (#4273)
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/platform/linux/platform_linux.c'
+      - 'tests/test_server.c'
+      - 'tests/test_pending_path.c'
+      - '.github/workflows/test-pending-regression.yml'
+  pull_request:
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/platform/linux/platform_linux.c'
+      - 'tests/test_server.c'
+      - 'tests/test_pending_path.c'
+      - '.github/workflows/test-pending-regression.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: test-pending-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pending-regression:
+    name: Unit regression checks (#4273)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake gcc make golang libevent-dev iptables
+
+      - name: Clone BoringSSL (pinned)
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl && git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+
+      - name: Build BoringSSL
+        run: |
+          cd third_party/xquic/third_party/boringssl
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) test_server test_pending_path
+
+      - name: Run pending-path regressions
+        run: |
+          cd build
+          ctest -R "test_server|test_pending_path" --output-on-failure
