@@ -1084,6 +1084,23 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
+        /* Transition to DEGRADED + schedule retry so the path is never stuck in
+         * PENDING indefinitely (issue #4271 Bug 1).  Common causes: server has
+         * not yet distributed CIDs for additional paths (-XQC_EMP_NO_AVAIL_PATH_ID)
+         * or the path was added before xquic multipath is fully negotiated. */
+        p->recreate_retries++;
+        if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
+            p->status = MQVPN_PATH_CLOSED;
+            p->recreate_after_us = 0;
+            LOG_W(c, "path closed: %s (retries exhausted at activation)", p->name);
+        } else {
+            p->status = MQVPN_PATH_DEGRADED;
+            uint64_t delay = path_recreate_backoff(p->recreate_retries);
+            p->recreate_after_us = client_now_us(c) + delay;
+            LOG_I(c, "path degraded: %s (retry %d/%d in %ds)", p->name,
+                  p->recreate_retries, PATH_RECREATE_MAX_RETRIES, (int)(delay / 1000000));
+        }
+        if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
         return;
     }
     LOG_I(c, "path[%d] created (id=%llu, app_path_status=%s)", idx,
@@ -2013,21 +2030,8 @@ tick_recover_degraded_path(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t
         p->path_stable_since_us = now;
         return;
     }
-
-    /* xqc_conn_create_path() failed synchronously */
-    p->recreate_retries++;
-    if (p->recreate_retries >= PATH_RECREATE_MAX_RETRIES) {
-        p->status = MQVPN_PATH_CLOSED;
-        p->recreate_after_us = 0;
-        LOG_W(c, "path closed: %s (retries exhausted)", p->name);
-        if (c->cbs.path_event)
-            c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
-        return;
-    }
-
-    uint64_t backoff = path_recreate_backoff(p->recreate_retries);
-    p->recreate_after_us = now + backoff;
-    LOG_D(c, "path %s: scheduling retry in %ds", p->name, (int)(backoff / 1000000));
+    /* On synchronous failure client_activate_path() already updated status,
+     * recreate_retries, and recreate_after_us. */
 }
 
 static void
@@ -2070,6 +2074,23 @@ tick_reconnect(mqvpn_client_t *c)
 
     /* Reset path state for a fresh connection attempt. */
     client_reset_paths_for_reconnect(c);
+
+    /* Rotate to the next usable primary path (issue #4271 Bug 2).
+     * Build a flags view where inactive paths (fd gone, active=0) are treated
+     * as backup so mqvpn_rotate_primary_path() skips them.  This prevents
+     * hammering a dead path when a live alternative exists. */
+    if (c->n_paths > 0) {
+        uint32_t flags[MQVPN_MAX_PATHS];
+        for (int i = 0; i < c->n_paths; i++) {
+            flags[i] = c->paths[i].flags;
+            if (!c->paths[i].active)
+                flags[i] |= MQVPN_PATH_FLAG_BACKUP;
+        }
+        c->primary_path_idx =
+            mqvpn_rotate_primary_path(c->primary_path_idx, flags, c->n_paths);
+        LOG_I(c, "reconnect: using path[%d] iface=%s", c->primary_path_idx,
+              c->paths[c->primary_path_idx].name);
+    }
 
     if (cli_start_connection(c) < 0) {
         int delay = client_arm_reconnect_timer(c);

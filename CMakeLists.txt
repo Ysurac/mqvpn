@@ -298,6 +298,13 @@ if(BUILD_TESTING)
     set_target_properties(test_standby_backup PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_standby_backup COMMAND test_standby_backup)
 
+    # Pending-path / path-removal regression tests for issue #4271
+    add_executable(test_pending_path tests/test_pending_path.c)
+    target_link_libraries(test_pending_path mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_pending_path PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    set_target_properties(test_pending_path PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_pending_path COMMAND test_pending_path)
+
     # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
     add_executable(test_scheduler tests/test_scheduler.c)
     target_link_libraries(test_scheduler mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)

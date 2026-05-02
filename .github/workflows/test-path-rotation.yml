@@ -1,0 +1,63 @@
+name: Path Rotation Unit Test
+
+# Lightweight workflow for the primary-path rotation fix (issue #4257).
+# test_path_rotation links only path_rotation.c — no xquic / BoringSSL
+# needed, so this completes in well under a minute.
+
+on:
+  push:
+    paths:
+      - 'src/path_rotation.c'
+      - 'src/path_rotation.h'
+      - 'src/mqvpn_client.c'
+      - 'tests/test_path_rotation.c'
+      - 'CMakeLists.txt'
+      - '.github/workflows/test-path-rotation.yml'
+  pull_request:
+    paths:
+      - 'src/path_rotation.c'
+      - 'src/path_rotation.h'
+      - 'src/mqvpn_client.c'
+      - 'tests/test_path_rotation.c'
+      - 'CMakeLists.txt'
+      - '.github/workflows/test-path-rotation.yml'
+  workflow_dispatch:
+
+jobs:
+  test-path-rotation:
+    name: Build and run test_path_rotation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        # No submodules needed — test links only path_rotation.c
+
+      # Direct compilation: avoids the full cmake configure (which needs xquic).
+      # test_path_rotation has zero xquic / libevent dependencies.
+      - name: Compile test_path_rotation
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+             -I src -I include \
+             tests/test_path_rotation.c \
+             src/path_rotation.c \
+             -o test_path_rotation
+
+      - name: Run test_path_rotation
+        run: ./test_path_rotation
+
+      # Also verify it compiles clean under sanitizers
+      - name: Compile with ASan + UBSan
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror \
+             -fsanitize=address,undefined -fno-omit-frame-pointer \
+             -I src -I include \
+             tests/test_path_rotation.c \
+             src/path_rotation.c \
+             -o test_path_rotation_asan
+
+      - name: Run with ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./test_path_rotation_asan

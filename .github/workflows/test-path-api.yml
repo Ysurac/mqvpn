@@ -1,0 +1,94 @@
+name: Path API Live Connection Test
+
+# Regression test for issue #4271.
+#
+# Scenario (live client + server in network namespaces):
+#   1. Client starts with one path (veth-a0).
+#   2. A second path (veth-b0) is added at runtime via the control-socket API.
+#      → Bug 1 fix: path must activate (not stay PENDING indefinitely).
+#   3. The first path is removed via the control-socket API.
+#      → Bug 2 fix: tunnel must survive on the second path alone.
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/path_rotation.c'
+      - 'src/platform/linux/platform_linux.c'
+      - 'src/platform/linux/control_socket.c'
+      - 'scripts/ci_e2e/run_path_api_test.sh'
+      - '.github/workflows/test-path-api.yml'
+  pull_request:
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/path_rotation.c'
+      - 'src/platform/linux/platform_linux.c'
+      - 'src/platform/linux/control_socket.c'
+      - 'scripts/ci_e2e/run_path_api_test.sh'
+      - '.github/workflows/test-path-api.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: test-path-api-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  path-api-e2e:
+    name: Runtime path add/remove live test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake gcc make golang openssl \
+            iproute2 iptables netcat-openbsd
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) mqvpn
+
+      - name: Run path API e2e test
+        run: sudo -E scripts/ci_e2e/run_path_api_test.sh build/mqvpn
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: path-api-test-logs-${{ github.sha }}
+          path: /tmp/tmp.*/
+          retention-days: 3
