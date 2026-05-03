@@ -7,6 +7,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "path_rotation.h"
+#include "path_error_policy.h"
 #include "mqvpn_scheduler.h"
 
 #include <stdlib.h>
@@ -453,6 +454,37 @@ client_arm_reconnect_timer(mqvpn_client_t *c)
     c->reconnect_attempts++;
     c->reconnect_scheduled_us = client_now_us(c) + (uint64_t)delay * 1000000;
     return delay;
+}
+
+/*
+ * xquic path budget is connection-scoped (XQC_MAX_PATHS_COUNT).
+ * When exhausted, additional path creation cannot recover in-place; force a
+ * clean reconnect so counters/CIDs are reinitialized.
+ */
+static void
+client_force_reconnect_on_path_budget_exhausted(mqvpn_client_t *c, path_entry_t *p,
+                                                int idx, int ret)
+{
+    if (!c || !c->engine || !c->conn) return;
+    if (c->shutting_down || c->state == MQVPN_STATE_RECONNECTING ||
+        c->state == MQVPN_STATE_CLOSED)
+        return;
+
+    if (!c->config.reconnect_enable) {
+        LOG_W(c,
+              "path[%d] create-path budget exhausted on %s (ret=%d), "
+              "auto-reconnect disabled",
+              idx, p ? p->name : "?", ret);
+        return;
+    }
+
+    LOG_W(c,
+          "path[%d] create-path budget exhausted on %s (ret=%d), forcing "
+          "connection reconnect",
+          idx, p ? p->name : "?", ret);
+
+    xqc_conn_close(c->engine, &c->conn->cid);
+    xqc_engine_main_logic(c->engine);
 }
 
 /* ================================================================
@@ -1110,6 +1142,10 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
+        if (mqvpn_path_error_is_create_budget_exhausted((int)ret)) {
+            client_force_reconnect_on_path_budget_exhausted(c, p, idx, (int)ret);
+            return;
+        }
         /* Transition to DEGRADED + schedule retry so the path is never stuck in
          * PENDING indefinitely (issue #4271 Bug 1).  Common causes: server has
          * not yet distributed CIDs for additional paths (-XQC_EMP_NO_AVAIL_PATH_ID)
@@ -1142,6 +1178,9 @@ client_create_standby_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path (backup)[%d]: %d", idx, ret);
+        if (mqvpn_path_error_is_create_budget_exhausted((int)ret)) {
+            client_force_reconnect_on_path_budget_exhausted(c, p, idx, (int)ret);
+        }
         return;
     }
     p->xqc_path_id = new_id;

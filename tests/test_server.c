@@ -977,6 +977,156 @@ TEST(server_runtime_added_path_not_stuck_pending)
     close(cli_fd1);
 }
 
+/* ── test_server_get_status: control API status queries ──
+ *
+ * Verify mqvpn_server_get_client_info() (used by control socket get_status command)
+ * returns correct data in both scenarios: no clients and with connected client.
+ */
+
+TEST(server_get_status_no_clients)
+{
+    reset_mocks();
+
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    ASSERT_NOT_NULL(s);
+    mqvpn_config_free(cfg);
+
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    /* Query status with no clients */
+    mqvpn_client_info_t clients[MQVPN_MAX_USERS];
+    int n_clients = 0;
+    ASSERT_EQ(mqvpn_server_get_client_info(s, clients, MQVPN_MAX_USERS, &n_clients),
+              MQVPN_OK);
+
+    /* Verify: n_clients should be 0 */
+    ASSERT_EQ(n_clients, 0);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_get_status_with_client)
+{
+    reset_mocks();
+    g_client_connected_called = 0;
+    g_cli_tunnel_ready_called = 0;
+
+    /* Create and set up sockets */
+    int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(svr_fd, -1);
+    int cli_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(cli_fd, -1);
+
+    struct sockaddr_in svr_addr, cli_addr;
+    memset(&svr_addr, 0, sizeof(svr_addr));
+    svr_addr.sin_family = AF_INET;
+    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    svr_addr.sin_port = htons(0);
+    ASSERT_EQ(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
+
+    memset(&cli_addr, 0, sizeof(cli_addr));
+    cli_addr.sin_family = AF_INET;
+    cli_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cli_addr.sin_port = htons(0);
+    ASSERT_EQ(bind(cli_fd, (struct sockaddr *)&cli_addr, sizeof(cli_addr)), 0);
+
+    socklen_t alen = sizeof(svr_addr);
+    getsockname(svr_fd, (struct sockaddr *)&svr_addr, &alen);
+    alen = sizeof(cli_addr);
+    getsockname(cli_fd, (struct sockaddr *)&cli_addr, &alen);
+
+    /* Server setup */
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    svr_cbs.on_client_connected = mock_on_client_connected;
+
+    mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(svr);
+    mqvpn_config_free(svr_cfg);
+
+    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+                                         sizeof(svr_addr)),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
+
+    /* Client setup */
+    mqvpn_config_t *cli_cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
+    mqvpn_config_set_insecure(cli_cfg, 1);
+    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_ERROR);
+
+    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cli_cbs.tun_output = mock_cli_tun_output;
+    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+
+    mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
+    ASSERT_NOT_NULL(cli);
+    mqvpn_config_free(cli_cfg);
+
+    /* Add path and connect */
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    memcpy(desc.local_addr, &cli_addr, sizeof(cli_addr));
+    desc.local_addr_len = sizeof(cli_addr);
+
+    mqvpn_path_handle_t path_h = mqvpn_client_add_path_fd(cli, cli_fd, &desc);
+    ASSERT_NE(path_h, (mqvpn_path_handle_t)-1);
+
+    mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
+
+    /* Pump until tunnel is established */
+    for (int elapsed = 0; elapsed < 10000; elapsed++) {
+        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
+        if (g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0) break;
+
+        struct pollfd pfds[2] = {
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd, .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+
+    /* Verify tunnel is established */
+    ASSERT_EQ(g_client_connected_called, 1);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+
+    /* Additional drains to ensure state is fully synced */
+    for (int i = 0; i < 50; i++) {
+        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
+    }
+
+    /* Query get_status with connected client */
+    mqvpn_client_info_t clients[MQVPN_MAX_USERS];
+    int n_clients = 0;
+    ASSERT_EQ(mqvpn_server_get_client_info(svr, clients, MQVPN_MAX_USERS, &n_clients),
+              MQVPN_OK);
+
+    /* Verify: n_clients should be 1, confirming client is visible to API */
+    ASSERT_EQ(n_clients, 1);
+
+    /* Verify client info structure is populated */
+    mqvpn_client_info_t *ci = &clients[0];
+    /* Should have at least one path */
+    ASSERT_NE(ci->n_paths, 0);
+
+    /* Cleanup */
+    mqvpn_client_disconnect(cli);
+    mqvpn_client_destroy(cli);
+    mqvpn_server_destroy(svr);
+    close(svr_fd);
+    close(cli_fd);
+}
+
 /* ── max_clients config boundary ── */
 
 TEST(server_max_clients_config)
@@ -1035,6 +1185,10 @@ main(void)
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
     run_server_runtime_added_path_not_stuck_pending();
+
+    /* Control API: get_status with and without clients */
+    run_server_get_status_no_clients();
+    run_server_get_status_with_client();
 
     /* max_clients config boundary */
     run_server_max_clients_config();

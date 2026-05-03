@@ -1,13 +1,21 @@
-name: Path API Live Connection Test (#4271/#4273)
+name: Path & Control API Tests (#4271/#4273/#4276)
 
-# Regression test for issues #4271 and #4273.
+# Regression tests for issues #4271, #4273, and #4276.
 #
-# Scenario (live client + server in network namespaces):
+# E2E Scenario 1 — run_path_api_test.sh:
 #   1. Client starts with one path (veth-a0).
 #   2. Two secondary paths (veth-b0, veth-c0) are added at runtime.
 #      → Bug 1/#4273 fix: paths must activate (not stay PENDING indefinitely).
 #   3. The first path is removed via the control-socket API.
 #      → Bug 2 fix: tunnel must survive on secondary paths.
+#
+# E2E Scenario 2 — run_path_bounce_test.sh (#4276):
+#   Secondary path is added/removed 10 times via API (> XQC_MAX_PATHS_COUNT=8).
+#   Budget exhaustion triggers a forced reconnect; path must reactivate.
+#
+# Unit Tests:
+#   - get_status with no clients (empty list)
+#   - get_status with connected client (populated info)
 
 on:
   push:
@@ -17,7 +25,9 @@ on:
       - 'src/path_rotation.c'
       - 'src/platform/linux/platform_linux.c'
       - 'src/platform/linux/control_socket.c'
+      - 'tests/test_server.c'
       - 'scripts/ci_e2e/run_path_api_test.sh'
+      - 'scripts/ci_e2e/run_path_bounce_test.sh'
       - '.github/workflows/test-path-api.yml'
   pull_request:
     paths:
@@ -25,6 +35,8 @@ on:
       - 'src/path_rotation.c'
       - 'src/platform/linux/platform_linux.c'
       - 'src/platform/linux/control_socket.c'
+      - 'tests/test_server.c'
+      - 'scripts/ci_e2e/run_path_bounce_test.sh'
       - 'scripts/ci_e2e/run_path_api_test.sh'
       - '.github/workflows/test-path-api.yml'
   workflow_dispatch:
@@ -34,6 +46,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unit-tests:
+    name: Control API unit tests (get_status)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake ninja-build pkg-config libssl-dev
+
+      - name: Build BoringSSL
+        run: |
+          mkdir -p third_party/xquic/third_party/boringssl/build
+          cd third_party/xquic/third_party/boringssl/build
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl -DXQC_ENABLE_BBR2=ON ..
+          make -j$(nproc)
+
+      - name: Build and run get_status unit tests
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j$(nproc) test_server
+          ./tests/test_server 2>&1 | grep "server_get_status"
+
   path-api-e2e:
     name: Runtime path add/remove live test (#4271/#4273)
     runs-on: ubuntu-latest
@@ -90,5 +138,64 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: path-api-test-logs-${{ github.sha }}
+          path: /tmp/tmp.*/
+          retention-days: 3
+
+  path-bounce-e2e:
+    name: Path bounce stability test (#4276 — >8 add/remove cycles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake gcc make golang openssl libevent-dev \
+            iproute2 iptables netcat-openbsd
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) mqvpn
+
+      - name: Run path bounce e2e test
+        run: sudo -E scripts/ci_e2e/run_path_bounce_test.sh build/mqvpn
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: path-bounce-test-logs-${{ github.sha }}
           path: /tmp/tmp.*/
           retention-days: 3

@@ -24,6 +24,7 @@
 #define TUN_BUF_SIZE        65536
 #define SOCK_BUF_SIZE       65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
+static int  try_readd_removed_path(platform_ctx_t *p, const char *ifname);
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -168,6 +169,19 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
     const char *os = (old_state < 7) ? names[old_state] : "?";
     const char *ns = (new_state < 7) ? names[new_state] : "?";
     LOG_INF("state: %s → %s", os, ns);
+
+    /* On ESTABLISHED: re-add any paths whose socket was freed by the undo
+     * logic in try_readd_removed_path() during the previous connection.
+     * This covers the budget-exhaustion reconnect scenario (issue #4276):
+     * the interface is physically UP but no netlink event will fire to
+     * re-trigger try_readd_removed_path() because the kernel already sent
+     * RTM_NEWLINK/NEWADDR before the reconnect completed. */
+    if (new_state == MQVPN_STATE_ESTABLISHED) {
+        for (int i = 0; i < p->path_mgr.n_paths; i++) {
+            if (p->path_removed_by_platform[i] && p->path_mgr.paths[i].fd < 0)
+                try_readd_removed_path(p, p->path_mgr.paths[i].iface);
+        }
+    }
 
     /* On RECONNECTING or CLOSED, tear down TUN and platform resources so
      * that stale fd events don't fire ("tun read: Bad file descriptor").
@@ -654,24 +668,31 @@ try_readd_removed_path(platform_ctx_t *p, const char *ifname)
         mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n_info);
         int activated = 0;
         for (int j = 0; j < n_info; j++) {
-            if (pinfo[j].handle == handle && pinfo[j].status == MQVPN_PATH_ACTIVE) {
+            if (pinfo[j].handle == handle &&
+                (pinfo[j].status == MQVPN_PATH_ACTIVE   ||
+                 pinfo[j].status == MQVPN_PATH_DEGRADED ||
+                 pinfo[j].status == MQVPN_PATH_STANDBY)) {
                 activated = 1;
                 break;
             }
         }
 
         if (!activated) {
-            /* Activation failed (xqc_conn_create_path error) — path is
-             * PENDING + active=1 + in_use=0, unreachable by
-             * reactivate_path(). Undo everything so the next netlink
-             * event can retry cleanly (path_removed_by_platform stays 1,
-             * fd reverts to -1).
+            /* Path stayed PENDING — multipath was not yet negotiated when
+             * add_path_fd() was called, so xqc_conn_create_path() was never
+             * attempted.  PENDING + active=1 + in_use=0 is unreachable by
+             * the library's retry timer or reactivate_path(); undo so the
+             * next netlink event can retry once multipath is ready.
+             *
+             * DEGRADED / STANDBY means xquic attempted the create and
+             * scheduled its own retry — keep the socket registered.
              *
              * Safe ordering: remove_path() first, then close(fd).
              * Because the path is PENDING (not ACTIVE) and in_use=0,
              * remove_path() skips xqc_conn_close_path() — xquic never
              * touches this fd during teardown. */
-            LOG_WRN("netlink: re-add %s not activated, will retry", ifname);
+            LOG_WRN("netlink: re-add %s not activated (pending), will retry on next event",
+                    ifname);
             mqvpn_client_remove_path(p->client, handle);
             close(fd);
             mp->fd = -1;

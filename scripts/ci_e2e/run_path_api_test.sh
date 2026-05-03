@@ -6,6 +6,7 @@
 #      plus issue #4273 coverage for multiple pending secondaries.
 #   2. Keep the tunnel alive after the initial path is removed — Bug 2 fix
 #      in tick_reconnect() which now rotates away from the dead path.
+#   3. list_paths control API command returns correct data.
 #
 # Topology (triple-path, single-server):
 #   vpn-client                    vpn-server
@@ -22,6 +23,8 @@
 #            Wait for library to activate both (verifies Bug 1 + #4273).
 #   Phase 3  Path A removed via {"cmd":"remove_path","iface":"veth-a0"}.
 #            Verify tunnel still works on secondary paths (verifies Bug 2 fix).
+#   Phase 4  Test list_paths control API command (client-side command).
+#            Note: get_status is server-only (tested in unit tests)
 #
 # Usage: sudo ./scripts/ci_e2e/run_path_api_test.sh [path-to-mqvpn-binary]
 # Requires: root, iproute2, openssl, netcat (nc)
@@ -120,6 +123,7 @@ dump_logs() {
 
 # ── Setup: network namespaces ────────────────────────────────────────────────
 
+echo ""
 echo "================================================================"
 echo "  mqvpn E2E: runtime path add/remove via control API (#4271/#4273)"
 echo "  Binary: $MQVPN"
@@ -356,10 +360,47 @@ if ! echo "$LIST_RESP" | grep -q "veth-c0"; then
 fi
 echo "OK: list_paths shows veth-b0 and veth-c0"
 
+# ── Phase 4: test list_paths control API command ──────────────────────────
+
+echo ""
+echo "=== Phase 4: test list_paths control API command ==="
+
+# Test list_paths detailed format (client-side command)
+echo "Testing list_paths output format..."
+LIST_RESP=$(ctrl_send '{"cmd":"list_paths"}')
+if ! echo "$LIST_RESP" | grep -q '"ok":true'; then
+    echo "FAIL: list_paths did not return ok=true: $LIST_RESP"
+    dump_logs; exit 1
+fi
+if ! echo "$LIST_RESP" | grep -q '"paths"'; then
+    echo "FAIL: list_paths response missing paths field: $LIST_RESP"
+    dump_logs; exit 1
+fi
+if ! echo "$LIST_RESP" | grep -q '\["veth-b0","veth-c0"\]'; then
+    # Order might vary, so check elements individually
+    if ! (echo "$LIST_RESP" | grep -q "veth-b0" && echo "$LIST_RESP" | grep -q "veth-c0"); then
+        echo "FAIL: list_paths does not contain both veth-b0 and veth-c0: $LIST_RESP"
+        dump_logs; exit 1
+    fi
+fi
+echo "OK: list_paths response format is correct and contains expected paths"
+
+# Verify list_paths is array format with proper JSON
+if ! echo "$LIST_RESP" | grep -qE '"paths":\s*\[[^]]*\]'; then
+    echo "FAIL: list_paths response malformed JSON: $LIST_RESP"
+    dump_logs; exit 1
+fi
+echo "OK: list_paths response has valid JSON structure"
+
+# Note: get_status is a server command (not available on client control socket)
+#       It is tested in unit tests: server_get_status_no_clients and server_get_status_with_client
+echo "OK: skipping get_status (server-only command, tested in unit tests)"
+
 echo ""
 echo "================================================================"
 echo "  All tests PASSED"
 echo "  Phase 1: single-path tunnel established on path A"
 echo "  Phase 2: paths B/C activated via API (Bug 1 + #4273 verified)"
 echo "  Phase 3: tunnel survives on secondary paths after removing path A (Bug 2)"
+echo "  Phase 4: list_paths control API command validated"
 echo "================================================================"

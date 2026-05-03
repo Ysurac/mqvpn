@@ -110,6 +110,7 @@ set(MQVPN_LIB_SOURCES
     src/mqvpn_client.c
     src/mqvpn_server.c
     src/mqvpn_util.c
+    src/path_error_policy.c
     src/flow_sched.c
     src/addr_pool.c
     src/auth.c
@@ -266,12 +267,15 @@ if(BUILD_TESTING)
     add_executable(test_path_rotation tests/test_path_rotation.c src/path_rotation.c)
     add_executable(test_fec_reinj tests/test_fec_reinj.c src/config.c src/log.c)
     add_executable(test_ciphers  tests/test_ciphers.c  src/config.c src/log.c)
+    add_executable(test_path_error_policy tests/test_path_error_policy.c src/path_error_policy.c)
 
-    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_rotation test_fec_reinj test_ciphers)
+    foreach(t test_config test_auth test_session test_dns test_flow_sched test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy)
         target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/platform/linux)
         set_target_properties(${t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+
+    target_include_directories(test_path_error_policy PRIVATE ${XQUIC_INCLUDE_DIR})
 
     # libmqvpn public API test (links libmqvpn + xquic)
     add_executable(test_api tests/test_api.c)
@@ -304,6 +308,13 @@ if(BUILD_TESTING)
     target_include_directories(test_pending_path PRIVATE ${CMAKE_SOURCE_DIR}/src)
     set_target_properties(test_pending_path PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_pending_path COMMAND test_pending_path)
+
+    # Path re-add / reconnect regression tests for issue #4276
+    add_executable(test_path_readd_reconnect tests/test_path_readd_reconnect.c)
+    target_link_libraries(test_path_readd_reconnect mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_path_readd_reconnect PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    set_target_properties(test_path_readd_reconnect PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_path_readd_reconnect COMMAND test_path_readd_reconnect)
 
     # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
     add_executable(test_scheduler tests/test_scheduler.c)
