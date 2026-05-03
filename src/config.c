@@ -324,6 +324,9 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
     case SEC_MULTIPATH:
         if (strcasecmp(key, "Scheduler") == 0) {
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
+        } else if (strcasecmp(key, "CC") == 0 ||
+                   strcasecmp(key, "CongestionControl") == 0) {
+            snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
         } else if (strcasecmp(key, "ReinjectionControl") == 0) {
             cfg->reinjection_control = parse_bool(val);
         } else if (strcasecmp(key, "ReinjectionMode") == 0 ||

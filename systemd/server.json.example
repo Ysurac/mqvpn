@@ -15,6 +15,7 @@
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "cc": "bbr2",
   "reinjection_control": true,
   "reinjection_mode": "default",
   "fec_enable": true,

@@ -431,6 +431,7 @@ int
 mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if ((int)cc < 0 || cc > MQVPN_CC_UNLIMITED) return MQVPN_ERR_INVALID_ARG;
     cfg->cc = cc;
     return MQVPN_OK;
 }

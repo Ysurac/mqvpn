@@ -13,6 +13,7 @@
   "route_via_server": false,
   "no_routes": false,
   "scheduler": "wlb",
+  "cc": "bbr2",
   "reinjection_control": true,
   "reinjection_mode": "deadline",
   "fec_enable": true,

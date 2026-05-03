@@ -29,6 +29,7 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
+# CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited (default bbr2)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
