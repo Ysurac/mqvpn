@@ -84,7 +84,8 @@ jobs:
       - name: Build and run get_status unit tests
         run: |
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release ..
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc) test_server
           ./tests/test_server 2>&1 | grep "server_get_status"
 
