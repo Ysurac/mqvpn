@@ -63,8 +63,14 @@ jobs:
 
       - name: Build BoringSSL
         run: |
-          mkdir -p third_party/xquic/third_party/boringssl/build
-          cd third_party/xquic/third_party/boringssl/build
+          if [ ! -f third_party/xquic/third_party/boringssl/CMakeLists.txt ]; then
+            rm -rf third_party/xquic/third_party/boringssl
+            git clone https://github.com/google/boringssl.git \
+              third_party/xquic/third_party/boringssl
+          fi
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
           cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 

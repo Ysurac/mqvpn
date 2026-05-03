@@ -1,0 +1,79 @@
+# Makefile — Local testing targets for mqvpn
+
+# Test commands for development and CI
+
+.PHONY: help test test-build test-run test-unit test-e2e test-clean test-all
+
+# Default help target
+help:
+	@echo "mqvpn Testing Targets:"
+	@echo ""
+	@echo "  make test              - Run all tests (build + unit + e2e)"
+	@echo "  make test-build        - Build only (no tests)"
+	@echo "  make test-run          - Run tests only (skip build)"
+	@echo "  make test-unit         - Run unit tests only"
+	@echo "  make test-e2e          - Run E2E tests only"
+	@echo "  make test-clean        - Clean test artifacts"
+	@echo "  make test-all          - Full build + all tests (same as 'make test')"
+	@echo ""
+	@echo "Examples:"
+	@echo "  sudo make test              # Full test suite"
+	@echo "  sudo make test-build        # Quick build check"
+	@echo "  make test-unit              # Unit tests (no sudo needed)"
+	@echo "  sudo make test-e2e          # E2E tests with namespaces"
+	@echo ""
+	@echo "For detailed info: cat docs/TESTING_LOCAL.md"
+	@echo "For examples: cat scripts/TESTING_EXAMPLES.sh"
+
+# Run all tests (full suite)
+test: test-all
+
+test-all:
+	@chmod +x scripts/run_all_local_tests.sh
+	@scripts/run_all_local_tests.sh
+
+# Build only
+test-build:
+	@chmod +x scripts/run_all_local_tests.sh
+	@scripts/run_all_local_tests.sh --build-only
+
+# Run tests only (reuse existing build)
+test-run:
+	@chmod +x scripts/run_all_local_tests.sh
+	@scripts/run_all_local_tests.sh --tests-only
+
+# Unit tests only (loopback, no namespaces)
+test-unit:
+	@echo "Running unit tests..."
+	@mkdir -p build
+	@if [ ! -f build/tests/test_server ]; then \
+		echo "Building test_server first..."; \
+		cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && ninja test_server; \
+	fi
+	@./build/tests/test_server
+
+# E2E tests only (namespaces) - requires root
+test-e2e:
+	@echo "Running E2E tests (requires root)..."
+	@chmod +x scripts/ci_e2e/run_path_api_test.sh
+	@if [ ! -f build/mqvpn ]; then \
+		echo "Building mqvpn first..."; \
+		mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && ninja mqvpn; \
+	fi
+	@scripts/ci_e2e/run_path_api_test.sh ./build/mqvpn
+
+# Clean test artifacts
+test-clean:
+	@echo "Cleaning test artifacts..."
+	@rm -rf .test-work
+	@rm -rf /tmp/tmp.*/ 2>/dev/null || true
+	@echo "OK: Test artifacts cleaned"
+
+# Quick syntax validation
+test-lint:
+	@echo "Validating test scripts..."
+	@bash -n scripts/run_all_local_tests.sh
+	@bash -n scripts/ci_e2e/run_path_api_test.sh
+	@echo "✓ All test scripts syntax is valid"
+
+.PHONY: test test-build test-run test-unit test-e2e test-clean test-lint

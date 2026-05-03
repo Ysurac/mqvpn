@@ -1,0 +1,142 @@
+name: Congestion Control Tests
+
+# Tests for congestion-control algorithm selection and configuration.
+#
+# Unit tests (test_cc_config):
+#   - File-config default CC is "bbr2"
+#   - JSON config parsing for all 6 CC algorithm strings
+#   - Overlong CC string truncated safely
+#   - Library API: default enum, set_cc() all values, invalid enum rejected
+#
+# E2E tests (run_cc_test.sh):
+#   - Tunnel established and traffic flows with bbr2, bbr, cubic
+#   - Optionally-compiled algorithms (copa, new_reno, unlimited) skipped
+#     gracefully if absent from the build
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/mqvpn_config.c'
+      - 'src/config.c'
+      - 'tests/test_cc_config.c'
+      - 'scripts/ci_e2e/run_cc_test.sh'
+      - '.github/workflows/test-cc.yml'
+  pull_request:
+    paths:
+      - 'src/mqvpn_client.c'
+      - 'src/mqvpn_config.c'
+      - 'src/config.c'
+      - 'tests/test_cc_config.c'
+      - 'scripts/ci_e2e/run_cc_test.sh'
+      - '.github/workflows/test-cc.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: test-cc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cc-unit:
+    name: CC config unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake pkg-config libssl-dev
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON ..
+          make -j$(nproc)
+
+      - name: Build and run CC unit tests
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) test_cc_config
+          ./tests/test_cc_config
+
+  cc-e2e:
+    name: CC algorithm e2e test (bbr2 / bbr / cubic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake gcc make golang openssl libevent-dev \
+            iproute2 iptables netcat-openbsd
+
+      - name: Build BoringSSL
+        run: |
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
+          cd third_party/xquic/third_party/boringssl
+          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+          mkdir -p build && cd build
+          cmake -DBUILD_SHARED_LIBS=0 \
+                -DCMAKE_C_FLAGS="-fPIC" \
+                -DCMAKE_CXX_FLAGS="-fPIC" ..
+          make -j$(nproc) ssl crypto
+
+      - name: Build xquic
+        run: |
+          cd third_party/xquic
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSSL_TYPE=boringssl \
+                -DXQC_ENABLE_BBR2=ON \
+                -DXQC_ENABLE_FEC=ON \
+                -DXQC_ENABLE_XOR=ON \
+                -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
+          make -j$(nproc)
+
+      - name: Build mqvpn
+        run: |
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
+          make -j$(nproc) mqvpn
+
+      - name: Run CC e2e test
+        run: sudo -E scripts/ci_e2e/run_cc_test.sh build/mqvpn
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cc-test-logs-${{ github.sha }}
+          path: /tmp/tmp.*/
+          retention-days: 3

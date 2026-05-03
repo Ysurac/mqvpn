@@ -316,6 +316,13 @@ if(BUILD_TESTING)
     set_target_properties(test_path_readd_reconnect PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_path_readd_reconnect COMMAND test_path_readd_reconnect)
 
+    # Congestion-control configuration tests (file config + library API)
+    add_executable(test_cc_config tests/test_cc_config.c src/config.c src/log.c)
+    target_link_libraries(test_cc_config mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_cc_config PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    set_target_properties(test_cc_config PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_cc_config COMMAND test_cc_config)
+
     # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
     add_executable(test_scheduler tests/test_scheduler.c)
     target_link_libraries(test_scheduler mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)

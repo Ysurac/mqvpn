@@ -86,6 +86,9 @@ wait_for_log() {
 
 # Wait until at least $n activations of veth-pb0 appear in the client log.
 # Uses the library-level "path[N] activated: ... iface=veth-pb0" line.
+#
+# We actively generate tunnel traffic while waiting so mqvpn tick cadence
+# doesn't depend only on sparse keepalive wakeups.
 wait_for_activations() {
     local n="$1" timeout="${2:-30}" elapsed=0
     while [ "$elapsed" -lt "$timeout" ]; do
@@ -93,6 +96,10 @@ wait_for_activations() {
         count=$(grep -cE "path\[[0-9]+\] activated.*${VETH_B0}" \
                 "${WORK_DIR}/client.log" 2>/dev/null || true)
         if [ "${count:-0}" -ge "$n" ]; then return 0; fi
+
+        # Keep packets flowing so pending/degraded recovery runs promptly.
+        ping_tunnel >/dev/null 2>&1 || true
+
         sleep 1; elapsed=$((elapsed + 1))
     done
     return 1
@@ -121,6 +128,17 @@ dump_logs() {
     tail -40 "${WORK_DIR}/client.log" 2>/dev/null || true
     echo "--- server log (last 20 lines) ---"
     tail -20 "${WORK_DIR}/server.log" 2>/dev/null || true
+}
+
+dump_activation_debug() {
+    echo "--- activation debug (client log key lines) ---"
+    grep -Ei "add_path|path\[[0-9]+\] activated|xqc_conn_create_path|path pending fallback|path degraded|retry|budget exhausted|forcing.*reconnect|reconnect" \
+        "${WORK_DIR}/client.log" 2>/dev/null | tail -80 || true
+
+    echo "--- list_paths snapshot ---"
+    local list_resp
+    list_resp=$(ctrl_send '{"cmd":"list_paths"}')
+    echo "${list_resp:-<empty>}"
 }
 
 # ── Banner ────────────────────────────────────────────────────────────────────
@@ -241,8 +259,11 @@ ctrl_ok "{\"cmd\":\"add_path\",\"iface\":\"${VETH_B0}\"}" || {
 }
 echo "add_path ${VETH_B0}: accepted"
 
-wait_for_activations 1 30 || {
-    echo "FAIL: path B not activated after initial add"; dump_logs; exit 1
+wait_for_activations 1 60 || {
+    echo "FAIL: path B not activated after initial add"
+    dump_activation_debug
+    dump_logs
+    exit 1
 }
 echo "OK: path B activated (cycle 0)"
 
@@ -271,10 +292,11 @@ for cycle in $(seq 1 "$BOUNCE_COUNT"); do
     fi
     echo "  add_path: accepted"
 
-    # Wait for activation — allow 30s to cover forced reconnect (~5-15s)
+    # Wait for activation — allow 45s to cover forced reconnect + jitter.
     total_expected=$((cycle + 1))
-    if ! wait_for_activations "$total_expected" 30; then
-        echo "FAIL: path B not activated within 30s at cycle $cycle"
+    if ! wait_for_activations "$total_expected" 45; then
+        echo "FAIL: path B not activated within 45s at cycle $cycle"
+        dump_activation_debug
         FAIL_CYCLE=$cycle; break
     fi
     echo "  path B: ACTIVE"

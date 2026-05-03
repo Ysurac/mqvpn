@@ -95,6 +95,7 @@ if [ "$TESTS_ONLY" -ne 1 ]; then
        [ -f "$BUILD_DIR/tests/test_server" ] && \
        [ -f "$BUILD_DIR/tests/test_pending_path" ] && \
        [ -f "$BUILD_DIR/tests/test_path_readd_reconnect" ] && \
+       [ -f "$BUILD_DIR/tests/test_cc_config" ] && \
        [ -f "$BUILD_DIR/mqvpn" ]; then
         log_info "Using existing build directory at $BUILD_DIR"
     else
@@ -106,8 +107,10 @@ if [ "$TESTS_ONLY" -ne 1 ]; then
         cmake -DCMAKE_BUILD_TYPE=Release .. || die "cmake failed"
 
         log_info "Building mqvpn and test binaries..."
-        make -j"$(nproc)" test_server test_pending_path test_path_readd_reconnect mqvpn \
-              || die "build failed"
+        make -j"$(nproc)" \
+            test_server test_pending_path test_path_readd_reconnect test_cc_config \
+            mqvpn \
+            || die "build failed"
 
         cd "$REPO_ROOT"
     fi
@@ -147,6 +150,10 @@ cleanup_tests() {
     # Clean up namespaces created by E2E tests
     ip netns del vpn-server-pa 2>/dev/null || true
     ip netns del vpn-client-pa 2>/dev/null || true
+    ip netns del vpn-server-pb 2>/dev/null || true
+    ip netns del vpn-client-pb 2>/dev/null || true
+    ip netns del vpn-server-cc 2>/dev/null || true
+    ip netns del vpn-client-cc 2>/dev/null || true
     # Clean up work directories
     rm -rf "$WORK_DIR" 2>/dev/null || true
 }
@@ -184,6 +191,9 @@ run_unit_test "test_pending_path (issue #4271 — path slot lifecycle)" \
 run_unit_test "test_path_readd_reconnect (issue #4276 — bounce / reconnect)" \
     "$BUILD_DIR/tests/test_path_readd_reconnect"
 
+run_unit_test "test_cc_config (congestion-control config parsing + API)" \
+    "$BUILD_DIR/tests/test_cc_config"
+
 # ── E2E Test: Path API (with namespaces) ─────────────────────────────────────
 
 echo ""
@@ -214,6 +224,9 @@ run_e2e_test "E2E: Path API add/remove/list (#4271/#4273)" \
 
 run_e2e_test "E2E: Path bounce stability — 10 add/remove cycles (#4276)" \
     "${SCRIPT_DIR}/ci_e2e/run_path_bounce_test.sh"
+
+run_e2e_test "E2E: Congestion-control algorithm selection (bbr2/bbr/cubic)" \
+    "${SCRIPT_DIR}/ci_e2e/run_cc_test.sh"
 
 # ── Test Results Summary ─────────────────────────────────────────────────────
 
@@ -249,6 +262,9 @@ if [ "$TESTS_FAILED" -eq 0 ]; then
     echo "  ✓ E2E Tests: Path bounce stability — 10 add/remove cycles (#4276)"
     echo "    - Budget exhaustion + forced reconnect"
     echo "    - Path reactivation after reconnect"
+    echo "  ✓ Unit Tests: Congestion-control config parsing + API (test_cc_config)"
+    echo "  ✓ E2E Tests: CC algorithm selection — bbr2, bbr, cubic"
+    echo "    - Each algorithm establishes a tunnel and passes traffic"
     exit 0
 else
     echo ""
