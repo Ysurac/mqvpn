@@ -1343,6 +1343,9 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     for (int i = 0; i < cfg->n_users; i++) {
         if (cfg->user_names[i] && cfg->user_keys[i]) {
             mqvpn_config_add_user(lib_cfg, cfg->user_names[i], cfg->user_keys[i]);
+            if (cfg->user_fixed_ips[i] && cfg->user_fixed_ips[i][0])
+                mqvpn_config_set_user_fixed_ip(lib_cfg, cfg->user_names[i],
+                                               cfg->user_fixed_ips[i]);
         }
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);

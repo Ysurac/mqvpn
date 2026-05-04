@@ -1127,6 +1127,106 @@ TEST(server_get_status_with_client)
     close(cli_fd);
 }
 
+/* ── Fixed (pinned) IP tests ── */
+
+TEST(server_pinned_ip_preconfig_reserves_pool)
+{
+    /* A fixed IP set before server_new is pre-reserved in the pool at startup.
+     * Attempting to assign the same address to a different user must fail. */
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_config_add_user(cfg, "alice", "alice-key");
+    mqvpn_config_set_user_fixed_ip(cfg, "alice", "10.0.0.5");
+    mqvpn_config_add_user(cfg, "bob", "bob-key");
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    /* 10.0.0.5 is reserved for alice — bob cannot take it */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.5"), MQVPN_ERR_POOL_FULL);
+
+    /* Clearing alice's reservation releases the address */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", ""), MQVPN_OK);
+
+    /* Now bob can claim 10.0.0.5 */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.5"), MQVPN_OK);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_user_fixed_ip_api)
+{
+    /* Exercise the runtime set_user_fixed_ip API: set, update, conflict, clear */
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_config_add_user(cfg, "alice", "alice-key");
+    mqvpn_config_add_user(cfg, "bob", "bob-key");
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    /* Assign a fixed IP to alice */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.10"), MQVPN_OK);
+
+    /* Same IP for bob must fail */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.10"), MQVPN_ERR_POOL_FULL);
+
+    /* Update alice to a different IP — old one is freed */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.11"), MQVPN_OK);
+
+    /* Old IP 10.0.0.10 is now free, bob can take it */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.10"), MQVPN_OK);
+
+    /* Clear bob's IP */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", ""), MQVPN_OK);
+
+    /* Error cases */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "carol", "10.0.0.5"),
+              MQVPN_ERR_INVALID_ARG); /* unknown user */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "not-an-ip"),
+              MQVPN_ERR_INVALID_ARG); /* bad IP string */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "192.168.1.5"),
+              MQVPN_ERR_INVALID_ARG); /* outside subnet */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(NULL, "alice", "10.0.0.5"),
+              MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_remove_user_releases_pinned_ip)
+{
+    /* Removing a user with a pinned IP frees that address back to the pool. */
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_config_add_user(cfg, "alice", "alice-key");
+    mqvpn_config_add_user(cfg, "bob", "bob-key");
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.7"), MQVPN_OK);
+
+    /* 10.0.0.7 is reserved — bob can't take it */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.7"), MQVPN_ERR_POOL_FULL);
+
+    /* Removing alice releases her pinned IP */
+    ASSERT_EQ(mqvpn_server_remove_user(s, "alice"), MQVPN_OK);
+
+    /* Now bob can claim 10.0.0.7 */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.7"), MQVPN_OK);
+
+    mqvpn_server_destroy(s);
+}
+
 /* ── max_clients config boundary ── */
 
 TEST(server_max_clients_config)
@@ -1189,6 +1289,11 @@ main(void)
     /* Control API: get_status with and without clients */
     run_server_get_status_no_clients();
     run_server_get_status_with_client();
+
+    /* Fixed (pinned) IP tests */
+    run_server_pinned_ip_preconfig_reserves_pool();
+    run_server_set_user_fixed_ip_api();
+    run_server_remove_user_releases_pinned_ip();
 
     /* max_clients config boundary */
     run_server_max_clients_config();

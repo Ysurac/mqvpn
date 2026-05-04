@@ -333,6 +333,10 @@ MQVPN_API int mqvpn_config_set_auth_username(mqvpn_config_t *cfg, const char *us
 MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
                                     const char *key);
 MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username);
+/* Set a fixed (pinned) IPv4 address for a user. The address is excluded from the
+ * dynamic pool so other clients cannot receive it.  Pass ip="" to clear. */
+MQVPN_API int mqvpn_config_set_user_fixed_ip(mqvpn_config_t *cfg, const char *username,
+                                             const char *ip);
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
@@ -473,6 +477,12 @@ MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server, const char *username
                                     const char *key);
 
 MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server, const char *username);
+
+/* Assign or clear a fixed (pinned) IP for a user at runtime.
+ * The address is reserved in the pool exclusively for this user.
+ * Pass ip="" to remove the fixed IP (address returns to the dynamic pool). */
+MQVPN_API int mqvpn_server_set_user_fixed_ip(mqvpn_server_t *server, const char *username,
+                                             const char *ip);
 
 /* Fill names[0..max-1] with current user names. Returns the count. */
 MQVPN_API int mqvpn_server_list_users(const mqvpn_server_t *server, char names[][64],

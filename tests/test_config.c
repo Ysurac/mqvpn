@@ -928,6 +928,56 @@ test_json_client_config_load(void)
 }
 
 static void
+test_auth_users_ini_with_fixed_ip(void)
+{
+    /* User = name:key:fixed_ip stores the fixed IP alongside the user entry */
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n"
+                      "[Auth]\n"
+                      "User = alice:alice-secret:10.0.0.5\n"
+                      "User = bob:bob-secret\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "fixed IP user ini parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 2, "2 users parsed");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "user[0] name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "alice-secret", "user[0] key");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[0], "10.0.0.5", "user[0] fixed IP");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "user[1] name");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[1], "", "user[1] no fixed IP");
+}
+
+static void
+test_json_users_with_fixed_ip(void)
+{
+    /* JSON object users may include an optional "fixed_ip" field */
+    const char *json = "{"
+                       "\"listen\":\"0.0.0.0:443\","
+                       "\"users\":["
+                       "{\"name\":\"alice\",\"key\":\"a1\",\"fixed_ip\":\"10.0.0.5\"},"
+                       "{\"name\":\"bob\",\"key\":\"b1\"}"
+                       "]}";
+
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json user fixed_ip parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 2, "2 users parsed");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "json user[0] name");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[0], "10.0.0.5", "json user[0] fixed_ip");
+    ASSERT_EQ_STR(cfg.user_names[1], "bob", "json user[1] name");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[1], "", "json user[1] no fixed_ip");
+}
+
+static void
 test_json_duplicate_users_last_wins(void)
 {
     const char *json = "{"
@@ -1386,8 +1436,10 @@ main(void)
     test_subnet6_duplicate_last_wins();
     test_auth_users_ini();
     test_auth_users_ini_plain_name_sets_auth_username();
+    test_auth_users_ini_with_fixed_ip();
     test_json_config_load();
     test_json_client_config_load();
+    test_json_users_with_fixed_ip();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
 

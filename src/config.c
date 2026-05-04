@@ -93,8 +93,8 @@ parse_dns_list(mqvpn_file_config_t *cfg, const char *val)
 }
 
 static void
-add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int lineno,
-               const char *path)
+add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
+               const char *fixed_ip, int lineno, const char *path)
 {
     if (!name || !key || name[0] == '\0' || key[0] == '\0') {
         LOG_WRN("%s:%d: invalid user entry", path, lineno);
@@ -112,6 +112,9 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int 
     for (int i = 0; i < cfg->n_users; i++) {
         if (strcmp(cfg->user_names[i], name) == 0) {
             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
+            if (fixed_ip)
+                snprintf(cfg->user_fixed_ips[i], sizeof(cfg->user_fixed_ips[i]),
+                         "%s", fixed_ip);
             return;
         }
     }
@@ -126,13 +129,16 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key, int 
              name);
     snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]), "%s",
              key);
+    if (fixed_ip)
+        snprintf(cfg->user_fixed_ips[cfg->n_users],
+                 sizeof(cfg->user_fixed_ips[cfg->n_users]), "%s", fixed_ip);
     cfg->n_users++;
 }
 
 static void
 parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const char *path)
 {
-    char pair[360];
+    char pair[384];
     snprintf(pair, sizeof(pair), "%s", val);
     char *sep = strchr(pair, ':');
     if (!sep) {
@@ -148,8 +154,16 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
 
     *sep = '\0';
     char *name = trim(pair);
-    char *key = trim(sep + 1);
-    add_user_entry(cfg, name, key, lineno, path);
+    /* Check for optional third field: username:key:fixed_ip */
+    char *ip_sep = strchr(sep + 1, ':');
+    if (ip_sep) {
+        *ip_sep = '\0';
+        char *key = trim(sep + 1);
+        char *fixed_ip = trim(ip_sep + 1);
+        add_user_entry(cfg, name, key, fixed_ip[0] ? fixed_ip : NULL, lineno, path);
+    } else {
+        add_user_entry(cfg, name, trim(sep + 1), NULL, lineno, path);
+    }
 }
 
 /* json_skip_ws, json_find_key, json_read_string, json_read_bool,
@@ -229,12 +243,24 @@ json_read_users(mqvpn_file_config_t *cfg, const char *p)
             if (json_read_string(name_v, name, sizeof(name)) < 0) return -1;
             if (json_read_string(key_v, key, sizeof(key)) < 0) return -1;
 
+            char fixed_ip[20] = {0};
+            const char *fip_v = json_find_key(obj, "fixed_ip");
+            if (fip_v) json_read_string(fip_v, fixed_ip, sizeof(fixed_ip));
+
             p = json_skip_ws(end + 1);
+
+            add_user_entry(cfg, name, key, fixed_ip[0] ? fixed_ip : NULL, 0, "json");
+
+            if (*p == ',')
+                p = json_skip_ws(p + 1);
+            else if (*p != ']')
+                return -1;
+            continue;
         } else {
             return -1;
         }
 
-        add_user_entry(cfg, name, key, 0, "json");
+        add_user_entry(cfg, name, key, NULL, 0, "json");
 
         if (*p == ',')
             p = json_skip_ws(p + 1);

@@ -368,18 +368,22 @@ main(int argc, char *argv[])
 
     const char *eff_user_names[MQVPN_CONFIG_MAX_USERS];
     const char *eff_user_keys[MQVPN_CONFIG_MAX_USERS];
+    const char *eff_user_fixed_ips[MQVPN_CONFIG_MAX_USERS];
     int eff_n_users = 0;
     if (n_cli_users > 0) {
         eff_n_users = n_cli_users;
         for (int i = 0; i < eff_n_users; i++) {
             eff_user_names[i] = cli_user_names[i];
             eff_user_keys[i] = cli_user_keys[i];
+            eff_user_fixed_ips[i] = NULL; /* CLI users have no fixed IP */
         }
     } else if (file_cfg.n_users > 0) {
         eff_n_users = file_cfg.n_users;
         for (int i = 0; i < eff_n_users; i++) {
             eff_user_names[i] = file_cfg.user_names[i];
             eff_user_keys[i] = file_cfg.user_keys[i];
+            eff_user_fixed_ips[i] = file_cfg.user_fixed_ips[i][0]
+                                        ? file_cfg.user_fixed_ips[i] : NULL;
         }
     }
 
@@ -614,6 +618,7 @@ main(int argc, char *argv[])
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
             cfg.user_keys[i] = eff_user_keys[i];
+            cfg.user_fixed_ips[i] = eff_user_fixed_ips[i];
         }
 #ifdef _WIN32
         return win_platform_run_server(&cfg);

@@ -123,6 +123,16 @@ struct mqvpn_server_s {
         uint32_t offset; /* 0 = unused slot */
     } leases[MQVPN_MAX_USERS];
 
+    /* Pinned IP table: fixed IPs configured per-user.  These offsets are
+     * pre-reserved in the pool at startup and never returned to dynamic
+     * allocation — only the named user may use them. */
+    struct {
+        char username[64];
+        uint32_t offset;
+        struct in_addr ip;
+    } pinned_ips[MQVPN_MAX_USERS];
+    int n_pinned_ips;
+
     /* Backpressure */
     int tun_paused;
     uint64_t tun_drop_cnt;
@@ -478,25 +488,36 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
             if (s->cbs.on_client_disconnected)
                 s->cbs.on_client_disconnected(offset, MQVPN_ERR_CLOSED, s->user_ctx);
         }
-        /* Save lease so the user gets the same IP on reconnect */
-        if (conn->username[0]) {
-            int saved = 0;
-            for (int i = 0; i < MQVPN_MAX_USERS; i++) {
-                if (s->leases[i].offset == 0 ||
-                    strcmp(s->leases[i].username, conn->username) == 0) {
-                    snprintf(s->leases[i].username,
-                             sizeof(s->leases[i].username),
-                             "%s", conn->username);
-                    s->leases[i].offset = offset;
-                    saved = 1;
-                    break;
-                }
+        /* Pinned IPs are permanently reserved — skip lease/release */
+        int is_pinned = 0;
+        for (int i = 0; i < s->n_pinned_ips; i++) {
+            if (s->pinned_ips[i].offset == offset) {
+                is_pinned = 1;
+                break;
             }
-            if (!saved)
-                LOG_W(s, "lease table full, could not save lease for '%s'",
-                      conn->username);
         }
-        mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
+
+        if (!is_pinned) {
+            /* Save lease so the user gets the same IP on reconnect */
+            if (conn->username[0]) {
+                int saved = 0;
+                for (int i = 0; i < MQVPN_MAX_USERS; i++) {
+                    if (s->leases[i].offset == 0 ||
+                        strcmp(s->leases[i].username, conn->username) == 0) {
+                        snprintf(s->leases[i].username,
+                                 sizeof(s->leases[i].username),
+                                 "%s", conn->username);
+                        s->leases[i].offset = offset;
+                        saved = 1;
+                        break;
+                    }
+                }
+                if (!saved)
+                    LOG_W(s, "lease table full, could not save lease for '%s'",
+                          conn->username);
+            }
+            mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
+        }
     }
 
     LOG_I(s, "H3 connection closed");
@@ -563,7 +584,21 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     stream->header_sent = 1;
     conn->masque_stream_id = xqc_h3_stream_id(h3_request);
 
-    /* 2. Allocate client IP — restore previous lease for named users */
+    /* 2. Allocate client IP */
+
+    /* 2a. Fixed (pinned) IP for this user — already reserved in pool */
+    if (conn->username[0]) {
+        for (int i = 0; i < s->n_pinned_ips; i++) {
+            if (strcmp(s->pinned_ips[i].username, conn->username) != 0) continue;
+            conn->assigned_ip = s->pinned_ips[i].ip;
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
+            LOG_I(s, "assigned pinned IP %s for user '%s'", ip_str, conn->username);
+            goto ip_assigned;
+        }
+    }
+
+    /* 2b. Restore previous lease for named users */
     if (conn->username[0]) {
         for (int i = 0; i < MQVPN_MAX_USERS; i++) {
             if (s->leases[i].offset == 0) continue;
@@ -1147,6 +1182,40 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         }
     }
 
+    /* Pre-reserve fixed IPs for users that have one configured */
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (s->config.user_fixed_ips[i][0] == '\0') continue;
+        struct in_addr fixed;
+        if (inet_pton(AF_INET, s->config.user_fixed_ips[i], &fixed) != 1) {
+            LOG_W(s, "invalid fixed IP '%s' for user '%s' — skipping",
+                  s->config.user_fixed_ips[i], s->config.user_names[i]);
+            continue;
+        }
+        uint32_t base_h = ntohl(s->pool.base.s_addr);
+        uint32_t addr_h = ntohl(fixed.s_addr);
+        if (addr_h <= base_h || addr_h - base_h > s->pool.pool_size) {
+            LOG_W(s, "fixed IP '%s' for user '%s' outside subnet — skipping",
+                  s->config.user_fixed_ips[i], s->config.user_names[i]);
+            continue;
+        }
+        uint32_t offset = addr_h - base_h;
+        struct in_addr alloc_out;
+        if (mqvpn_addr_pool_alloc_at(&s->pool, offset, &alloc_out) < 0) {
+            LOG_W(s, "fixed IP '%s' for user '%s' already in use — skipping",
+                  s->config.user_fixed_ips[i], s->config.user_names[i]);
+            continue;
+        }
+        int idx = s->n_pinned_ips;
+        snprintf(s->pinned_ips[idx].username, sizeof(s->pinned_ips[idx].username),
+                 "%s", s->config.user_names[i]);
+        s->pinned_ips[idx].offset = offset;
+        s->pinned_ips[idx].ip = alloc_out;
+        s->n_pinned_ips++;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &alloc_out, ip_str, sizeof(ip_str));
+        LOG_I(s, "pinned IP %s reserved for user '%s'", ip_str, s->config.user_names[i]);
+    }
+
     /* ── xquic engine setup ── */
     xqc_engine_ssl_config_t engine_ssl;
     memset(&engine_ssl, 0, sizeof(engine_ssl));
@@ -1672,13 +1741,36 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
                        sizeof(s->config.user_names[j - 1]));
                 memcpy(s->config.user_keys[j - 1], s->config.user_keys[j],
                        sizeof(s->config.user_keys[j - 1]));
+                memcpy(s->config.user_fixed_ips[j - 1], s->config.user_fixed_ips[j],
+                       sizeof(s->config.user_fixed_ips[j - 1]));
             }
+            memset(s->config.user_fixed_ips[s->config.n_users - 1], 0,
+                   sizeof(s->config.user_fixed_ips[0]));
             s->config.n_users--;
             found = 1;
             break;
         }
     }
     if (!found) return MQVPN_ERR_INVALID_ARG;
+
+    /* Release pinned IP for the removed user if not currently connected */
+    for (int i = 0; i < s->n_pinned_ips; i++) {
+        if (strcmp(s->pinned_ips[i].username, username) != 0) continue;
+        int is_connected = 0;
+        for (int k = 1; k <= MQVPN_ADDR_POOL_MAX; k++) {
+            if (s->sessions[k] && strcmp(s->sessions[k]->username, username) == 0) {
+                is_connected = 1;
+                break;
+            }
+        }
+        if (!is_connected)
+            mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[i].ip);
+        /* Remove from pinned table */
+        for (int j = i + 1; j < s->n_pinned_ips; j++)
+            s->pinned_ips[j - 1] = s->pinned_ips[j];
+        s->n_pinned_ips--;
+        break;
+    }
 
     /* Disconnect active sessions for the removed user */
     for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
@@ -1690,6 +1782,103 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
         }
     }
 
+    return MQVPN_OK;
+}
+
+int
+mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const char *ip)
+{
+    if (!s || !username || !ip || username[0] == '\0') return MQVPN_ERR_INVALID_ARG;
+
+    /* Find user in config */
+    int user_idx = -1;
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (strcmp(s->config.user_names[i], username) == 0) {
+            user_idx = i;
+            break;
+        }
+    }
+    if (user_idx < 0) return MQVPN_ERR_INVALID_ARG;
+
+    /* Find existing pinned entry */
+    int pinned_idx = -1;
+    for (int i = 0; i < s->n_pinned_ips; i++) {
+        if (strcmp(s->pinned_ips[i].username, username) == 0) {
+            pinned_idx = i;
+            break;
+        }
+    }
+
+    /* ip="" — clear fixed IP */
+    if (ip[0] == '\0') {
+        if (pinned_idx >= 0) {
+            int is_connected = 0;
+            for (int k = 1; k <= MQVPN_ADDR_POOL_MAX; k++) {
+                if (s->sessions[k] && strcmp(s->sessions[k]->username, username) == 0) {
+                    is_connected = 1;
+                    break;
+                }
+            }
+            if (!is_connected)
+                mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[pinned_idx].ip);
+            for (int j = pinned_idx + 1; j < s->n_pinned_ips; j++)
+                s->pinned_ips[j - 1] = s->pinned_ips[j];
+            s->n_pinned_ips--;
+        }
+        s->config.user_fixed_ips[user_idx][0] = '\0';
+        return MQVPN_OK;
+    }
+
+    /* Parse new IP */
+    struct in_addr new_ip;
+    if (inet_pton(AF_INET, ip, &new_ip) != 1) return MQVPN_ERR_INVALID_ARG;
+
+    uint32_t base_h = ntohl(s->pool.base.s_addr);
+    uint32_t addr_h = ntohl(new_ip.s_addr);
+    if (addr_h <= base_h || addr_h - base_h > s->pool.pool_size)
+        return MQVPN_ERR_INVALID_ARG;
+    uint32_t new_offset = addr_h - base_h;
+
+    /* Release old pinned IP if not currently in use */
+    if (pinned_idx >= 0) {
+        int is_connected = 0;
+        for (int k = 1; k <= MQVPN_ADDR_POOL_MAX; k++) {
+            if (s->sessions[k] && strcmp(s->sessions[k]->username, username) == 0) {
+                is_connected = 1;
+                break;
+            }
+        }
+        if (!is_connected)
+            mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[pinned_idx].ip);
+        for (int j = pinned_idx + 1; j < s->n_pinned_ips; j++)
+            s->pinned_ips[j - 1] = s->pinned_ips[j];
+        s->n_pinned_ips--;
+        pinned_idx = -1;
+    }
+
+    /* Reserve new IP in pool */
+    struct in_addr alloc_out;
+    if (mqvpn_addr_pool_alloc_at(&s->pool, new_offset, &alloc_out) < 0)
+        return MQVPN_ERR_POOL_FULL;
+
+    if (s->n_pinned_ips >= MQVPN_MAX_USERS) {
+        mqvpn_addr_pool_release(&s->pool, &alloc_out);
+        return MQVPN_ERR_MAX_CLIENTS;
+    }
+
+    int idx = s->n_pinned_ips;
+    snprintf(s->pinned_ips[idx].username, sizeof(s->pinned_ips[idx].username),
+             "%s", username);
+    s->pinned_ips[idx].offset = new_offset;
+    s->pinned_ips[idx].ip = alloc_out;
+    s->n_pinned_ips++;
+
+    snprintf(s->config.user_fixed_ips[user_idx],
+             sizeof(s->config.user_fixed_ips[user_idx]), "%s", ip);
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &alloc_out, ip_str, sizeof(ip_str));
+    LOG_I(s, "pinned IP %s set for user '%s'", ip_str, username);
     return MQVPN_OK;
 }
 

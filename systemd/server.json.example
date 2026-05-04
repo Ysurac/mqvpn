@@ -11,6 +11,7 @@
   "auth_key": "<YOUR_PSK_HERE>",
   "users": [
     { "name": "alice", "key": "<ALICE_PSK_HERE>" },
+    { "name": "carol", "key": "<CAROL_PSK_HERE>", "fixed_ip": "10.0.0.50" },
     "bob:<BOB_PSK_HERE>"
   ],
   "max_clients": 64,

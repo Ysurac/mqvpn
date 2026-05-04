@@ -101,7 +101,24 @@ json_read_users(mqvpn_config_t *cfg, const char *p)
                 return MQVPN_ERR_INVALID_ARG;
             }
 
+            char fixed_ip[20] = {0};
+            const char *fip_val = json_find_key(obj, "fixed_ip");
+            if (fip_val)
+                json_read_string(fip_val, fixed_ip, sizeof(fixed_ip));
+
             p = json_skip_ws(obj_end + 1);
+
+            if (mqvpn_config_add_user(cfg, uname, key) != MQVPN_OK)
+                return MQVPN_ERR_INVALID_ARG;
+            if (fixed_ip[0] &&
+                mqvpn_config_set_user_fixed_ip(cfg, uname, fixed_ip) != MQVPN_OK)
+                return MQVPN_ERR_INVALID_ARG;
+
+            if (*p == ',')
+                p = json_skip_ws(p + 1);
+            else if (*p != ']')
+                return MQVPN_ERR_INVALID_ARG;
+            continue;
         } else {
             return MQVPN_ERR_INVALID_ARG;
         }
@@ -226,6 +243,8 @@ mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
                        sizeof(cfg->user_names[j - 1]));
                 memcpy(cfg->user_keys[j - 1], cfg->user_keys[j],
                        sizeof(cfg->user_keys[j - 1]));
+                memcpy(cfg->user_fixed_ips[j - 1], cfg->user_fixed_ips[j],
+                       sizeof(cfg->user_fixed_ips[j - 1]));
             }
             cfg->n_users--;
             return MQVPN_OK;
@@ -233,6 +252,21 @@ mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
     }
 
     return MQVPN_ERR_INVALID_ARG;
+}
+
+int
+mqvpn_config_set_user_fixed_ip(mqvpn_config_t *cfg, const char *username, const char *ip)
+{
+    if (!cfg || !username || !ip || username[0] == '\0') return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 0; i < cfg->n_users; i++) {
+        if (strcmp(cfg->user_names[i], username) == 0) {
+            snprintf(cfg->user_fixed_ips[i], sizeof(cfg->user_fixed_ips[i]), "%s", ip);
+            return MQVPN_OK;
+        }
+    }
+
+    return MQVPN_ERR_INVALID_ARG; /* user not found */
 }
 
 int

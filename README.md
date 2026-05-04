@@ -113,6 +113,7 @@ Key = /etc/mqvpn/server.key       # TLS private key (PEM file)
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=   # PSK example (mqvpn --genkey)
 User = alice:alice-secret
 User = bob:bob-secret
+User = carol:carol-secret:10.0.0.50   # fixed IP — always assigned this address
 
 [Multipath]
 Scheduler = wlb
@@ -120,6 +121,7 @@ Scheduler = wlb
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
+# CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited (default: bbr2)
 
 [Control]
 # Port = 9090          # enable JSON control API on this TCP port
@@ -149,6 +151,7 @@ Scheduler = wlb
 # ReinjectionMode = deadline  # default|deadline|dgram
 # FecEnable = true
 # FecScheme = xor             # galois_calculation|packet_mask|reed_solomon|xor
+# CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited (default: bbr2)
 Path = eth0
 Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
@@ -176,10 +179,12 @@ Server example:
     "auth_key": "legacy-fallback-key",
     "users": [
         { "name": "alice", "key": "alice-secret" },
+        { "name": "carol", "key": "carol-secret", "fixed_ip": "10.0.0.50" },
         "bob:bob-secret"
     ],
     "max_clients": 64,
     "scheduler": "wlb",
+    "cc": "bbr2",
     "fec_enable": true,
     "fec_scheme": "reed_solomon",
     "control_port": 9090,
@@ -206,6 +211,7 @@ Client example:
     "route_via_server": false,
     "no_routes": false,
     "scheduler": "wlb",
+    "cc": "bbr2",
     "reinjection_control": true,
     "reinjection_mode": "deadline",
     "fec_enable": true,
@@ -216,7 +222,8 @@ Client example:
 ```
 
 Notes:
-- `users` is server-side auth and accepts either objects (`{"name","key"}`) or `"name:key"` strings.
+- `users` is server-side auth and accepts either objects (`{"name","key"}` or `{"name","key","fixed_ip"}`) or `"name:key"` strings.
+- A `fixed_ip` in a user object pins that IPv4 address to the user. The address is removed from the dynamic pool at startup and never assigned to other clients. The INI equivalent is `User = name:key:fixed_ip`.
 - `auth_key` remains supported as a single legacy/global key.
 - `auth_username` is client-side only: the name sent to the server for identification in logs and status output. It does not affect authentication.
 - `mode` is optional if it can be inferred (`listen` implies server).
@@ -276,6 +283,29 @@ echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 909
 ```
 
 Calling `add_user` with an existing name updates the key in place.
+
+To add a user with a fixed (pinned) IP that is permanently reserved for that user:
+
+```bash
+echo '{"cmd":"add_user","name":"carol","key":"carol-secret","fixed_ip":"10.0.0.50"}' | nc 127.0.0.1 9090
+```
+
+#### Set or clear a fixed IP for a user
+
+Assign a fixed IP to an existing user at runtime. The address is removed from the dynamic pool and reserved exclusively for that user from the next connection onward.
+
+```bash
+echo '{"cmd":"set_user_fixed_ip","name":"carol","fixed_ip":"10.0.0.50"}' | nc 127.0.0.1 9090
+```
+```json
+{"ok":true}
+```
+
+Pass `"fixed_ip":""` to remove the reservation and return the address to the dynamic pool:
+
+```bash
+echo '{"cmd":"set_user_fixed_ip","name":"carol","fixed_ip":""}' | nc 127.0.0.1 9090
+```
 
 #### Remove a user
 
@@ -357,9 +387,12 @@ def ctrl(port, cmd):
         s.sendall((json.dumps(cmd) + "\n").encode())
         return json.loads(s.makefile().readline())
 
-ctrl(9090, {"cmd": "add_user",    "name": "dave", "key": "dave-secret"})
-ctrl(9090, {"cmd": "remove_user", "name": "dave"})
-print(ctrl(9090, {"cmd": "list_users"}))   # {'ok': True, 'users': ['alice', 'bob']}
+ctrl(9090, {"cmd": "add_user",          "name": "dave", "key": "dave-secret"})
+ctrl(9090, {"cmd": "add_user",          "name": "eve",  "key": "eve-secret", "fixed_ip": "10.0.0.50"})
+ctrl(9090, {"cmd": "set_user_fixed_ip", "name": "dave", "fixed_ip": "10.0.0.51"})
+ctrl(9090, {"cmd": "set_user_fixed_ip", "name": "dave", "fixed_ip": ""})  # clear
+ctrl(9090, {"cmd": "remove_user",       "name": "dave"})
+print(ctrl(9090, {"cmd": "list_users"}))   # {'ok': True, 'users': ['alice', 'bob', 'eve']}
 print(ctrl(9090, {"cmd": "get_stats"}))    # {'ok': True, 'n_clients': 1, ...}
 ```
 
@@ -480,6 +513,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
     --scheduler minrtt|wlb|backup|backup_fec|rap Multipath scheduler (default: wlb)
+    --cc bbr2|bbr|cubic|new_reno|copa|unlimited Congestion control (default: bbr2)
     --reinjection-control  Enable multipath reinjection control
     --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)
     --fec-enable          Enable FEC

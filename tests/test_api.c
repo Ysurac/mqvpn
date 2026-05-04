@@ -128,6 +128,59 @@ TEST(config_add_remove_user)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_user_fixed_ip)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "alice-key"), MQVPN_OK);
+
+    /* Basic set */
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "alice", "10.0.0.5"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->user_fixed_ips[0], "10.0.0.5");
+
+    /* Update to a different IP */
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "alice", "10.0.0.20"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->user_fixed_ips[0], "10.0.0.20");
+
+    /* Clear by setting empty string */
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "alice", ""), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->user_fixed_ips[0], "");
+
+    /* Unknown user returns error */
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "carol", "10.0.0.5"), MQVPN_ERR_INVALID_ARG);
+
+    /* NULL args */
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(NULL, "alice", "10.0.0.5"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, NULL, "10.0.0.5"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "alice", NULL), MQVPN_ERR_INVALID_ARG);
+
+    /* Fixed IP survives remove_user shifting */
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "bob-key"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "bob", "10.0.0.10"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "alice"), MQVPN_OK);
+    ASSERT_EQ(cfg->n_users, 1);
+    ASSERT_STR_EQ(cfg->user_names[0], "bob");
+    ASSERT_STR_EQ(cfg->user_fixed_ips[0], "10.0.0.10");
+
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_load_json_user_with_fixed_ip)
+{
+    const char *json = "{"
+                       "\"users\":["
+                       "{\"name\":\"alice\",\"key\":\"a1\",\"fixed_ip\":\"10.0.0.5\"},"
+                       "{\"name\":\"bob\",\"key\":\"b1\"}"
+                       "]}";
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
+    ASSERT_EQ(cfg->n_users, 2);
+    ASSERT_STR_EQ(cfg->user_names[0], "alice");
+    ASSERT_STR_EQ(cfg->user_fixed_ips[0], "10.0.0.5");
+    ASSERT_STR_EQ(cfg->user_names[1], "bob");
+    ASSERT_STR_EQ(cfg->user_fixed_ips[1], "");
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_add_user_max_capacity)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -1308,6 +1361,8 @@ main(void)
     run_config_set_server();
     run_config_set_auth_key();
     run_config_add_remove_user();
+    run_config_set_user_fixed_ip();
+    run_config_load_json_user_with_fixed_ip();
     run_config_add_user_max_capacity();
     run_config_load_json();
     run_config_load_json_duplicate_users_last_wins();

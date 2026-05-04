@@ -76,18 +76,40 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
 
     if (strcmp(cmd, "add_user") == 0) {
-        char name[64] = {0}, key[256] = {0};
+        char name[64] = {0}, key[256] = {0}, fixed_ip[20] = {0};
         const char *nv = json_find_key(req, "name");
         const char *kv = json_find_key(req, "key");
         if (!nv || json_read_string(nv, name, sizeof(name)) < 0 || !kv ||
             json_read_string(kv, key, sizeof(key)) < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"name and key required\"}");
+        const char *fv = json_find_key(req, "fixed_ip");
+        if (fv) json_read_string(fv, fixed_ip, sizeof(fixed_ip));
 
         int rc = mqvpn_server_add_user(server, name, key);
         if (rc != MQVPN_OK)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"add_user failed (%d)\"}", rc);
+        if (fixed_ip[0]) {
+            rc = mqvpn_server_set_user_fixed_ip(server, name, fixed_ip);
+            if (rc != MQVPN_OK)
+                return snprintf(resp, resp_len,
+                                "{\"ok\":false,\"error\":\"fixed_ip invalid or unavailable\"}");
+        }
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+
+    } else if (strcmp(cmd, "set_user_fixed_ip") == 0) {
+        char name[64] = {0}, fixed_ip[20] = {0};
+        const char *nv = json_find_key(req, "name");
+        const char *fv = json_find_key(req, "fixed_ip");
+        if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
+        if (fv) json_read_string(fv, fixed_ip, sizeof(fixed_ip));
+
+        int rc = mqvpn_server_set_user_fixed_ip(server, name, fixed_ip);
+        if (rc != MQVPN_OK)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"set_user_fixed_ip failed (%d)\"}", rc);
         return snprintf(resp, resp_len, "{\"ok\":true}");
 
     } else if (strcmp(cmd, "remove_user") == 0) {

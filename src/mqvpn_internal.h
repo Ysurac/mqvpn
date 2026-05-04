@@ -22,6 +22,7 @@ struct mqvpn_config_s {
     char auth_username[64]; /* client-only: name to send in x-user header */
     char user_names[MQVPN_MAX_USERS][64];
     char user_keys[MQVPN_MAX_USERS][256];
+    char user_fixed_ips[MQVPN_MAX_USERS][20]; /* "" = dynamic, "x.x.x.x" = pinned */
     int n_users;
     int insecure;
 
