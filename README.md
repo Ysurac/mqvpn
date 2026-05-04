@@ -386,7 +386,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
 - [x] Per-client token auth
 - [x] resolvectl DNS support (with resolv.conf fallback)
-- [ ] v0.4.0 — Experimental backup_fec scheduler, Windows client, server control API support
+- [x] v0.4.0 — Experimental backup_fec scheduler, Windows client, server control API support
 - [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
 - [ ] Interop testing (masque-go, QUICHE)
