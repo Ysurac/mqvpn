@@ -36,6 +36,10 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 ```
 
 Uninstall: re-run the install script with `--uninstall`.
+```bash
+curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
+    | sudo bash -s -- --uninstall
+```
 
 ### Client (deb package)
 
@@ -66,7 +70,7 @@ sudo mqvpn --mode client --server YOUR_SERVER:443 \
 ```
 
 > **Notes:**
-> - Without `--path`, the client uses the default interface (single path). Multipath requires two or more `--path` flags.
+> - On Linux, without `--path`, the client uses the default interface (single path); multipath requires two or more `--path` flags. On Windows, `--path` is always required (one or more); see `docs/windows_build.md`.
 > - The server needs its listen port open for UDP (default: 443). All client traffic is routed through the tunnel.
 
 ## Configuration
