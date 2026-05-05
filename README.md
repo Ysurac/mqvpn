@@ -51,6 +51,10 @@ curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_
 sudo dpkg -i mqvpn_*.deb
 ```
 
+### Windows client
+
+Pre-built binaries are shipped for Windows amd64 and arm64. Download `mqvpn_<VERSION>_windows_<ARCH>.zip` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), extract, and follow the bundled `README.txt` (admin PowerShell required).
+
 ## Quick Start
 
 After installing the server and client (see [Installation](#installation)):
