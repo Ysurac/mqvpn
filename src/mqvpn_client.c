@@ -162,6 +162,9 @@ struct mqvpn_client_s {
     int n_paths;
     int64_t next_path_handle;
     int multipath_ready; /* 1 after cb_ready_to_create_path */
+    /* Path index used for the QUIC handshake. Rotated on each reconnect so a
+     * dead first path doesn't trap the client forever. */
+    int primary_path_idx;
 
     /* Reconnect */
     int reconnect_attempts;
@@ -384,13 +387,77 @@ mqvpn_client_first_active_fd(const mqvpn_client_t *c)
     return idx >= 0 ? c->paths[idx].fd : -1;
 }
 
-/* Get fd for xquic path_id, falling back to the first active slot. */
+/* Get fd for xquic path_id, falling back to the (rotated) primary slot if
+ * still active, else to the first active slot.
+ *
+ * Two requirements compose here:
+ *   - The handshake fallback must use `primary_path_idx` (rotation owner)
+ *     so a dead first-configured path doesn't trap reconnect (issue #46).
+ *   - After multipath setup, if the primary was dropped mid-session we
+ *     must NOT hand back its stale fd — fall through to any active sibling
+ *     (post-OMR-backport semantics protecting against EBADF / sendto-on-
+ *     dead-iface).
+ */
 static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
     if (p) return p->fd;
+    int pidx = c->primary_path_idx;
+    if (pidx < c->n_paths && c->paths[pidx].active) return c->paths[pidx].fd;
     return mqvpn_client_first_active_fd(c);
+}
+
+/* Pick the next active path index for the next handshake attempt.
+ * Skips paths that the platform has marked inactive or the library has
+ * already closed. Returns the input index if no other candidate exists. */
+static int
+client_next_primary_idx(const mqvpn_client_t *c, int from_idx)
+{
+    if (c->n_paths <= 0) return 0;
+    int start = (from_idx + 1) % c->n_paths;
+    int i = start;
+    do {
+        const path_entry_t *p = &c->paths[i];
+        if (p->active && p->status != MQVPN_PATH_CLOSED) return i;
+        i = (i + 1) % c->n_paths;
+    } while (i != start);
+    return from_idx;
+}
+
+/* Test-only wrappers: expose primary-rotation internals so test_api can
+ * lock in the issue #46 + OMR-backport composite fallback semantics
+ * without driving xquic.  Hidden from libmqvpn.so's dynamic export
+ * table (not part of public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx)
+{
+    if (!c) return -1;
+    c->primary_path_idx = idx;
+    return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
+{
+    if (!c) return -1;
+    return get_fd_for_path(c, xqc_path_id);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
+{
+    if (!c) return -1;
+    return client_next_primary_idx(c, from_idx);
 }
 
 /* ─── ICMP PTB rate limiter ─── */
@@ -457,6 +524,9 @@ client_reset_paths_for_reconnect(mqvpn_client_t *c)
     for (int i = 0; i < c->n_paths; i++) {
         client_reset_path_runtime(&c->paths[i]);
     }
+    /* Try the next configured path next time so a dead first path
+     * (e.g. interface up but no upstream connectivity) doesn't trap us. */
+    c->primary_path_idx = client_next_primary_idx(c, c->primary_path_idx);
 }
 
 static int
@@ -533,11 +603,17 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
-    /* Pick the first still-active slot.  A naive `paths[0].fd` fallback
-     * would hand back the fd of a path that was just dropped (the
-     * platform may have already closed the descriptor or moved it onto a
-     * doomed interface). */
-    int active_idx = first_active_idx(c);
+    /* Prefer the rotated handshake primary (issue #46); fall back to any
+     * still-active slot if the primary was dropped mid-session. Without
+     * primary preference, handshake on a non-paths[0] primary would silently
+     * sendto via paths[0].fd. Without first-active fallback, a dropped
+     * primary mid-session would sendto via a dead fd / EBADF. */
+    int active_idx = -1;
+    int pidx = c->primary_path_idx;
+    if (pidx < c->n_paths && c->paths[pidx].active)
+        active_idx = pidx;
+    else
+        active_idx = first_active_idx(c);
     int fd = (active_idx >= 0) ? c->paths[active_idx].fd : -1;
     if (fd < 0) return XQC_SOCKET_ERROR;
 
@@ -912,10 +988,12 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             }
 
             /* Primary path is now active */
-            if (c->n_paths > 0 && c->paths[0].active) {
-                c->paths[0].status = MQVPN_PATH_ACTIVE;
+            int pidx = c->primary_path_idx;
+            if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].active) {
+                c->paths[pidx].status = MQVPN_PATH_ACTIVE;
                 if (c->cbs.path_event)
-                    c->cbs.path_event(c->paths[0].handle, MQVPN_PATH_ACTIVE, c->user_ctx);
+                    c->cbs.path_event(c->paths[pidx].handle, MQVPN_PATH_ACTIVE,
+                                      c->user_ctx);
             }
 
             client_set_state(c, MQVPN_STATE_TUNNEL_READY);
@@ -1127,7 +1205,9 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     c->multipath_ready = 1;
     if (!c->config.multipath) return;
 
-    for (int i = 1; i < c->n_paths; i++) {
+    /* Start from 0 — the primary path may be at any index after rotation;
+     * the in_use check below skips whichever slot is already in use. */
+    for (int i = 0; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
         if (p->in_use || !p->active) continue;
         client_activate_path(c, p, i);
@@ -1359,9 +1439,9 @@ cli_start_connection(mqvpn_client_t *c)
     if (conn->h3_conn) xqc_h3_ext_datagram_set_user_data(conn->h3_conn, conn);
 
     /* Mark primary path */
-    if (c->n_paths > 0) {
-        c->paths[0].xqc_path_id = 0;
-        c->paths[0].in_use = 1;
+    if (c->n_paths > 0 && c->primary_path_idx < c->n_paths) {
+        c->paths[c->primary_path_idx].xqc_path_id = 0;
+        c->paths[c->primary_path_idx].in_use = 1;
     }
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
