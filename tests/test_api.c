@@ -377,6 +377,10 @@ static int g_state_change_count = 0;
 static mqvpn_client_state_t g_last_old_state;
 static mqvpn_client_state_t g_last_new_state;
 
+static int g_path_event_count = 0;
+static mqvpn_path_handle_t g_last_path_event_handle;
+static mqvpn_path_status_t g_last_path_event_status;
+
 static void
 dummy_tun_output(const uint8_t *p, size_t l, void *u)
 {
@@ -398,6 +402,14 @@ mock_state_changed(mqvpn_client_state_t old_s, mqvpn_client_state_t new_s, void 
     g_last_old_state = old_s;
     g_last_new_state = new_s;
 }
+static void
+mock_path_event(mqvpn_path_handle_t h, mqvpn_path_status_t s, void *u)
+{
+    (void)u;
+    g_path_event_count++;
+    g_last_path_event_handle = h;
+    g_last_path_event_status = s;
+}
 
 /* Helper: create a valid client for lifecycle tests */
 static mqvpn_client_t *
@@ -410,6 +422,7 @@ make_test_client(void)
     cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
     cbs.state_changed = mock_state_changed;
+    cbs.path_event = mock_path_event;
 
     mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
     mqvpn_config_free(cfg);
@@ -850,6 +863,246 @@ TEST(drop_path_double_drop)
     mqvpn_client_destroy(c);
 }
 
+/* Internal accessor — used to verify the active-path fallback that
+ * cb_write_socket / get_fd_for_path rely on when the current primary
+ * slot has been dropped. */
+extern int mqvpn_client_first_active_fd(const mqvpn_client_t *c);
+
+TEST(first_active_fd_with_no_paths_is_minus_one)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), -1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(first_active_fd_returns_only_path)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), 10);
+    mqvpn_client_destroy(c);
+}
+
+TEST(first_active_fd_skips_dropped_primary)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    /* Two healthy paths */
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_desc_t d1 = {0};
+    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    /* Sanity: before drop, slot 0 is the answer */
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), 10);
+
+    /* Drop the primary — its fd becomes stale.  The fallback must skip
+     * it and return the still-active slot's fd, NOT paths[0].fd. */
+    ASSERT_EQ(mqvpn_client_drop_path(c, h0), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_first_active_fd(c), 11);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Internal helper — drives the state transition that client_activate_path()
+ * applies when xqc_conn_create_path() fails synchronously.  Without this
+ * the path stays in PENDING forever and tick_recover_degraded_path() never
+ * picks it up (issue #4271 Bug 1, ysurac/mqvpn 86c275c).
+ *
+ * Returns 0 on success, -1 if handle is not found. */
+extern int mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle,
+                                                      uint64_t now_us);
+
+TEST(activation_failure_first_retry_marks_degraded)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Sanity: freshly added paths are PENDING. */
+    mqvpn_path_info_t info[2];
+    int n = 0;
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
+
+    /* Synthesise a synchronous activation failure. */
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+
+    /* Path must transition to DEGRADED so tick_recover_degraded_path()
+     * can retry it; otherwise it would be stuck in PENDING forever. */
+    mqvpn_client_get_paths(c, info, 2, &n);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_DEGRADED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(activation_failure_invalid_handle_returns_error)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, 99999, 0), -1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(activation_failure_eventually_closes_path)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Hammer the failure path until the retry budget is exhausted.  We
+     * don't want the test to encode the exact PATH_RECREATE_MAX_RETRIES
+     * value, so we call enough times to overshoot any reasonable cap. */
+    mqvpn_path_info_t info[2];
+    int n = 0;
+    int closed = 0;
+    for (int i = 0; i < 32; i++) {
+        ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+        mqvpn_client_get_paths(c, info, 2, &n);
+        ASSERT_EQ(n, 1);
+        if (info[0].status == MQVPN_PATH_CLOSED) {
+            closed = 1;
+            break;
+        }
+        ASSERT_EQ(info[0].status, MQVPN_PATH_DEGRADED);
+    }
+    if (!closed) {
+        printf("FAIL\n    %s:%d: path never reached CLOSED after 32 failures\n", __FILE__,
+               __LINE__);
+        exit(1);
+    }
+
+    mqvpn_client_destroy(c);
+}
+
+/* ── path_event close-out semantics ──
+ *
+ * remove_path / drop_path transition a non-CLOSED slot to CLOSED. The
+ * path_event callback must fire so observers (Android SDK / control-plane
+ * API) see the handle's lifecycle terminate. Without this, a slot rolled
+ * back from PENDING/DEGRADED leaves the observer with a dangling handle. */
+
+TEST(remove_path_emits_closed_event_when_active)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Reset counter to ignore any setup-side events from add_path_fd. */
+    g_path_event_count = 0;
+
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(remove_path_does_not_emit_when_already_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* First remove transitions PENDING → CLOSED; event fires (verified
+     * separately). */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+
+    /* Second remove on already-CLOSED path must be a path_event no-op so
+     * observers don't see redundant CLOSED events. */
+    g_path_event_count = 0;
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+    ASSERT_EQ(g_path_event_count, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(drop_path_emits_closed_event_when_active)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    g_path_event_count = 0;
+
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(drop_path_does_not_emit_when_already_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+
+    g_path_event_count = 0;
+    ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
+    ASSERT_EQ(g_path_event_count, 0);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Reproduce the try_readd_removed_path rollback flow at unit level: a
+ * synchronously-failed activation transitions the slot PENDING → DEGRADED
+ * (firing path_event(DEGRADED)), and the platform's subsequent rollback
+ * via remove_path must close it out with path_event(CLOSED). Without the
+ * close-out emission, observers (Android SDK / control-plane) would see
+ * the handle stuck at DEGRADED forever, since the next re-add allocates
+ * a fresh next_path_handle++. */
+TEST(rollback_after_activation_failure_emits_degraded_then_closed)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t desc = {0};
+    snprintf(desc.iface, sizeof(desc.iface), "eth0");
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, &desc);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Reset counter to ignore any setup-side events. */
+    g_path_event_count = 0;
+
+    /* Step 1: synchronous activation failure transitions PENDING → DEGRADED. */
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+    ASSERT_EQ(g_path_event_count, 1);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_DEGRADED);
+
+    /* Step 2: platform rolls back by calling remove_path on the DEGRADED
+     * slot. This must emit the close-out event. */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
+    ASSERT_EQ(g_path_event_count, 2);
+    ASSERT_EQ(g_last_path_event_handle, h);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -969,6 +1222,19 @@ main(void)
     run_drop_path_invalid_handle();
     run_drop_path_sets_closed();
     run_drop_path_double_drop();
+    run_first_active_fd_with_no_paths_is_minus_one();
+    run_first_active_fd_returns_only_path();
+    run_first_active_fd_skips_dropped_primary();
+    run_activation_failure_first_retry_marks_degraded();
+    run_activation_failure_invalid_handle_returns_error();
+    run_activation_failure_eventually_closes_path();
+
+    /* path_event close-out semantics */
+    run_remove_path_emits_closed_event_when_active();
+    run_remove_path_does_not_emit_when_already_closed();
+    run_drop_path_emits_closed_event_when_active();
+    run_drop_path_does_not_emit_when_already_closed();
+    run_rollback_after_activation_failure_emits_degraded_then_closed();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
