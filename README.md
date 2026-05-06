@@ -189,8 +189,33 @@ A running server can be managed at runtime over a TCP port using newline-delimit
 
 ### Enable
 
+The control API is **disabled by default**. Enable it via any of the following:
+
+#### From `install.sh`
+
 ```bash
-# CLI
+sudo bash install.sh --enable-control            # port 9090
+sudo bash install.sh --enable-control 9091
+```
+
+#### From INI (`/etc/mqvpn/server.conf`)
+
+```ini
+[Control]
+Listen = 127.0.0.1:9090
+```
+
+#### From JSON (`/etc/mqvpn/server.json`)
+
+```json
+{
+  "control_listen": "127.0.0.1:9090"
+}
+```
+
+#### From CLI (per-field override of the config file)
+
+```bash
 sudo mqvpn --mode server ... --control-port 9090
 
 # Bind to a specific address (default: 127.0.0.1)

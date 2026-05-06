@@ -1008,6 +1008,198 @@ test_value_contains_equals(void)
     unlink(f);
 }
 
+static void
+test_parse_control_section(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n"
+                      "\n"
+                      "[Control]\n"
+                      "Listen = 127.0.0.1:9090\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "[Control] parse ok");
+    ASSERT_EQ_STR(cfg.control_listen, "127.0.0.1:9090", "control_listen");
+}
+
+static void
+test_parse_control_absent(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "no [Control] is ok");
+    ASSERT_EQ_STR(cfg.control_listen, "", "control_listen empty when section absent");
+}
+
+static void
+test_parse_control_json(void)
+{
+    const char *json = "{ \"mode\": \"server\","
+                       "  \"listen\": \"0.0.0.0:443\","
+                       "  \"control_listen\": \"1.2.3.4:9091\" }";
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "JSON control_listen parse ok");
+    ASSERT_EQ_STR(cfg.control_listen, "1.2.3.4:9091", "JSON control_listen");
+}
+
+static void
+test_parse_control_unknown_key(void)
+{
+    const char *ini = "[Interface]\n"
+                      "Listen = 0.0.0.0:443\n"
+                      "\n"
+                      "[Control]\n"
+                      "Foo = bar\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "[Control] unknown key is non-fatal");
+    ASSERT_EQ_STR(cfg.control_listen, "", "control_listen unchanged on unknown key");
+}
+
+/* ================================================================
+ *  mqvpn_resolve_control_endpoint helper tests (per-field merge)
+ * ================================================================ */
+
+static void
+test_resolve_ini_only(void)
+{
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = 0;
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1:9090", /* file_listen */
+                                            NULL,             /* cli_addr */
+                                            0, 0,             /* cli_port, cli_port_set */
+                                            buf, sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, 0, "resolve INI only ok");
+    ASSERT_EQ_INT(out_port, 9090, "INI port");
+    ASSERT_TRUE(out_addr != NULL && strcmp(out_addr, "127.0.0.1") == 0, "INI addr");
+}
+
+static void
+test_resolve_cli_port_overrides(void)
+{
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = 0;
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1:9090", NULL, 9091, 1, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, 0, "resolve CLI port override ok");
+    ASSERT_EQ_INT(out_port, 9091, "CLI port wins");
+    ASSERT_TRUE(out_addr != NULL && strcmp(out_addr, "127.0.0.1") == 0,
+                "INI addr preserved");
+}
+
+static void
+test_resolve_cli_addr_overrides(void)
+{
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = 0;
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1:9090", "0.0.0.0", 0, 0, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, 0, "resolve CLI addr override ok");
+    ASSERT_EQ_INT(out_port, 9090, "INI port preserved");
+    ASSERT_TRUE(out_addr != NULL && strcmp(out_addr, "0.0.0.0") == 0, "CLI addr wins");
+}
+
+static void
+test_resolve_explicit_disable(void)
+{
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1:9090", NULL, 0,
+                                            1, /* cli_port=0, cli_port_set=1 */
+                                            buf, sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, 0, "resolve explicit disable ok");
+    ASSERT_EQ_INT(out_port, 0, "--control-port 0 disables even when INI is set");
+}
+
+static void
+test_resolve_no_input(void)
+{
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+    int rc = mqvpn_resolve_control_endpoint("", NULL, 0, 0, buf, sizeof(buf), &out_addr,
+                                            &out_port);
+    ASSERT_EQ_INT(rc, 0, "resolve no input ok");
+    ASSERT_EQ_INT(out_port, 0, "disabled when no INI and no CLI");
+    ASSERT_TRUE(out_addr == NULL, "addr stays NULL when no input");
+}
+
+static void
+test_resolve_malformed_ini(void)
+{
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+    int rc = mqvpn_resolve_control_endpoint("not_a_host_port", NULL, 0, 0, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "malformed INI returns -1");
+}
+
+static void
+test_resolve_trailing_garbage_port(void)
+{
+    /* "9090garbage" must NOT silently parse as 9090 — strtol contract. */
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1:9090garbage", NULL, 0, 0, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "trailing garbage in port returns -1");
+
+    /* Same for IPv6 bracket form. */
+    rc = mqvpn_resolve_control_endpoint("[::1]:9090garbage", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "trailing garbage in v6 port returns -1");
+}
+
+static void
+test_resolve_port_leading_junk(void)
+{
+    /* Port must be a bare unsigned decimal — no leading whitespace, no sign. */
+    char buf[256] = {0};
+    const char *out_addr = NULL;
+    int out_port = -1;
+
+    int rc = mqvpn_resolve_control_endpoint("127.0.0.1: 9090", NULL, 0, 0, buf,
+                                            sizeof(buf), &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "leading whitespace in port returns -1");
+
+    rc = mqvpn_resolve_control_endpoint("127.0.0.1:+9090", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "leading + sign in port returns -1");
+
+    rc = mqvpn_resolve_control_endpoint("127.0.0.1:-9090", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "leading - sign in port returns -1");
+
+    rc = mqvpn_resolve_control_endpoint("127.0.0.1:", NULL, 0, 0, buf, sizeof(buf),
+                                        &out_addr, &out_port);
+    ASSERT_EQ_INT(rc, -1, "empty port returns -1");
+}
+
 int
 main(void)
 {
@@ -1065,6 +1257,22 @@ main(void)
     test_dns_exceeds_max();
     test_reconnect_interval_overflow();
     test_value_contains_equals();
+
+    /* [Control] section tests */
+    test_parse_control_section();
+    test_parse_control_absent();
+    test_parse_control_json();
+    test_parse_control_unknown_key();
+
+    /* mqvpn_resolve_control_endpoint helper tests */
+    test_resolve_ini_only();
+    test_resolve_cli_port_overrides();
+    test_resolve_cli_addr_overrides();
+    test_resolve_explicit_disable();
+    test_resolve_no_input();
+    test_resolve_malformed_ini();
+    test_resolve_trailing_garbage_port();
+    test_resolve_port_leading_junk();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

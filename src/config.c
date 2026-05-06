@@ -46,6 +46,7 @@ enum {
     SEC_TLS,
     SEC_AUTH,
     SEC_MULTIPATH,
+    SEC_CONTROL,
 };
 
 static int
@@ -56,6 +57,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "TLS") == 0) return SEC_TLS;
     if (strcasecmp(name, "Auth") == 0) return SEC_AUTH;
     if (strcasecmp(name, "Multipath") == 0) return SEC_MULTIPATH;
+    if (strcasecmp(name, "Control") == 0) return SEC_CONTROL;
     return -1;
 }
 
@@ -322,6 +324,14 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         }
         break;
 
+    case SEC_CONTROL:
+        if (strcasecmp(key, "Listen") == 0) {
+            snprintf(cfg->control_listen, sizeof(cfg->control_listen), "%s", val);
+        } else {
+            LOG_WRN("%s:%d: unknown key '%s' in [Control]", path, lineno, key);
+        }
+        break;
+
     default: LOG_WRN("%s:%d: key '%s' outside any section", path, lineno, key); break;
     }
 }
@@ -404,6 +414,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "kill_switch");
     if (v && json_read_bool(v, &iv) == 0) cfg->kill_switch = iv;
 
+    v = json_find_key(json_text, "control_listen");
+    if (v && json_read_string(v, s280, sizeof(s280)) == 0)
+        mqvpn_copy_str(cfg->control_listen, sizeof(cfg->control_listen), s280);
+
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;
     v = json_find_key(json_text, "dns");
@@ -430,6 +444,68 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "users");
     if (v && json_read_users(cfg, v) < 0) return -1;
+
+    return 0;
+}
+
+/* Split "host:port" or "[host]:port" (IPv6 bracket form). Pure — no I/O.
+ * Returns 0 on success, -1 on malformed input.
+ */
+static int
+split_addr_port(const char *str, char *host, size_t host_len, int *port)
+{
+    if (!str || !host || !port || host_len == 0) return -1;
+    const char *port_start;
+    if (str[0] == '[') {
+        const char *close = strchr(str, ']');
+        if (!close || close[1] != ':') return -1;
+        size_t hlen = (size_t)(close - str - 1);
+        if (hlen == 0 || hlen >= host_len) return -1;
+        memcpy(host, str + 1, hlen);
+        host[hlen] = '\0';
+        port_start = close + 2;
+    } else {
+        const char *colon = strrchr(str, ':');
+        if (!colon || colon == str) return -1;
+        size_t hlen = (size_t)(colon - str);
+        if (hlen >= host_len) return -1;
+        memcpy(host, str, hlen);
+        host[hlen] = '\0';
+        port_start = colon + 1;
+    }
+    /* Reject leading whitespace and sign prefix that strtol would otherwise
+     * silently accept. Port must be a bare unsigned decimal. */
+    if (!isdigit((unsigned char)*port_start)) return -1;
+    char *end;
+    long p = strtol(port_start, &end, 10);
+    if (*end != '\0' || p <= 0 || p > 65535) return -1;
+    *port = (int)p;
+    return 0;
+}
+
+int
+mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr,
+                               int cli_port, int cli_port_set, char *addr_buf,
+                               size_t addr_buf_len, const char **out_addr, int *out_port)
+{
+    if (!addr_buf || addr_buf_len == 0 || !out_addr || !out_port) return -1;
+    *out_addr = NULL;
+    *out_port = 0;
+    addr_buf[0] = '\0';
+
+    /* Step 1: INI base. */
+    if (file_listen && file_listen[0] != '\0') {
+        int port_buf = 0;
+        if (split_addr_port(file_listen, addr_buf, addr_buf_len, &port_buf) < 0) {
+            return -1;
+        }
+        *out_addr = addr_buf;
+        *out_port = port_buf;
+    }
+
+    /* Step 2: per-field CLI overrides. */
+    if (cli_addr != NULL) *out_addr = cli_addr;
+    if (cli_port_set) *out_port = cli_port; /* 0 means explicit disable */
 
     return 0;
 }
