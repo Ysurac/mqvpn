@@ -425,6 +425,41 @@ client_next_primary_idx(const mqvpn_client_t *c, int from_idx)
     return from_idx;
 }
 
+/* Test-only wrappers: expose primary-rotation internals so test_api can
+ * lock in the issue #46 + OMR-backport composite fallback semantics
+ * without driving xquic.  Hidden from libmqvpn.so's dynamic export
+ * table (not part of public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx)
+{
+    if (!c) return -1;
+    c->primary_path_idx = idx;
+    return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
+{
+    if (!c) return -1;
+    return get_fd_for_path(c, xqc_path_id);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
+{
+    if (!c) return -1;
+    return client_next_primary_idx(c, from_idx);
+}
+
 /* ─── ICMP PTB rate limiter ─── */
 
 static int

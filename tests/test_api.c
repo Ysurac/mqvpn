@@ -1103,6 +1103,114 @@ TEST(rollback_after_activation_failure_emits_degraded_then_closed)
     mqvpn_client_destroy(c);
 }
 
+/* ── Primary-path rotation (issue #46) + OMR write-socket fallback ──
+ *
+ * Locks in the composite semantic for the no-path_id write fallback in
+ * cb_write_socket / get_fd_for_path:
+ *   1. Prefer the rotated primary (issue #46) so a non-paths[0] primary
+ *      actually receives handshake bytes.
+ *   2. Fall back to the first active slot (OMR backport) when the primary
+ *      was dropped mid-session — never sendto via a stale fd.
+ *
+ * Without test 1, a future refactor could collapse the fallback back
+ * into `first_active_idx` alone and silently regress issue #46. Without
+ * test 2, the same refactor in the opposite direction would re-introduce
+ * the dropped-primary EBADF bug. Test 3 pins the rotation helper. */
+
+extern int mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx);
+extern int mqvpn_client_test_get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id);
+extern int mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx);
+
+TEST(get_fd_prefers_rotated_primary_when_active)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_desc_t d1 = {0};
+    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    /* Rotate primary to slot 1 — both slots are active. The fallback
+     * MUST honour the rotation and return slot 1's fd, not paths[0].fd. */
+    ASSERT_EQ(mqvpn_client_test_set_primary_path_idx(c, 1), 0);
+
+    /* xqc_path_id 99999 is unknown → triggers the fallback. */
+    ASSERT_EQ(mqvpn_client_test_get_fd_for_path(c, 99999), 11);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(get_fd_falls_back_to_first_active_when_primary_dropped)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_desc_t d1 = {0};
+    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    /* primary_path_idx=0 (default). Drop the primary slot — its `active`
+     * flag clears but the platform owns fd lifecycle so the fd field
+     * remains. The fallback must skip to slot 1 instead of handing back
+     * the dead primary's stale fd. */
+    ASSERT_EQ(mqvpn_client_test_set_primary_path_idx(c, 0), 0);
+    ASSERT_EQ(mqvpn_client_drop_path(c, h0), MQVPN_OK);
+
+    ASSERT_EQ(mqvpn_client_test_get_fd_for_path(c, 99999), 11);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_next_primary_idx_skips_closed_and_inactive)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    /* 3 paths. We will mark slot 0 CLOSED (via remove_path) and slot 1
+     * inactive (via drop_path; its `active` flag clears). Slot 2 stays
+     * healthy. Rotation from slot 0 must skip both unreachable slots
+     * and land on slot 2. */
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_desc_t d1 = {0};
+    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_desc_t d2 = {0};
+    snprintf(d2.iface, sizeof(d2.iface), "usb0");
+    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 12, &d2);
+    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
+
+    /* remove_path → status=CLOSED + active=0 (predicate excludes BOTH). */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
+    /* drop_path → status=CLOSED + active=0 too; equivalent for rotation. */
+    ASSERT_EQ(mqvpn_client_drop_path(c, h1), MQVPN_OK);
+
+    /* Sanity: from slot 2, rotation wraps full circle and only slot 2
+     * itself qualifies — but the helper looks at OTHER slots first. With
+     * slots 0,1 unreachable it returns from_idx (=2) per the fail-safe. */
+    ASSERT_EQ(mqvpn_client_test_next_primary_idx(c, 2), 2);
+
+    /* From slot 0, walks 1 → 2 → finds 2 active. */
+    ASSERT_EQ(mqvpn_client_test_next_primary_idx(c, 0), 2);
+
+    /* From slot 1, walks 2 → finds 2 active. */
+    ASSERT_EQ(mqvpn_client_test_next_primary_idx(c, 1), 2);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Path reactivation preconditions ── */
 
 TEST(reactivate_path_null_client)
@@ -1235,6 +1343,11 @@ main(void)
     run_drop_path_emits_closed_event_when_active();
     run_drop_path_does_not_emit_when_already_closed();
     run_rollback_after_activation_failure_emits_degraded_then_closed();
+
+    /* Primary-path rotation (issue #46) + OMR fallback composite */
+    run_get_fd_prefers_rotated_primary_when_active();
+    run_get_fd_falls_back_to_first_active_when_primary_dropped();
+    run_client_next_primary_idx_skips_closed_and_inactive();
 
     /* Path reactivation tests */
     run_reactivate_path_null_client();
