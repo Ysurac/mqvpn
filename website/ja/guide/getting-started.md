@@ -42,6 +42,10 @@ curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_
 sudo dpkg -i mqvpn_*.deb
 ```
 
+### Windows クライアント
+
+Windows amd64 / arm64 向けにビルド済みバイナリを配布しています。[Releases](https://github.com/mp0rta/mqvpn/releases/latest) から `mqvpn_<VERSION>_windows_<ARCH>.zip` をダウンロードし、展開して同梱の `README.txt` に従ってください（管理者 PowerShell 必須）。
+
 ### ソースからビルド
 
 ソースからビルドする場合は[ビルド](./building)を参照してください。

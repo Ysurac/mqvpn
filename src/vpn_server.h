@@ -18,7 +18,7 @@ typedef struct mqvpn_server_cfg_s {
     const char *cert_file;          /* TLS certificate path */
     const char *key_file;           /* TLS private key path */
     const char *tls_ciphers;        /* TLS cipher suites list */
-    int log_level;                  /* xquic log level */
+    int log_level;                  /* mqvpn_log_level_t */
     int scheduler;                  /* 0=minrtt, 1=wlb (default) */
     int reinjection_control;        /* 1=enable reinjection control */
     int reinjection_mode;           /* 0=default, 1=deadline, 2=dgram */

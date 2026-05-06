@@ -60,6 +60,10 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 ```
 
 Uninstall: re-run the install script with `--uninstall`.
+```bash
+curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
+    | sudo bash -s -- --uninstall
+```
 
 ### Client (deb package)
 
@@ -70,6 +74,10 @@ Download the latest `.deb` from [Releases](https://github.com/mp0rta/mqvpn/relea
 curl -LO https://github.com/mp0rta/mqvpn/releases/latest/download/mqvpn_VERSION_ARCH.deb
 sudo dpkg -i mqvpn_*.deb
 ```
+
+### Windows client
+
+Pre-built binaries are shipped for Windows amd64 and arm64. Download `mqvpn_<VERSION>_windows_<ARCH>.zip` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), extract, and follow the bundled `README.txt` (admin PowerShell required).
 
 ## Quick Start
 
@@ -90,7 +98,7 @@ sudo mqvpn --mode client --server YOUR_SERVER:443 \
 ```
 
 > **Notes:**
-> - Without `--path`, the client uses the default interface (single path). Multipath requires two or more `--path` flags.
+> - On Linux, without `--path`, the client uses the default interface (single path); multipath requires two or more `--path` flags. On Windows, `--path` is always required (one or more); see `docs/windows_build.md`.
 > - The server needs its listen port open for UDP (default: 443). All client traffic is routed through the tunnel.
 
 ## Configuration
@@ -534,7 +542,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] v0.3.0 — libmqvpn (sans-I/O), Android Kotlin SDK, network detection
 - [x] Per-client token auth
 - [x] resolvectl DNS support (with resolv.conf fallback)
-- [ ] v0.4.0 — Experimental backup_fec scheduler, Windows client, server control API support
+- [x] v0.4.0 — Experimental backup_fec scheduler, Windows client, server control API support
 - [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
 - [ ] Interop testing (masque-go, QUICHE)

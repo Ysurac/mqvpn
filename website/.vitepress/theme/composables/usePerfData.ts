@@ -38,12 +38,19 @@ async function fetchJson(url: string) {
   return res.json()
 }
 
+// PERF_DATA_BASE includes the bucket prefix `perf-data/` so subPath '' reaches
+// the per-commit index. The R2 custom domain is bound to bucket root, hence the
+// duplicated "perf-data" segment (subdomain + prefix) in the URL.
+const PERF_DATA_BASE = (import.meta as any).env?.VITE_PERF_DATA_BASE
+  ?? 'https://perf-data.mqvpn.org/perf-data'
+
 /**
- * Fetch benchmark data from a perf-data directory.
- * @param basePath - e.g. '/perf-data' or '/perf-data/weekly'
+ * Fetch benchmark data from R2.
+ * @param subPath - '' for per-commit, '/weekly' for weekly
  * @param maxEntries - how many index entries to load (default 10)
  */
-export function usePerfData(basePath: string, maxEntries = 10) {
+export function usePerfData(subPath: string, maxEntries = 10) {
+  const basePath = `${PERF_DATA_BASE}${subPath}`
   const loading = ref(true)
   const error = ref('')
   const items: Ref<BenchmarkItem[]> = ref([])
@@ -53,18 +60,14 @@ export function usePerfData(basePath: string, maxEntries = 10) {
       const index: IndexEntry[] = await fetchJson(`${basePath}/index.json`)
       const entries = index.slice(0, maxEntries)
 
-      const result: BenchmarkItem[] = []
-      for (const entry of entries) {
-        for (const file of entry.files || []) {
-          const data = await fetchJson(`${basePath}/${file}`)
-          result.push({
-            commit: entry.commit,
-            timestamp: entry.timestamp,
-            data,
-          })
-        }
-      }
-      items.value = result
+      const tasks = entries.flatMap(entry =>
+        (entry.files || []).map(async file => ({
+          commit: entry.commit,
+          timestamp: entry.timestamp,
+          data: await fetchJson(`${basePath}/${file}`),
+        }))
+      )
+      items.value = await Promise.all(tasks)
     } catch (e: any) {
       error.value = e.message || 'Failed to load benchmark data.'
     } finally {
