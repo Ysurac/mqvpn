@@ -1,3 +1,23 @@
+mqvpn (0.4.2-1) unstable; urgency=medium
+
+  * Fix server crash (SIGSEGV) when a non-H3 QUIC probe connects without
+    a matching ALPN — cb_write_socket and cb_path_removed blindly cast
+    mqvpn_server_t * to svr_conn_t * before H3 setup (issue #4282).
+  * Fix client busy-loop on -XQC_EMP_CREATE_PATH: close path permanently
+    instead of scheduling retries that can never succeed (OOM / cap hit).
+  * Fix netlink try_readd busy-loop during WiFi reassociation bursts.
+  * client: abort QUIC handshake after 5 s stall and rotate primary path.
+  * client: rotate primary path on reconnect to escape stale connections.
+  * Control API: unify listen address as "addr:port" via control_listen in
+    INI ([Control] Listen) and JSON (control_listen); legacy Port/Addr keys
+    remain supported for backward compatibility.
+  * Add fixed (pinned) per-user IP address support (server-side).
+  * Add congestion control setting in INI config file.
+  * Add unit test for server crash regression (non-H3 probe).
+  * Windows client support.
+
+ -- mqvpn maintainers <maintainers@example.com>  Thu, 07 May 2026 00:00:00 +0000
+
 mqvpn (0.3.2-1) unstable; urgency=medium
 
   * Add experimental backup_fec multipath scheduler (FEC repair on standby path).
