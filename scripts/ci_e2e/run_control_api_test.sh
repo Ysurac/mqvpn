@@ -1,32 +1,39 @@
 #!/bin/bash
-# test_e2e_control_api.sh — end-to-end test for the v0.4.0 server control API.
+# run_control_api_test.sh — end-to-end test for the v0.4.0 server control API.
 #
 # Verifies all 5 control commands (add_user / remove_user / list_users / get_stats /
 # get_status), the --status CLI, security boundaries (bind addr, malformed input,
-# max-users, max-conns), restart resilience, and a scheduler smoke pass across
-# minrtt / wlb / backup_fec.
+# max-users, max-conns), restart resilience, a scheduler smoke pass across
+# minrtt / wlb / backup_fec, and INI-driven config (Phase G).
 #
 # REQUIRES:
 #   - root (TUN + netns)
 #   - GNU netcat (`nc` with the `-q` flag)
 #   - python3
-#   - iperf3 (Phase B only)
+#   - iperf3 (used by Phase B; preflight requires it unconditionally)
 #   - openssl (used transitively via bench_env_setup.sh for cert generation)
 #   - mqvpn binary built with FEC + XOR enabled (Phase F backup_fec iteration);
 #     when built without FEC the script skips that iteration with a clear
 #     diagnostic (preflight probes for support).
 #
 # Run manually:
-#   sudo bash tests/test_e2e_control_api.sh [path/to/mqvpn]
+#   sudo bash scripts/ci_e2e/run_control_api_test.sh [path/to/mqvpn]
 #
-# Exit code: 0 if all phases pass, 1 if any phase fails. No SKIP path.
+# Skip phases (CI / fast local runs):
+#   MQVPN_E2E_SKIP_PHASES="B F" sudo -E bash scripts/ci_e2e/run_control_api_test.sh
+#
+# Exit code: 0 if all run phases pass, 1 if any fails.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "${SCRIPT_DIR}/../benchmarks/bench_env_setup.sh"
+source "${SCRIPT_DIR}/../../benchmarks/bench_env_setup.sh"
 
-MQVPN="${1:-${MQVPN}}"
+# Phase opt-out for CI: space-separated list of phase letters (e.g. "B F").
+SKIP_PHASES=" ${MQVPN_E2E_SKIP_PHASES:-} "
+
+# Default MQVPN to ../../build/mqvpn so sibling ci_e2e scripts' convention works.
+MQVPN="${1:-${MQVPN:-${SCRIPT_DIR}/../../build/mqvpn}}"
 LOG_DIR="$(mktemp -d)"
 CTRL_PORT=9090
 
@@ -209,6 +216,37 @@ start_server_with_flags() {
     sleep 1
 
     # Confirm the server is alive
+    if ! kill -0 "$_BENCH_SERVER_PID" 2>/dev/null; then
+        echo "  ERROR: server failed to start; tail of $server_log:" >&2
+        tail -20 "$server_log" >&2
+        return 1
+    fi
+    return 0
+}
+
+# --- Launch-only server helper ---
+#
+# Kills any existing _BENCH_SERVER_PID and starts a new mqvpn inside $NS_SERVER
+# with the supplied CLI args. Does NOT call bench_start_vpn_server — the caller
+# must already have seeded $_BENCH_WORK_DIR/server.crt|key and $_BENCH_PSK
+# (typically by calling bench_start_vpn_server once at the start of the phase
+# and then killing its server).
+#
+# Used by phase_g (--config-driven server) where calling bench_start_vpn_server
+# inside the helper would re-roll _BENCH_PSK and invalidate any INI that already
+# embedded the prior PSK.
+relaunch_server_in_ns() {
+    local server_log="$1"
+    shift
+
+    kill "$_BENCH_SERVER_PID" 2>/dev/null || true
+    wait "$_BENCH_SERVER_PID" 2>/dev/null || true
+
+    ip netns exec "$NS_SERVER" "$MQVPN" "$@" \
+        >"$server_log" 2>&1 &
+    _BENCH_SERVER_PID=$!
+    sleep 1
+
     if ! kill -0 "$_BENCH_SERVER_PID" 2>/dev/null; then
         echo "  ERROR: server failed to start; tail of $server_log:" >&2
         tail -20 "$server_log" >&2
@@ -971,6 +1009,107 @@ test_phase_f_scheduler_smoke() {
     return 0
 }
 
+# ── Phase G: INI-driven control-API enablement (control-plane only) ───────
+#
+# Locks two contracts introduced by file_cfg → main.c integration:
+#   1. INI [Control] Listen alone enables the API (no CLI --control-port)
+#   2. Per-field merge: INI port + CLI --control-addr → CLI addr, INI port
+#
+# This is control-plane only — no client connection, no data plane traffic.
+# Runs LAST so it doesn't disrupt the alice/bob server chain that Phases A→F
+# rely on (Phase B explicitly reuses Phase A's server).
+test_phase_g_ini_config() {
+    local server_log_a="${LOG_DIR}/phase_g_ini_a_server.log"
+    local server_log_b="${LOG_DIR}/phase_g_ini_b_server.log"
+    local ini_port_a=19090
+    local ini_port_b=19091
+
+    # Phase F's last iteration leaves a server+client+netns alive. Mirror the
+    # _phase_f_one pattern: tear down everything before binding 4433 again.
+    echo "  G: tear down prior phase residue and re-create netns"
+    bench_cleanup
+    bench_setup_netns
+
+    # Seed artifacts ONCE. bench_start_vpn_server populates _BENCH_PSK, server.crt,
+    # server.key under a FRESH _BENCH_WORK_DIR (it does mktemp -d at the top), and
+    # starts a server we'll tear down before re-launching with --config. Subsequent
+    # relaunches in this phase use relaunch_server_in_ns, which does NOT re-seed
+    # (re-seeding would invalidate the INI we wrote with the prior PSK and would
+    # also produce a different _BENCH_WORK_DIR).
+    echo "  G: seeding cert/key/PSK"
+    if ! bench_start_vpn_server >"${server_log_a}.bringup" 2>&1; then
+        echo "  bench_start_vpn_server failed for phase G; tail of bringup:" >&2
+        tail -20 "${server_log_a}.bringup" >&2
+        return 1
+    fi
+
+    # _BENCH_WORK_DIR is now valid — compute INI paths AFTER the seed call.
+    local ini_a="$_BENCH_WORK_DIR/phase_g_ini_a.conf"
+    local ini_b="$_BENCH_WORK_DIR/phase_g_ini_b.conf"
+
+    # ── G.1: INI-only enablement (no --control-port on CLI)
+    echo "  G.1: [Control] Listen in INI alone enables the API"
+
+    cat > "$ini_a" <<EOF
+[Interface]
+Listen = 0.0.0.0:${VPN_LISTEN_PORT}
+Subnet = 10.0.0.0/24
+TunName = mqvpn-e2e-g-ini
+LogLevel = ${BENCH_LOG_LEVEL}
+
+[TLS]
+Cert = ${_BENCH_WORK_DIR}/server.crt
+Key  = ${_BENCH_WORK_DIR}/server.key
+
+[Auth]
+Key = ${_BENCH_PSK}
+
+[Control]
+Listen = 127.0.0.1:${ini_port_a}
+EOF
+
+    if ! relaunch_server_in_ns "$server_log_a" --config "$ini_a"; then
+        return 1
+    fi
+
+    local resp_a
+    resp_a=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$ini_port_a" '{"cmd":"get_status"}')
+    if [[ -z "$resp_a" ]]; then
+        echo "  G.1: empty response from INI-driven control API" >&2
+        return 1
+    fi
+    if ! assert_json_field "$resp_a" ok true; then
+        echo "  G.1: INI-enabled API did not respond ok=true: $resp_a" >&2
+        return 1
+    fi
+    echo "  G.1: OK"
+
+    # ── G.2: per-field merge — INI port + CLI --control-addr override
+    echo "  G.2: per-field merge — INI port preserved when CLI overrides addr"
+
+    sed "s|${ini_port_a}|${ini_port_b}|g" "$ini_a" > "$ini_b"
+
+    if ! relaunch_server_in_ns "$server_log_b" \
+            --config "$ini_b" --control-addr 127.0.0.1; then
+        return 1
+    fi
+
+    local resp_b
+    resp_b=$(ctrl_send "$NS_SERVER" 127.0.0.1 "$ini_port_b" '{"cmd":"get_status"}')
+    if [[ -z "$resp_b" ]]; then
+        echo "  G.2: empty response — per-field merge regression?" >&2
+        return 1
+    fi
+    if ! assert_json_field "$resp_b" ok true; then
+        echo "  G.2: per-field merge did not respond ok=true: $resp_b" >&2
+        return 1
+    fi
+    echo "  G.2: OK"
+
+    # Cleanup is handled by bench_cleanup at script exit.
+    return 0
+}
+
 # --- Main runner ---
 
 # (empty for this chunk; phases will be wired in their own chunks)
@@ -983,12 +1122,25 @@ echo " Server control API E2E"
 echo " Binary: $MQVPN"
 echo "================================================================"
 
-run_test "phase_a basic command coverage" test_phase_a_basic
-run_test "phase_b active session" test_phase_b_active_session
-run_test "phase_c user lifecycle (immediate-revoke)" test_phase_c_lifecycle
-run_test "phase_d security & robustness" test_phase_d_security
-run_test "phase_e restart resilience" test_phase_e_restart
-run_test "phase_f scheduler matrix smoke" test_phase_f_scheduler_smoke
+# Skip a phase if its letter appears in MQVPN_E2E_SKIP_PHASES.
+# Phase G must remain last (re-creates netns, tears down prior state).
+maybe_run() {
+    local label="$1" phase_id="$2"
+    shift 2
+    if [[ "$SKIP_PHASES" == *" $phase_id "* ]]; then
+        echo "SKIP phase_${phase_id} ($label) — MQVPN_E2E_SKIP_PHASES"
+        return 0
+    fi
+    run_test "$label" "$@"
+}
+
+maybe_run "phase_a basic command coverage"         A test_phase_a_basic
+maybe_run "phase_b active session"                 B test_phase_b_active_session
+maybe_run "phase_c user lifecycle (immediate-revoke)" C test_phase_c_lifecycle
+maybe_run "phase_d security & robustness"          D test_phase_d_security
+maybe_run "phase_e restart resilience"             E test_phase_e_restart
+maybe_run "phase_f scheduler matrix smoke"         F test_phase_f_scheduler_smoke
+maybe_run "phase_g INI-driven control-API config"  G test_phase_g_ini_config   # must be LAST
 
 echo ""
 echo "================================================================"

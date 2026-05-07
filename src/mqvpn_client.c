@@ -45,11 +45,15 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE            65536
-#define MASQUE_FRAME_BUF           (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF            65536
-#define XQC_SNDQ_MAX_PKTS          16384
-#define RECONNECT_BACKOFF_MAX_SEC  60
+#define PACKET_BUF_SIZE           65536
+#define MASQUE_FRAME_BUF          (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF           65536
+#define XQC_SNDQ_MAX_PKTS         16384
+#define RECONNECT_BACKOFF_MAX_SEC 60
+/* Force-close the QUIC handshake if it doesn't progress past CONNECTING within
+ * this window, so a dead first-listed path triggers reconnect (and primary_path_idx
+ * rotation, issue #46) rather than waiting for xquic's idle_time_out (120s). */
+#define HANDSHAKE_STALL_TIMEOUT_MS 5000
 #define PTB_RATE_LIMIT             10
 #define PATH_RECREATE_DELAY_US     (5ULL * 1000000)  /* 5 sec initial */
 #define PATH_RECREATE_MAX_DELAY_US (60ULL * 1000000) /* 60 sec max backoff */
@@ -182,6 +186,11 @@ struct mqvpn_client_s {
     /* Timer: next wake (from xquic set_event_timer) */
     uint64_t next_wake_us;
 
+    /* Handshake stall watchdog. Set when entering CONNECTING, cleared on every
+     * exit transition. Used to abort a CONNECTING that is making no progress
+     * (typically a dead primary path) before xquic's 120s idle_time_out. */
+    uint64_t handshake_started_us;
+
     /* ICMP PTB rate limit */
     int ptb_tokens;
     int64_t ptb_refill_ms;
@@ -304,8 +313,23 @@ client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
     if (old == new_state) return;
     assert(mqvpn_state_transition_valid(old, new_state) &&
            "mqvpn_client: invalid state transition");
+    if (new_state == MQVPN_STATE_CONNECTING) {
+        c->handshake_started_us = client_now_us(c);
+    } else if (old == MQVPN_STATE_CONNECTING) {
+        c->handshake_started_us = 0;
+    }
     c->state = new_state;
     if (c->cbs.state_changed) c->cbs.state_changed(old, new_state, c->user_ctx);
+}
+
+static int
+client_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us)
+{
+    if (c->state != MQVPN_STATE_CONNECTING) return 0;
+    if (c->handshake_started_us == 0) return 0;
+    if (now_us <= c->handshake_started_us) return 0;
+    uint64_t elapsed = now_us - c->handshake_started_us;
+    return elapsed >= (uint64_t)HANDSHAKE_STALL_TIMEOUT_MS * 1000;
 }
 
 #ifndef NDEBUG
@@ -461,6 +485,48 @@ mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
 {
     if (!c) return -1;
     return client_next_primary_idx(c, from_idx);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+uint64_t
+mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c)
+{
+    if (!c) return 0;
+    return c->handshake_started_us;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c, uint64_t us)
+{
+    if (!c) return -1;
+    c->handshake_started_us = us;
+    return 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us)
+{
+    if (!c) return -1;
+    return client_handshake_stalled(c, now_us) ? 1 : 0;
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_force_state(mqvpn_client_t *c, mqvpn_client_state_t s)
+{
+    if (!c) return -1;
+    client_set_state(c, s);
+    return 0;
 }
 
 /* ─── ICMP PTB rate limiter ─── */
@@ -1225,6 +1291,7 @@ client_count_active_primaries(mqvpn_client_t *c)
  * retry-related siblings (path_recreate_backoff, etc.). */
 static void apply_path_activation_failure(mqvpn_client_t *c, path_entry_t *p,
                                           uint64_t now_us);
+static void apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p);
 
 /* Create an xquic path for a secondary path entry and mark it ACTIVE.
  *
@@ -1240,16 +1307,26 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, path_status);
     if (ret < 0) {
         LOG_W(c, "xqc_conn_create_path[%d]: %d", idx, ret);
-        if (mqvpn_path_error_is_create_budget_exhausted((int)ret)) {
-            client_force_reconnect_on_path_budget_exhausted(c, p, idx, (int)ret);
+        if (ret == -XQC_EMP_CREATE_PATH) {
+            /* Permanent failure on this connection. Two triggers:
+             *   1. XQC_MAX_PATHS_COUNT cap hit (`xqc_path_create|too many paths`)
+             *   2. xqc_calloc OOM inside xqc_path_create
+             * Both are unrecoverable in-conn — the path_id namespace only
+             * resets on Level-2 reconnect. Skip the DEGRADED retry path so
+             * neither tick_recover_degraded_path nor the platform's 3s
+             * recovery timer busy-loops on calls that will never succeed. */
+            apply_path_create_permanent_failure(c, p);
+            LOG_W(c,
+                  "path closed: %s (xquic path budget exhausted/OOM, requires reconnect)",
+                  p->name);
             return;
         }
-        /* Schedule a retry so the path is not stuck in PENDING/ACTIVE
-         * forever — the tick recovery loop only services DEGRADED slots
-         * with a non-zero recreate_after_us.  Common trigger: the server
-         * has not yet distributed enough CIDs for additional paths
-         * (-XQC_EMP_NO_AVAIL_PATH_ID).  Backport of Ysurac 86c275c
-         * (issue Ysurac/openmptcprouter#4271 Bug 1). */
+        /* Other errors (e.g. -XQC_EMP_NO_AVAIL_PATH_ID — server hasn't
+         * distributed enough CIDs yet) are transient. Schedule a retry so
+         * the path is not stuck in PENDING/ACTIVE forever — the tick
+         * recovery loop only services DEGRADED slots with non-zero
+         * recreate_after_us. Backport of Ysurac 86c275c (issue
+         * Ysurac/openmptcprouter#4271 Bug 1). */
         apply_path_activation_failure(c, p, client_now_us(c));
         if (p->status == MQVPN_PATH_CLOSED) {
             LOG_W(c, "path closed: %s (retries exhausted at activation)", p->name);
@@ -1468,6 +1545,40 @@ mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c, mqvpn_path_handle_
     path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return -1;
     apply_path_activation_failure(c, p, now_us);
+    return 0;
+}
+
+/* Apply a permanent (non-retryable) path-creation failure — used when
+ * xqc_conn_create_path() returns -XQC_EMP_CREATE_PATH (XQC_MAX_PATHS_COUNT
+ * cap hit, or xqc_calloc OOM). Marks the slot CLOSED and clears retry
+ * scheduling so neither tick_recover_degraded_path nor the platform's
+ * recovery timer attempt to retry. Recovery requires a Level-2 reconnect
+ * which resets xquic's path_id namespace. */
+static void
+apply_path_create_permanent_failure(mqvpn_client_t *c, path_entry_t *p)
+{
+    p->in_use = 0;
+    p->xqc_path_id = 0;
+    p->path_stable_since_us = 0;
+    p->status = MQVPN_PATH_CLOSED;
+    p->recreate_after_us = 0;
+    p->recreate_retries = 0;
+    if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_CLOSED, c->user_ctx);
+}
+
+/* Test-only wrapper: drives apply_path_create_permanent_failure() by
+ * handle. Hidden from libmqvpn.so's dynamic export table. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    apply_path_create_permanent_failure(c, p);
     return 0;
 }
 
@@ -2369,6 +2480,41 @@ tick_reconnect(mqvpn_client_t *c)
     }
 }
 
+/* ─── Tick: handshake stall watchdog ─── */
+
+static void
+tick_handshake_watchdog(mqvpn_client_t *c)
+{
+    if (c->shutting_down) return;
+    if (!client_handshake_stalled(c, client_now_us(c))) return;
+
+    const char *iface = "?";
+    if (c->primary_path_idx >= 0 && c->primary_path_idx < c->n_paths) {
+        iface = c->paths[c->primary_path_idx].name;
+    }
+    LOG_W(c, "handshake stalled %dms on path[%d] (%s); aborting to rotate",
+          HANDSHAKE_STALL_TIMEOUT_MS, c->primary_path_idx, iface);
+
+    /* Clear immediately so xqc_engine_main_logic running below can fire
+     * cb_h3_conn_close synchronously without the watchdog re-firing. */
+    c->handshake_started_us = 0;
+
+    if (c->engine && c->conn) {
+        /* xqc_h3_conn_close marks the conn for close. Engine drains it on
+         * the next main_logic call (already queued in mqvpn_client_tick after
+         * this watchdog) and fires cb_h3_conn_close, which arms the reconnect
+         * timer; tick_reconnect → client_reset_paths_for_reconnect rotates
+         * primary_path_idx so the dead first path is skipped. */
+        xqc_h3_conn_close(c->engine, &c->conn->cid);
+    } else {
+        /* No live conn (cli_start_connection failed earlier) — shortcut to
+         * reconnect via the same code path. Rotation still happens in
+         * client_reset_paths_for_reconnect. */
+        client_arm_reconnect_timer(c);
+        client_set_state(c, MQVPN_STATE_RECONNECTING);
+    }
+}
+
 /* ─── Tick ─── */
 
 int
@@ -2377,6 +2523,7 @@ mqvpn_client_tick(mqvpn_client_t *c)
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
 
+    tick_handshake_watchdog(c);
     if (c->engine) xqc_engine_main_logic(c->engine);
     tick_path_recovery(c);
     tick_reconnect(c);
@@ -2469,6 +2616,17 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         } else {
             ms = 1; /* reconnect is due */
         }
+    }
+
+    /* During CONNECTING, wake up no later than the handshake stall deadline
+     * so tick_handshake_watchdog can fire even if no packets arrive (a dead
+     * primary path produces zero recv events). */
+    if (c->state == MQVPN_STATE_CONNECTING && c->handshake_started_us > 0) {
+        uint64_t deadline =
+            c->handshake_started_us + (uint64_t)HANDSHAKE_STALL_TIMEOUT_MS * 1000;
+        uint64_t now_val = client_now_us(c);
+        int hms = (deadline > now_val) ? (int)((deadline - now_val) / 1000) : 1;
+        if (ms <= 0 || hms < ms) ms = hms;
     }
 
     /* Account for path recovery and stability timers */

@@ -47,6 +47,8 @@ SUBNET6=""
 UNINSTALL=0
 PURGE=0
 START=0
+ENABLE_CONTROL=0
+CONTROL_PORT=9090
 
 require_arg() { [ "$1" -ge 2 ] || err "$2 requires an argument"; }
 
@@ -55,11 +57,23 @@ while [[ $# -gt 0 ]]; do
         --port)    require_arg "$#" --port;    PORT="$2";    shift 2 ;;
         --subnet)  require_arg "$#" --subnet;  SUBNET="$2";  shift 2 ;;
         --subnet6) require_arg "$#" --subnet6; SUBNET6="$2"; shift 2 ;;
+        --enable-control)
+            ENABLE_CONTROL=1
+            # Optional positional numeric argument
+            if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
+                    err "--enable-control PORT must be 1..65535 (got: $2)"
+                fi
+                CONTROL_PORT="$2"; shift 2
+            else
+                shift
+            fi
+            ;;
         --start)   START=1; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         --purge)   PURGE=1; UNINSTALL=1; shift ;;
         --help|-h)
-            echo "Usage: install.sh [--port PORT] [--subnet CIDR] [--subnet6 CIDR6] [--start] [--uninstall] [--purge]"
+            echo "Usage: install.sh [--port PORT] [--subnet CIDR] [--subnet6 CIDR6] [--enable-control [PORT]] [--start] [--uninstall] [--purge]"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -236,6 +250,14 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         echo
         echo "[Multipath]"
         echo "Scheduler = wlb"
+        echo
+        if [ "$ENABLE_CONTROL" -eq 1 ]; then
+            echo "[Control]"
+            echo "Listen = 127.0.0.1:$CONTROL_PORT"
+        else
+            echo "# [Control]"
+            echo "# Listen = 127.0.0.1:9090"
+        fi
     } > /etc/mqvpn/server.conf
     chmod 600 /etc/mqvpn/server.conf
     ok "Generated /etc/mqvpn/server.conf"
@@ -249,6 +271,52 @@ else
     SUBNET6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\([^[:space:]].*\)/\1/p' /etc/mqvpn/server.conf | head -1 | tr -d '[:space:]')
     PORT="${PORT:-443}"
     SUBNET="${SUBNET:-10.0.0.0/24}"
+
+    if [ "$ENABLE_CONTROL" -eq 1 ]; then
+        CONF=/etc/mqvpn/server.conf
+
+        if grep -qE '^[[:space:]]*\[Control\][[:space:]]*$' "$CONF"; then
+            warn "[Control] section is already active in $CONF — not modified."
+
+        elif awk -v port="$CONTROL_PORT" '
+            BEGIN { replaced = 0 }
+            {
+                if (!replaced && prev == "# [Control]" \
+                    && $0 == "# Listen = 127.0.0.1:9090") {
+                    print "[Control]"
+                    print "Listen = 127.0.0.1:" port
+                    replaced = 1
+                    prev = ""
+                    next
+                }
+                if (NR > 1) print prev
+                prev = $0
+            }
+            END {
+                if (prev != "") print prev
+                exit (replaced ? 0 : 1)
+            }
+        ' "$CONF" > "$CONF.new"; then
+            chmod --reference="$CONF" "$CONF.new"
+            chown --reference="$CONF" "$CONF.new"
+            mv "$CONF.new" "$CONF"
+            ok "Uncommented [Control] stub in $CONF (port $CONTROL_PORT)."
+
+        else
+            rm -f "$CONF.new"
+            if grep -qE '^[[:space:]]*#[[:space:]]*\[Control\]' "$CONF"; then
+                warn "Found admin-edited commented [Control] in $CONF — not modified."
+                warn "Edit it manually: uncomment '[Control]' and 'Listen = ...'."
+            else
+                {
+                    echo
+                    echo "[Control]"
+                    echo "Listen = 127.0.0.1:$CONTROL_PORT"
+                } >> "$CONF"
+                ok "Appended [Control] block to $CONF."
+            fi
+        fi
+    fi
 fi
 
 # --- Step 6: Start or show next steps ---

@@ -38,7 +38,7 @@ usage(const char *prog)
         "  sudo %s --mode server --listen <bind:port> [options]\n"
         "\n"
         "Options:\n"
-        "  --config PATH             Configuration file (INI format)\n"
+        "  --config PATH             Configuration file (INI or JSON format)\n"
         "  --mode client|server      Operating mode (required if no config)\n"
         "  --server HOST:PORT        Server address (client mode, [IPv6]:PORT for IPv6)\n"
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
@@ -67,7 +67,11 @@ usage(const char *prog)
         "                            manually (client mode)\n"
         "  --control-port PORT       TCP port for JSON control API (server mode)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
+        "                            (also configurable via [Control] Listen in INI / "
+        "control_listen in JSON)\n"
         "  --status                  Query server status via control API and exit\n"
+        "                            (uses --control-port, or [Control] Listen from "
+        "--config)\n"
         "  --scheduler minrtt|wlb|backup|backup_fec|rap  Multipath scheduler (default wlb)\n"
         "  --reinjection-control      Enable multipath reinjection control\n"
         "  --reinjection-mode default|deadline|dgram  Reinjection control mode (default: default)\n"
@@ -207,6 +211,7 @@ main(int argc, char *argv[])
     int route_via_server = -1; /* -1 = not set by CLI */
     int no_routes = -1;        /* -1 = not set by CLI */
     int control_port = 0;
+    int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
     int status_mode = 0;
 
@@ -289,7 +294,10 @@ main(int argc, char *argv[])
         case 'K': kill_switch = 1; break;
         case 'w': route_via_server = 1; break;
         case 'W': no_routes = 1; break;
-        case 'X': control_port = atoi(optarg); break;
+        case 'X':
+            control_port = atoi(optarg);
+            control_port_set = 1;
+            break;
         case 'x': control_addr = optarg; break;
         case 'T': status_mode = 1; break;
         case 'L': log_level_str = optarg; break;
@@ -303,18 +311,9 @@ main(int argc, char *argv[])
         return mqvpn_auth_genkey() < 0 ? 1 : 0;
     }
 
-#ifndef _WIN32
-    /* --status: query control API and exit */
-    if (status_mode) {
-        if (control_port <= 0) {
-            fprintf(stderr, "error: --status requires --control-port\n");
-            return 1;
-        }
-        return run_status(control_addr, control_port);
-    }
-#endif
-
-    /* Load config file (if given), then apply CLI overrides */
+    /* Load config file (if given), then apply CLI overrides.
+     * Hoisted above --status so [Control] Listen in the INI/JSON config
+     * can satisfy --status without requiring --control-port on the CLI. */
     mqvpn_file_config_t file_cfg;
     mqvpn_config_defaults(&file_cfg);
 
@@ -323,6 +322,38 @@ main(int argc, char *argv[])
             return 1;
         }
     }
+
+    /* Resolve effective control endpoint (INI base + per-field CLI overrides).
+     * Used by both --status (below) and the server-mode listener (further down). */
+    char eff_control_addr_buf[256] = {0};
+    const char *eff_control_addr = NULL;
+    int eff_control_port = 0;
+    if (mqvpn_resolve_control_endpoint(file_cfg.control_listen, control_addr,
+                                       control_port, control_port_set,
+                                       eff_control_addr_buf, sizeof(eff_control_addr_buf),
+                                       &eff_control_addr, &eff_control_port) < 0) {
+        fprintf(stderr, "error: invalid [Control] Listen = '%s'\n",
+                file_cfg.control_listen);
+        return 1;
+    }
+    /* --control-addr without a port is a silent-disable trap: warn so admins
+     * notice the missing --control-port / [Control] Listen. */
+    if (eff_control_addr != NULL && eff_control_port == 0) {
+        LOG_WRN("--control-addr ignored: no port configured (use --control-port "
+                "or [Control] Listen)");
+    }
+
+#ifndef _WIN32
+    /* --status: query control API and exit */
+    if (status_mode) {
+        if (eff_control_port <= 0) {
+            fprintf(stderr, "error: --status requires --control-port or "
+                            "[Control] Listen in config\n");
+            return 1;
+        }
+        return run_status(eff_control_addr, eff_control_port);
+    }
+#endif
 
     /* CLI overrides config file values */
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
@@ -596,9 +627,8 @@ main(int argc, char *argv[])
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,
-            .control_port = control_port ? control_port : file_cfg.control_port,
-            .control_addr = control_addr ? control_addr
-                          : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
+            .control_addr = eff_control_addr,
+            .control_port = eff_control_port,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
