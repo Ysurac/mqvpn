@@ -30,6 +30,8 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include <xquic/xquic.h>
+#include <time.h>
 
 /* ── Test infrastructure ── */
 
@@ -1227,6 +1229,185 @@ TEST(server_remove_user_releases_pinned_ip)
     mqvpn_server_destroy(s);
 }
 
+/* ── Regression: issue #4282 — server crash on non-H3 probe client ──
+ *
+ * Root cause: cb_write_socket, cb_path_created, and cb_path_removed are
+ * transport-level callbacks that receive conn->user_data.  On the server,
+ * conn->user_data starts as mqvpn_server_t * and is only promoted to
+ * svr_conn_t * once cb_h3_conn_create fires (after successful H3/ALPN
+ * negotiation).  A probe that sends a QUIC Initial with a non-H3 ALPN
+ * causes ALPN selection to return NOACK — H3 is never set up, so
+ * conn->user_data stays as mqvpn_server_t *.  When xquic then calls
+ * cb_write_socket to send the Server Hello, the old code blindly cast
+ * mqvpn_server_t * to svr_conn_t * and read svr_conn_t::server from
+ * offset 0 — which is the first 8 bytes of mqvpn_config_t::server_host
+ * (a string like "0.0.0.0") treated as a pointer → SIGSEGV.
+ *
+ * The fix adds a magic tag to svr_conn_t and a server_from_ud() helper
+ * that resolves the correct mqvpn_server_t * regardless of which type
+ * the conn_user_data pointer actually is.
+ */
+
+typedef struct {
+    int               fd;
+    struct sockaddr_in peer;
+    socklen_t          peer_len;
+} probe_ctx_t;
+
+static ssize_t
+probe_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
+                   socklen_t peerlen, void *ud)
+{
+    probe_ctx_t *p = (probe_ctx_t *)ud;
+    return sendto(p->fd, buf, size, 0, peer, peerlen);
+}
+
+static void
+probe_set_event_timer(xqc_msec_t wake_after, void *ud) { (void)ud; (void)wake_after; }
+
+static void
+probe_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *ud)
+{
+    (void)lvl; (void)buf; (void)size; (void)ud;
+}
+
+TEST(server_no_crash_on_non_h3_probe)
+{
+    reset_mocks();
+
+    int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(svr_fd, -1);
+    int probe_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(probe_fd, -1);
+
+    struct sockaddr_in svr_addr, probe_addr;
+    memset(&svr_addr, 0, sizeof(svr_addr));
+    svr_addr.sin_family = AF_INET;
+    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    svr_addr.sin_port = 0;
+    ASSERT_EQ(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
+
+    memset(&probe_addr, 0, sizeof(probe_addr));
+    probe_addr.sin_family = AF_INET;
+    probe_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    probe_addr.sin_port = 0;
+    ASSERT_EQ(bind(probe_fd, (struct sockaddr *)&probe_addr, sizeof(probe_addr)), 0);
+
+    socklen_t alen = sizeof(svr_addr);
+    getsockname(svr_fd, (struct sockaddr *)&svr_addr, &alen);
+    alen = sizeof(probe_addr);
+    getsockname(probe_fd, (struct sockaddr *)&probe_addr, &alen);
+
+    /* Start the server */
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    svr_cbs.log = mock_log;
+
+    mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(svr);
+    mqvpn_config_free(svr_cfg);
+    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
+                                         sizeof(svr_addr)), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
+
+    /* Build a raw xquic client engine using "probe" as the ALPN — a protocol
+     * the server does not support.  This exercises the path where the server
+     * creates a QUIC connection but H3 is never initialised because ALPN
+     * selection returns SSL_TLSEXT_ERR_NOACK instead of matching "h3". */
+    probe_ctx_t probe = { .fd = probe_fd };
+    memcpy(&probe.peer, &svr_addr, sizeof(svr_addr));
+    probe.peer_len = sizeof(svr_addr);
+
+    xqc_engine_ssl_config_t probe_ssl = {0};
+    probe_ssl.ciphers = XQC_TLS_CIPHERS;
+    probe_ssl.groups  = XQC_TLS_GROUPS;
+
+    xqc_engine_callback_t probe_eng_cbs = {
+        .set_event_timer = probe_set_event_timer,
+        .log_callbacks   = { .xqc_log_write_err  = probe_log_write,
+                             .xqc_log_write_stat = probe_log_write },
+    };
+    xqc_transport_callbacks_t probe_tcbs = { .write_socket = probe_write_socket };
+
+    xqc_config_t xcfg;
+    xqc_engine_get_default_config(&xcfg, XQC_ENGINE_CLIENT);
+    xcfg.cfg_log_level = XQC_LOG_ERROR;
+
+    xqc_engine_t *probe_engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xcfg, &probe_ssl,
+                                                    &probe_eng_cbs, &probe_tcbs, &probe);
+    ASSERT_NOT_NULL(probe_engine);
+
+    /* Register "probe" as a no-op ALPN so xqc_connect accepts it.  The server
+     * does not recognise "probe", so its ALPN selection returns NOACK and H3
+     * is never initialised — leaving conn->user_data as mqvpn_server_t *. */
+    xqc_app_proto_callbacks_t probe_ap;
+    memset(&probe_ap, 0, sizeof(probe_ap));
+    xqc_engine_register_alpn(probe_engine, "probe", 5, &probe_ap, NULL);
+
+    xqc_conn_settings_t cs;
+    memset(&cs, 0, sizeof(cs));
+    cs.proto_version = XQC_VERSION_V1;
+
+    xqc_conn_ssl_config_t css;
+    memset(&css, 0, sizeof(css));
+    css.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+
+    /* Connect with "probe" ALPN — deliberately not "h3" */
+    const xqc_cid_t *pcid = xqc_connect(probe_engine, &cs, NULL, 0,
+                                         "127.0.0.1", 0, &css,
+                                         (struct sockaddr *)&svr_addr, sizeof(svr_addr),
+                                         "probe", &probe);
+    ASSERT_NOT_NULL(pcid);
+
+    /* Pump: probe → server → server tries to respond via cb_write_socket.
+     * Before the fix, the server crashes here (SIGSEGV) because cb_write_socket
+     * cast mqvpn_server_t * to svr_conn_t * and dereferenced a garbage pointer.
+     * After the fix, server_from_ud() resolves the correct server pointer and
+     * the send succeeds.  Reaching the end of this loop means no crash. */
+    uint8_t buf[65536];
+    struct sockaddr_storage from;
+    socklen_t from_len;
+
+    for (int iter = 0; iter < 30; iter++) {
+        xqc_engine_main_logic(probe_engine);
+
+        for (;;) {
+            from_len = sizeof(from);
+            ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
+                                 (struct sockaddr *)&from, &from_len);
+            if (n <= 0) break;
+            mqvpn_server_on_socket_recv(svr, buf, (size_t)n,
+                                        (struct sockaddr *)&from, from_len);
+        }
+
+        for (;;) {
+            from_len = sizeof(from);
+            ssize_t n = recvfrom(probe_fd, buf, sizeof(buf), MSG_DONTWAIT,
+                                 (struct sockaddr *)&from, &from_len);
+            if (n <= 0) break;
+            xqc_engine_packet_process(probe_engine, buf, (size_t)n,
+                                      (struct sockaddr *)&probe_addr, sizeof(probe_addr),
+                                      (struct sockaddr *)&from, from_len,
+                                      (xqc_usec_t)(time(NULL)) * 1000000ULL, &probe);
+        }
+
+        mqvpn_server_tick(svr);
+
+        struct pollfd pfds[2] = {
+            { .fd = svr_fd,   .events = POLLIN },
+            { .fd = probe_fd, .events = POLLIN },
+        };
+        poll(pfds, 2, 5);
+    }
+
+    xqc_engine_destroy(probe_engine);
+    mqvpn_server_destroy(svr);
+    close(svr_fd);
+    close(probe_fd);
+}
+
 /* ── max_clients config boundary ── */
 
 TEST(server_max_clients_config)
@@ -1297,6 +1478,9 @@ main(void)
 
     /* max_clients config boundary */
     run_server_max_clients_config();
+
+    /* Regression: issue #4282 — no crash on non-H3 probe */
+    run_server_no_crash_on_non_h3_probe();
 
     printf("\n  %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return (g_tests_passed == g_tests_run) ? 0 : 1;

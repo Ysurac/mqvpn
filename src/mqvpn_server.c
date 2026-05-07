@@ -61,7 +61,14 @@ typedef struct svr_stream_s svr_stream_t;
 
 /* ─── Internal types ─── */
 
+/* Transport-level conn_user_data is mqvpn_server_t * until cb_h3_conn_create
+ * fires and promotes it to svr_conn_t *.  This tag lets helpers tell the two
+ * apart.  Chosen to be unreachable as the start of any valid hostname string
+ * (high-bit bytes that are illegal in DNS names). */
+#define SVR_CONN_TAG 0xC0DE0001u
+
 struct svr_conn_s {
+    uint32_t        tag;    /* SVR_CONN_TAG — set in cb_h3_conn_create */
     mqvpn_server_t *server;
     xqc_h3_conn_t *h3_conn;
     xqc_cid_t cid;
@@ -361,12 +368,24 @@ svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
 
 /* ─── xquic transport callbacks ─── */
 
+/* Transport callbacks receive conn->user_data, which is mqvpn_server_t * until
+ * cb_h3_conn_create promotes it to svr_conn_t *.  This helper returns the
+ * mqvpn_server_t * regardless of which type ud actually is. */
+static mqvpn_server_t *
+server_from_ud(void *ud)
+{
+    if (!ud) return NULL;
+    svr_conn_t *sc = (svr_conn_t *)ud;
+    if (sc->tag == SVR_CONN_TAG) return sc->server;
+    return (mqvpn_server_t *)ud;
+}
+
 static ssize_t
 cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
                 socklen_t peerlen, void *conn_user_data)
 {
-    svr_conn_t *conn = (svr_conn_t *)conn_user_data;
-    return svr_do_send(conn->server, buf, size, peer, peerlen);
+    mqvpn_server_t *s = server_from_ud(conn_user_data);
+    return svr_do_send(s, buf, size, peer, peerlen);
 }
 
 static ssize_t
@@ -430,8 +449,8 @@ cb_path_created(xqc_connection_t *conn, const xqc_cid_t *cid, uint64_t path_id,
 {
     (void)conn;
     (void)cid;
-    svr_conn_t *sc = (svr_conn_t *)conn_user_data;
-    LOG_I(sc->server, "new path created: path_id=%" PRIu64, path_id);
+    mqvpn_server_t *s = server_from_ud(conn_user_data);
+    if (s) LOG_I(s, "new path created: path_id=%" PRIu64, path_id);
     return 0;
 }
 
@@ -439,8 +458,8 @@ static void
 cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
 {
     (void)cid;
-    svr_conn_t *sc = (svr_conn_t *)conn_user_data;
-    LOG_I(sc->server, "path removed: path_id=%" PRIu64, path_id);
+    mqvpn_server_t *s = server_from_ud(conn_user_data);
+    if (s) LOG_I(s, "path removed: path_id=%" PRIu64, path_id);
 }
 
 /* ================================================================
@@ -456,6 +475,7 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_
 
     svr_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
+    conn->tag = SVR_CONN_TAG;
     conn->server = s;
     conn->h3_conn = h3_conn;
     /* cid may be misaligned inside xquic's internal structures */
