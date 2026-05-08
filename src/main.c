@@ -81,6 +81,7 @@ usage(const char *prog)
         "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited  Congestion control (default bbr2)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
+        "  --version                 Show version and exit\n"
         "  --help                    Show this help\n"
         "\n"
         "CLI options override config file values.\n",
@@ -172,6 +173,7 @@ main(int argc, char *argv[])
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
+        {"version", no_argument, NULL, 'V'},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0},
     };
@@ -216,7 +218,7 @@ main(int argc, char *argv[])
     int status_mode = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWVh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -301,6 +303,7 @@ main(int argc, char *argv[])
         case 'x': control_addr = optarg; break;
         case 'T': status_mode = 1; break;
         case 'L': log_level_str = optarg; break;
+        case 'V': printf("mqvpn %s\n", mqvpn_version_string()); return 0;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 1;
         }
