@@ -235,6 +235,13 @@ Notes:
 - `auth_key` remains supported as a single legacy/global key.
 - `auth_username` is client-side only: the name sent to the server for identification in logs and status output. It does not affect authentication.
 - `mode` is optional if it can be inferred (`listen` implies server).
+- **Monitoring requires per-user keys.** Sharing a single `auth_key` across
+  multiple clients works for the VPN data plane, but the control API
+  surfaces those sessions as `user="(global)"` and the Prometheus exporter
+  cannot distinguish them — series labels collide and the scrape is
+  dropped. For multi-client deployments register each client under `users`
+  (or via `add_user` over the control API) so each gets a distinct `user`
+  label.
 
 ```bash
 sudo mqvpn --config /etc/mqvpn/server.conf
