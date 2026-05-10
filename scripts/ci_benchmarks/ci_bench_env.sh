@@ -35,6 +35,7 @@ IP_A_SERVER_ADDR="10.100.0.1"
 TUNNEL_SERVER_IP="10.0.0.1"
 VPN_LISTEN_PORT="4433"
 CI_BENCH_SCHEDULER="${CI_BENCH_SCHEDULER:-wlb}"
+CI_BENCH_CC="${CI_BENCH_CC:-bbr2}"
 CI_BENCH_LOG_LEVEL="${CI_BENCH_LOG_LEVEL:-error}"
 
 # Process PIDs
@@ -168,6 +169,7 @@ ci_bench_apply_netem() {
 
 ci_bench_start_server() {
     local scheduler="${1:-$CI_BENCH_SCHEDULER}"
+    local cc="${2:-$CI_BENCH_CC}"
     _CB_WORK_DIR="$(mktemp -d)"
 
     _CB_PSK=$("$MQVPN" --genkey 2>/dev/null)
@@ -184,6 +186,7 @@ ci_bench_start_server() {
         --key "${_CB_WORK_DIR}/server.key" \
         --auth-key "$_CB_PSK" \
         --scheduler "$scheduler" \
+        --cc "$cc" \
         --log-level "$CI_BENCH_LOG_LEVEL" &
     _CB_SERVER_PID=$!
     sleep 2
@@ -192,7 +195,7 @@ ci_bench_start_server() {
         echo "ERROR: VPN server died"
         return 1
     fi
-    echo "VPN server running (PID $_CB_SERVER_PID, scheduler=$scheduler)"
+    echo "VPN server running (PID $_CB_SERVER_PID, scheduler=$scheduler, cc=$cc)"
 }
 
 # ── VPN client ──
@@ -200,6 +203,7 @@ ci_bench_start_server() {
 ci_bench_start_client() {
     local paths="$1"
     local scheduler="${2:-$CI_BENCH_SCHEDULER}"
+    local cc="${3:-$CI_BENCH_CC}"
 
     # Kill previous client
     if [ -n "$_CB_CLIENT_PID" ] && kill -0 "$_CB_CLIENT_PID" 2>/dev/null; then
@@ -215,6 +219,7 @@ ci_bench_start_client() {
         ${paths} \
         --auth-key "$_CB_PSK" \
         --scheduler "$scheduler" \
+        --cc "$cc" \
         --insecure \
         --log-level "$CI_BENCH_LOG_LEVEL" &
     _CB_CLIENT_PID=$!

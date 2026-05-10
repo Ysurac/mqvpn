@@ -76,6 +76,9 @@ jobs:
       - name: Aggregation benchmark (WLB + MinRTT)
         run: sudo bash scripts/ci_benchmarks/ci_bench_aggregate.sh build/mqvpn
 
+      - name: Aggregation benchmark (all congestion controls)
+        run: sudo bash scripts/ci_benchmarks/ci_bench_aggregate_cc.sh build/mqvpn
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
