@@ -434,7 +434,8 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     conn->req[conn->req_len] = '\0';
 
     char resp[CTRL_MAX_RESP_BYTES];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
+    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server,
+                        conn->cs->cli_ctx);
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
     } else if ((size_t)rlen >= sizeof(resp) - 2) {
