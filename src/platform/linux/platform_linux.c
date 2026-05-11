@@ -1105,9 +1105,12 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Enable multipath when there are multiple primary paths, or when there is at
      * least one backup path (even a single auto-detected primary + one backup needs
      * multipath negotiation for failover to work; cfg->n_paths == 0 means one
-     * implicit primary is created below, so the total would be >= 2). */
+     * implicit primary is created below, so the total would be >= 2).
+     * Also enable when a control port is configured: the control socket exposes
+     * add_path/remove_path commands, so the user intends dynamic path management
+     * and multipath negotiation must happen at connection setup time. */
     mqvpn_config_set_multipath(lib_cfg,
-        (cfg->n_paths > 1 || cfg->n_backup_paths > 0) ? 1 : 0);
+        (cfg->n_paths > 1 || cfg->n_backup_paths > 0 || cfg->control_port > 0) ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
     mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
