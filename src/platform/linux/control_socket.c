@@ -357,6 +357,54 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         }
         return snprintf(resp, resp_len, "%.*s", pos, buf);
 
+    } else if (strcmp(cmd, "add_path") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char iface[IFNAMSIZ] = {0};
+        const char *iv = json_find_key(req, "iface");
+        if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"iface required\"}");
+        int backup = 0;
+        const char *bv = json_find_key(req, "backup");
+        if (bv && (*bv == 't' || *bv == '1')) backup = 1;
+        if (platform_add_path(cli_ctx, iface, backup) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"add_path failed\"}");
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+
+    } else if (strcmp(cmd, "remove_path") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char iface[IFNAMSIZ] = {0};
+        const char *iv = json_find_key(req, "iface");
+        if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"iface required\"}");
+        if (platform_remove_path(cli_ctx, iface) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"path not found or last path\"}");
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+
+    } else if (strcmp(cmd, "list_paths") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char names[MQVPN_MAX_PATHS][IFNAMSIZ];
+        int n = platform_list_paths(cli_ctx, names, MQVPN_MAX_PATHS);
+        char arr[MQVPN_MAX_PATHS * (IFNAMSIZ + 3) + 4];
+        int pos = 0;
+        arr[pos++] = '[';
+        for (int i = 0; i < n; i++) {
+            if (i > 0) arr[pos++] = ',';
+            pos += snprintf(arr + pos, sizeof(arr) - (size_t)pos, "\"%s\"", names[i]);
+        }
+        arr[pos++] = ']';
+        arr[pos]   = '\0';
+        return snprintf(resp, resp_len, "{\"ok\":true,\"paths\":%s}", arr);
+
     } else {
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
     }
