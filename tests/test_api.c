@@ -1377,7 +1377,7 @@ TEST(first_active_fd_skips_dropped_primary)
 
 /* Internal helper — drives the state transition that client_activate_path()
  * applies when xqc_conn_create_path() fails synchronously.  Without this
- * the path stays in PENDING forever and tick_recover_degraded_path() never
+ * the path stays in PENDING forever and tick_drive_retry_timer() never
  * picks it up (issue #4271 Bug 1, ysurac/mqvpn 86c275c).
  *
  * Returns 0 on success, -1 if handle is not found. */
@@ -1385,7 +1385,7 @@ extern int mqvpn_client_apply_path_activation_failure(mqvpn_client_t *c,
                                                       mqvpn_path_handle_t handle,
                                                       uint64_t now_us);
 
-TEST(activation_failure_first_retry_marks_degraded)
+TEST(activation_failure_first_retry_marks_create_wait)
 {
     mqvpn_client_t *c = make_test_client();
     mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
@@ -1398,14 +1398,49 @@ TEST(activation_failure_first_retry_marks_degraded)
     ASSERT_EQ(n, 1);
     ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
 
-    /* Synthesise a synchronous activation failure. */
+    /* Synthesise a synchronous activation failure. PR3: this transitions
+     * the slot to PATH_LC_CREATE_WAIT (no validated experience yet),
+     * which projects to public MQVPN_PATH_PENDING. recreate_after_us is
+     * armed so tick_drive_retry_timer() will pick it up. */
     ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
 
-    /* Path must transition to DEGRADED so tick_recover_degraded_path()
-     * can retry it; otherwise it would be stuck in PENDING forever. */
     mqvpn_client_get_paths(c, info, 2, &n);
     ASSERT_EQ(n, 1);
-    ASSERT_EQ(info[0].status, MQVPN_PATH_DEGRADED);
+    ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
+
+    mqvpn_client_destroy(c);
+}
+
+/* PR3 — pin the internal CREATE_WAIT lifecycle landing for synchronous
+ * activation failure. The previous test already covers the public PENDING
+ * projection; this one uses the internal getter so a future regression that
+ * dropped to e.g. DEGRADED would be caught even though both project to
+ * PENDING for CREATE_WAIT vs. DEGRADED for DEGRADED. (DEGRADED projects to
+ * MQVPN_PATH_DEGRADED, so a future regression away from CREATE_WAIT would
+ * actually surface in the public projection too — but pinning the internal
+ * name guards against any other state transposition.) */
+extern const char *mqvpn_client_test_get_path_state_name(mqvpn_client_t *c,
+                                                         mqvpn_path_handle_t handle,
+                                                         int *out_retries);
+
+TEST(activation_failure_pins_create_wait_internal)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    int retries = -1;
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, &retries);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "PENDING"), 0);
+    ASSERT_EQ(retries, 0);
+
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
+
+    name = mqvpn_client_test_get_path_state_name(c, h, &retries);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "CREATE_WAIT"), 0);
+    ASSERT_EQ(retries, 1);
 
     mqvpn_client_destroy(c);
 }
@@ -1437,13 +1472,44 @@ TEST(activation_failure_eventually_closes_path)
             closed = 1;
             break;
         }
-        ASSERT_EQ(info[0].status, MQVPN_PATH_DEGRADED);
+        /* PR3: pre-CLOSED retry slot is CREATE_WAIT (public PENDING),
+         * not DEGRADED — there has been no validated experience yet. */
+        ASSERT_EQ(info[0].status, MQVPN_PATH_PENDING);
     }
     if (!closed) {
         printf("FAIL\n    %s:%d: path never reached CLOSED after 32 failures\n", __FILE__,
                __LINE__);
         exit(1);
     }
+
+    mqvpn_client_destroy(c);
+}
+
+/* PR4 — pin the PATH_EVENT_XQUIC_REMOVED VALIDATING -> CREATE_WAIT dispatch.
+ * This is the path xquic takes when validation fails after we entered
+ * VALIDATING. ACTIVE/STANDBY (validated) must instead go to DEGRADED;
+ * VALIDATING (never validated) starts retry from CREATE_WAIT. */
+extern int mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
+                                                          mqvpn_path_handle_t handle,
+                                                          uint64_t xqc_path_id);
+
+TEST(cb_path_removed_validating_to_create_wait)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Wrapper forces state=VALIDATING with xqc_path_id=42, retries=0,
+     * then dispatches path_on_event(XQUIC_REMOVED). Expected landing: CREATE_WAIT
+     * with recreate_retries=1 (no validated experience -> CREATE_WAIT,
+     * not DEGRADED). */
+    ASSERT_EQ(mqvpn_client_test_force_validating_then_remove(c, h, 42), 0);
+
+    int retries = -1;
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, &retries);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "CREATE_WAIT"), 0);
+    ASSERT_EQ(retries, 1);
 
     mqvpn_client_destroy(c);
 }
@@ -1476,7 +1542,7 @@ TEST(path_create_permanent_failure_marks_closed_immediately)
 
     ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
 
-    /* MUST be CLOSED — not DEGRADED — so tick_recover_degraded_path doesn't
+    /* MUST be CLOSED — not DEGRADED — so tick_drive_retry_timer doesn't
      * pick it up. */
     mqvpn_client_get_paths(c, info, 2, &n);
     ASSERT_EQ(n, 1);
@@ -1511,15 +1577,13 @@ TEST(path_create_permanent_failure_invalid_handle_returns_error)
 
 /* The Beta1 trigger was a recovery loop calling client_activate_path once
  * per 3s tick on a slot whose budget had already exhausted. The fix keeps
- * the slot CLOSED so the loop can no longer pick it up — but if a buggy
- * caller re-enters apply_path_create_permanent_failure on the same slot
- * (e.g. a future try_readd_removed_path retry that observes CLOSED but
- * still calls through), the function MUST stay idempotent: state stays
- * CLOSED, and a fresh path_event(CLOSED) fires on each call. The latter
- * matters because if a future "optimization" early-returned on
- * status==CLOSED, observer state machines that dedupe per-handle would
- * miss the retry-equivalent signal — verify the event-per-call shape so
- * that path is pinned. */
+ * the slot CLOSED so the loop can no longer pick it up.
+ *
+ * PR4 event-driven model: path_event fires on state TRANSITION (not per
+ * invocation). A repeat call on an already-CLOSED slot is a no-op self-loop
+ * — state stays CLOSED, no extra event fires. This is stronger than the
+ * pre-PR4 "event per call" contract since duplicate events on a sticky
+ * state were never useful signal for observers. */
 
 TEST(path_create_permanent_failure_idempotent)
 {
@@ -1529,12 +1593,15 @@ TEST(path_create_permanent_failure_idempotent)
 
     g_path_event_count = 0;
     ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
-    /* Second invocation on the same (now CLOSED) slot must also return OK,
-     * stay CLOSED, and emit a second path_event(CLOSED). */
-    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
-    ASSERT_EQ(g_path_event_count, 2);
+    /* First call: PENDING -> CLOSED_RECOVERABLE, fires one event. */
+    ASSERT_EQ(g_path_event_count, 1);
     ASSERT_EQ(g_last_path_event_handle, h);
     ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_CLOSED);
+
+    /* Second call on already-CLOSED slot is a no-op (event-driven FSM
+     * suppresses self-loop transitions). State stays CLOSED. */
+    ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
+    ASSERT_EQ(g_path_event_count, 1);
 
     mqvpn_path_info_t info[2];
     int n = 0;
@@ -1630,13 +1697,14 @@ TEST(drop_path_does_not_emit_when_already_closed)
 }
 
 /* Reproduce the try_readd_removed_path rollback flow at unit level: a
- * synchronously-failed activation transitions the slot PENDING → DEGRADED
- * (firing path_event(DEGRADED)), and the platform's subsequent rollback
- * via remove_path must close it out with path_event(CLOSED). Without the
- * close-out emission, observers (Android SDK / control-plane) would see
- * the handle stuck at DEGRADED forever, since the next re-add allocates
- * a fresh next_path_handle++. */
-TEST(rollback_after_activation_failure_emits_degraded_then_closed)
+ * synchronously-failed activation transitions the slot PENDING → CREATE_WAIT
+ * (PR3 — was DEGRADED in PR2; both project to public PENDING/PENDING-vs-
+ * DEGRADED respectively), firing path_event with the new public status,
+ * and the platform's subsequent rollback via remove_path must close it
+ * out with path_event(CLOSED). Without the close-out emission, observers
+ * (Android SDK / control-plane) would see the handle stuck forever, since
+ * the next re-add allocates a fresh next_path_handle++. */
+TEST(rollback_after_activation_failure_emits_event_then_closed)
 {
     mqvpn_client_t *c = make_test_client();
     mqvpn_path_desc_t desc = {0};
@@ -1647,13 +1715,14 @@ TEST(rollback_after_activation_failure_emits_degraded_then_closed)
     /* Reset counter to ignore any setup-side events. */
     g_path_event_count = 0;
 
-    /* Step 1: synchronous activation failure transitions PENDING → DEGRADED. */
+    /* Step 1: synchronous activation failure transitions PENDING → CREATE_WAIT
+     * (public PENDING). path_event still fires unconditionally. */
     ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h, 1000000), 0);
     ASSERT_EQ(g_path_event_count, 1);
     ASSERT_EQ(g_last_path_event_handle, h);
-    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_DEGRADED);
+    ASSERT_EQ(g_last_path_event_status, MQVPN_PATH_PENDING);
 
-    /* Step 2: platform rolls back by calling remove_path on the DEGRADED
+    /* Step 2: platform rolls back by calling remove_path on the CREATE_WAIT
      * slot. This must emit the close-out event. */
     ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
     ASSERT_EQ(g_path_event_count, 2);
@@ -1935,6 +2004,114 @@ TEST(reactivate_path_not_established)
     mqvpn_client_destroy(c);
 }
 
+/* PR3 regression: mqvpn_client_reactivate_path's slot-eligibility gate must
+ * accept PATH_LC_CREATE_WAIT. Pre-PR3 the only retry-pending state was
+ * DEGRADED; PR3 split out CREATE_WAIT for sync-create-failure / post-
+ * VALIDATING-removal slots, both of which map to the public PENDING status.
+ * The original gate `status != DEGRADED && status != CLOSED` continued
+ * rejecting these — so platform-driven reactivation on iface-up was a no-op,
+ * forcing recovery into the slow library backoff loop. With backoff retries
+ * each burning a unique xqc path_id, XQC_MAX_PATHS_COUNT (=8) was exhausted
+ * within seconds and the connection collapsed when the surviving path also
+ * faulted. Seen in ci_bench_failover.sh on commit 3956522. */
+extern int mqvpn_client_test_reactivate_slot_eligible(mqvpn_client_t *c,
+                                                      mqvpn_path_handle_t handle);
+
+TEST(reactivate_slot_eligible_create_wait)
+{
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* Drive the slot into CREATE_WAIT (validating then xquic-side remove). */
+    ASSERT_EQ(mqvpn_client_test_force_validating_then_remove(c, h, 99), 0);
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, NULL);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "CREATE_WAIT"), 0);
+
+    /* The slot-eligibility gate MUST accept CREATE_WAIT. */
+    ASSERT_EQ(mqvpn_client_test_reactivate_slot_eligible(c, h), MQVPN_OK);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(reactivate_slot_eligible_rejects_validating)
+{
+    /* The complement: a slot that's still in VALIDATING (xquic_path_live==1,
+     * waiting on async PATH_CHALLENGE validation) must NOT be eligible —
+     * reactivating it would burn a fresh xqc path_id while the existing one
+     * is still alive. */
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 42, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+
+    /* PENDING (freshly added) is also rejected: the cb_ready_to_create_path
+     * drain owns first activation. */
+    ASSERT_EQ(mqvpn_client_test_reactivate_slot_eligible(c, h), MQVPN_ERR_INVALID_STATE);
+
+    mqvpn_client_destroy(c);
+}
+
+/* PR3 regression #2 + cleanup: platform_linux's try_readd_removed_path
+ * called recovery_check_activation() which inspected public status to
+ * tell if the synchronous activate half of add_path_fd had succeeded.
+ *
+ * Pre-PR3 client_activate_path landed at PATH_LC_ACTIVE directly, so the
+ * check (`status == MQVPN_PATH_ACTIVE`) hit. PR3 changed activate to
+ * land at PATH_LC_VALIDATING (status projection: MQVPN_PATH_PENDING).
+ * The platform check then misread sync success as transient failure and
+ * recovery_rollback removed the just-allocated xqc path — burning a
+ * unique xqc path_id per recovery iteration until XQC_MAX_PATHS_COUNT
+ * was exhausted. Seen in ci_bench_failover.sh on commit 3956522.
+ *
+ * Fix: add `mqvpn_client_add_path_fd_with_outcome` that reports the
+ * synchronous activation outcome explicitly. The platform uses the
+ * outcome enum directly instead of reverse-engineering it from status.
+ * These tests pin the outcome semantics. */
+
+TEST(add_path_fd_with_outcome_null_outcome_acts_as_alias)
+{
+    /* If outcome==NULL the function must behave like add_path_fd: still
+     * returns a valid handle, doesn't crash. */
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd_with_outcome(c, 42, NULL, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(add_path_fd_with_outcome_defers_to_ok_when_multipath_not_ready)
+{
+    /* Test harness client has c->state==IDLE and multipath_ready==0, so
+     * add_path_fd_with_outcome must NOT run sync activation — slot stays
+     * in true PENDING and outcome is reported as OK (deferred). The
+     * legacy add_path_fd silently did this; the new API exposes the same
+     * "deferred" state under MQVPN_ADD_PATH_OK. */
+    mqvpn_client_t *c = make_test_client();
+    mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_TRANSIENT_FAIL;
+    mqvpn_path_handle_t h = mqvpn_client_add_path_fd_with_outcome(c, 42, NULL, &outcome);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(outcome, MQVPN_ADD_PATH_OK);
+
+    /* The slot lives in true PENDING (never activated). */
+    const char *name = mqvpn_client_test_get_path_state_name(c, h, NULL);
+    ASSERT_NE(name, NULL);
+    ASSERT_EQ(strcmp(name, "PENDING"), 0);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(add_path_fd_with_outcome_invalid_args_return_minus_one)
+{
+    mqvpn_add_path_outcome_t outcome = MQVPN_ADD_PATH_OK;
+    ASSERT_EQ(mqvpn_client_add_path_fd_with_outcome(NULL, 42, NULL, &outcome),
+              (mqvpn_path_handle_t)-1);
+    /* fd<0 also rejected */
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_EQ(mqvpn_client_add_path_fd_with_outcome(c, -1, NULL, &outcome),
+              (mqvpn_path_handle_t)-1);
+    mqvpn_client_destroy(c);
+}
+
 /* ── Server client info ── */
 
 TEST(server_get_client_info_null_safety)
@@ -2041,16 +2218,18 @@ main(void)
     run_first_active_fd_with_no_paths_is_minus_one();
     run_first_active_fd_returns_only_path();
     run_first_active_fd_skips_dropped_primary();
-    run_activation_failure_first_retry_marks_degraded();
+    run_activation_failure_first_retry_marks_create_wait();
+    run_activation_failure_pins_create_wait_internal();
     run_activation_failure_invalid_handle_returns_error();
     run_activation_failure_eventually_closes_path();
+    run_cb_path_removed_validating_to_create_wait();
 
     /* path_event close-out semantics */
     run_remove_path_emits_closed_event_when_active();
     run_remove_path_does_not_emit_when_already_closed();
     run_drop_path_emits_closed_event_when_active();
     run_drop_path_does_not_emit_when_already_closed();
-    run_rollback_after_activation_failure_emits_degraded_then_closed();
+    run_rollback_after_activation_failure_emits_event_then_closed();
 
     /* Primary-path rotation (issue #46) + OMR fallback composite */
     run_get_fd_prefers_rotated_primary_when_active();
@@ -2076,6 +2255,11 @@ main(void)
     /* Path reactivation tests */
     run_reactivate_path_null_client();
     run_reactivate_path_not_established();
+    run_reactivate_slot_eligible_create_wait();
+    run_reactivate_slot_eligible_rejects_validating();
+    run_add_path_fd_with_outcome_null_outcome_acts_as_alias();
+    run_add_path_fd_with_outcome_defers_to_ok_when_multipath_not_ready();
+    run_add_path_fd_with_outcome_invalid_args_return_minus_one();
 
     /* Server info tests */
     run_server_get_client_info_null_safety();
