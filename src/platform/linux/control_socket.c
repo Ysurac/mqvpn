@@ -113,8 +113,9 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         if (fixed_ip[0]) {
             rc = mqvpn_server_set_user_fixed_ip(server, name, fixed_ip);
             if (rc != MQVPN_OK)
-                return snprintf(resp, resp_len,
-                                "{\"ok\":false,\"error\":\"fixed_ip invalid or unavailable\"}");
+                return snprintf(
+                    resp, resp_len,
+                    "{\"ok\":false,\"error\":\"fixed_ip invalid or unavailable\"}");
         }
         return snprintf(resp, resp_len, "{\"ok\":true}");
 
@@ -129,7 +130,8 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         int rc = mqvpn_server_set_user_fixed_ip(server, name, fixed_ip);
         if (rc != MQVPN_OK)
             return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"set_user_fixed_ip failed (%d)\"}", rc);
+                            "{\"ok\":false,\"error\":\"set_user_fixed_ip failed (%d)\"}",
+                            rc);
         return snprintf(resp, resp_len, "{\"ok\":true}");
 
     } else if (strcmp(cmd, "remove_user") == 0) {
@@ -402,7 +404,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
             pos += snprintf(arr + pos, sizeof(arr) - (size_t)pos, "\"%s\"", names[i]);
         }
         arr[pos++] = ']';
-        arr[pos]   = '\0';
+        arr[pos] = '\0';
         return snprintf(resp, resp_len, "{\"ok\":true,\"paths\":%s}", arr);
 
     } else {
@@ -482,8 +484,8 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     conn->req[conn->req_len] = '\0';
 
     char resp[CTRL_MAX_RESP_BYTES];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server,
-                        conn->cs->cli_ctx);
+    int rlen =
+        dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server, conn->cs->cli_ctx);
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
     } else if ((size_t)rlen >= sizeof(resp) - 2) {

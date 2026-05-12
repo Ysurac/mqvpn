@@ -1342,8 +1342,7 @@ client_count_active_primaries(mqvpn_client_t *c)
     int n = 0;
     for (int i = 0; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
-        if (!(p->flags & MQVPN_PATH_FLAG_BACKUP) && p->xquic_path_live)
-            n++;
+        if (!(p->flags & MQVPN_PATH_FLAG_BACKUP) && p->xquic_path_live) n++;
     }
     return n;
 }
@@ -1403,6 +1402,7 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
           (unsigned long long)new_id, path_status == 1 ? "STANDBY" : "AVAILABLE");
     p->xqc_path_id = new_id;
     p->xquic_path_live = 1;
+    p->recreate_after_us = 0; /* clear any retry timer set by a prior failed attempt */
     set_path_state_with_log(c, p, PATH_LC_ACTIVE, PATH_REASON_ACTIVATE_OK);
     path_invariant_check(p);
     LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
@@ -1434,7 +1434,8 @@ client_create_standby_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     p->xquic_path_live = 1;
     p->status = MQVPN_PATH_STANDBY;
     xqc_conn_mark_path_standby(c->engine, &c->conn->cid, new_id);
-    LOG_I(c, "backup path[%d] standby: path_id=%" PRIu64 " iface=%s", idx, new_id, p->name);
+    LOG_I(c, "backup path[%d] standby: path_id=%" PRIu64 " iface=%s", idx, new_id,
+          p->name);
     if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
 }
 
@@ -1531,8 +1532,7 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
             } else {
                 /* Scheduler does not understand STANDBY — keep the path out
                  * of xquic until all primaries fail (old create-on-demand). */
-                set_path_state_with_log(c, p, PATH_LC_STANDBY,
-                                        PATH_REASON_XQUIC_REMOVED);
+                set_path_state_with_log(c, p, PATH_LC_STANDBY, PATH_REASON_XQUIC_REMOVED);
                 if (c->cbs.path_event)
                     c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
             }
@@ -1671,8 +1671,8 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
                     p->recreate_after_us = 0;
                     set_path_state_with_log(c, p, PATH_LC_CLOSED_RECOVERABLE,
                                             PATH_REASON_XQUIC_REMOVED);
-                    LOG_W(c, "backup path closed: %s (max retries %d exhausted)",
-                          p->name, PATH_RECREATE_MAX_RETRIES);
+                    LOG_W(c, "backup path closed: %s (max retries %d exhausted)", p->name,
+                          PATH_RECREATE_MAX_RETRIES);
                 } else {
                     uint64_t delay = path_recreate_backoff(p->recreate_retries);
                     p->recreate_after_us = client_now_us(c) + delay;
@@ -1686,10 +1686,9 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
                 /* create-on-demand mode: path was closed (failover ended or
                  * transport error); return to STANDBY with no recreation timer
                  * since xquic has no standing path to maintain. */
-                set_path_state_with_log(c, p, PATH_LC_STANDBY,
-                                        PATH_REASON_XQUIC_REMOVED);
-                LOG_I(c, "backup path standby: path_id=%" PRIu64 " iface=%s",
-                      path_id, p->name);
+                set_path_state_with_log(c, p, PATH_LC_STANDBY, PATH_REASON_XQUIC_REMOVED);
+                LOG_I(c, "backup path standby: path_id=%" PRIu64 " iface=%s", path_id,
+                      p->name);
             }
         } else if (p->platform_attached) {
             /* Increment first, then check against max.  Uses >= for
@@ -1767,9 +1766,9 @@ void
 mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
 {
     switch (sched) {
-    case MQVPN_SCHED_WLB:    cs->scheduler_callback = xqc_wlb_scheduler_cb;    break;
+    case MQVPN_SCHED_WLB: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
     case MQVPN_SCHED_BACKUP: cs->scheduler_callback = xqc_backup_scheduler_cb; break;
-    case MQVPN_SCHED_RAP:    cs->scheduler_callback = xqc_rap_scheduler_cb;    break;
+    case MQVPN_SCHED_RAP: cs->scheduler_callback = xqc_rap_scheduler_cb; break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
@@ -1815,20 +1814,16 @@ cli_start_connection(mqvpn_client_t *c)
     cs.enable_multipath = multipath;
     cs.ping_on = 1;
     cs.mp_ping_on = multipath;
-    cs.mp_enable_reinjection = (multipath && c->config.reinjection_enable) ?
-                               (XQC_REINJ_UNACK_AFTER_SCHED |
-                                XQC_REINJ_UNACK_BEFORE_SCHED |
-                                XQC_REINJ_UNACK_AFTER_SEND)
-                               : 0;
+    cs.mp_enable_reinjection =
+        (multipath && c->config.reinjection_enable)
+            ? (XQC_REINJ_UNACK_AFTER_SCHED | XQC_REINJ_UNACK_BEFORE_SCHED |
+               XQC_REINJ_UNACK_AFTER_SEND)
+            : 0;
     cs.pacing_on = 1;
     cs.max_pkt_out_size = 1400;
     switch (c->config.cc) {
-    case MQVPN_CC_BBR:
-        cs.cong_ctrl_callback = xqc_bbr_cb;
-        break;
-    case MQVPN_CC_CUBIC:
-        cs.cong_ctrl_callback = xqc_cubic_cb;
-        break;
+    case MQVPN_CC_BBR: cs.cong_ctrl_callback = xqc_bbr_cb; break;
+    case MQVPN_CC_CUBIC: cs.cong_ctrl_callback = xqc_cubic_cb; break;
     case MQVPN_CC_NEW_RENO:
 #ifdef XQC_ENABLE_RENO
         cs.cong_ctrl_callback = xqc_reno_cb;
@@ -1871,28 +1866,28 @@ cli_start_connection(mqvpn_client_t *c)
 
     if (c->config.fec_enable) {
 #ifdef XQC_ENABLE_FEC
-#ifdef XQC_ENABLE_RSC
+#  ifdef XQC_ENABLE_RSC
         xqc_fec_schemes_e fec_scheme = XQC_REED_SOLOMON_CODE;
         cs.fec_callback = xqc_reed_solomon_code_cb;
-#else
+#  else
         xqc_fec_schemes_e fec_scheme = XQC_XOR_CODE;
         cs.fec_callback = xqc_xor_code_cb;
-#endif
+#  endif
 
         if (c->config.fec_scheme == MQVPN_FEC_SCHEME_XOR) {
             fec_scheme = XQC_XOR_CODE;
             cs.fec_callback = xqc_xor_code_cb;
         } else if (c->config.fec_scheme == MQVPN_FEC_SCHEME_PACKET_MASK) {
-#ifdef XQC_ENABLE_PKM
+#  ifdef XQC_ENABLE_PKM
             fec_scheme = XQC_PACKET_MASK_CODE;
             cs.fec_callback = xqc_packet_mask_code_cb;
-#else
+#  else
             LOG_W(c, "packet_mask FEC unavailable in xquic build; using reed_solomon");
-#endif
+#  endif
         } else if (c->config.fec_scheme == MQVPN_FEC_SCHEME_REED_SOLOMON) {
-#ifndef XQC_ENABLE_RSC
+#  ifndef XQC_ENABLE_RSC
             LOG_W(c, "reed_solomon FEC unavailable in xquic build; using xor");
-#endif
+#  endif
         }
 
         cs.enable_encode_fec = 1;
@@ -2244,6 +2239,10 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
         /* Flush the close frame immediately so xquic sends it while the fd is
          * still open.  The platform closes the fd right after this returns. */
         xqc_engine_main_logic(c->engine);
+        /* Clear so cb_write_socket_ex no longer routes writes to this slot
+         * (the fd will be closed by the platform immediately after us). */
+        p->xquic_path_live = 0;
+        p->xqc_path_id = 0;
     }
     set_path_state_with_log(c, p, PATH_LC_CLOSED_DROPPED, PATH_REASON_REMOVE_API);
     path_invariant_check(p);
@@ -2344,11 +2343,19 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     ASSERT_TICK_THREAD(c);
 
     cli_conn_t *conn = c->conn;
-    if (!conn || !conn->tunnel_ok) return MQVPN_ERR_INVALID_ARG;
+    if (!conn || !conn->tunnel_ok) {
+        LOG_D(c, "tun drop: no conn or tunnel not ok (conn=%p tok=%d)", (void *)conn,
+              conn ? conn->tunnel_ok : -1);
+        return MQVPN_ERR_INVALID_ARG;
+    }
 
-    if (c->backpressure) return MQVPN_ERR_AGAIN;
+    if (c->backpressure) {
+        LOG_D(c, "tun drop: backpressure");
+        return MQVPN_ERR_AGAIN;
+    }
 
     uint8_t ip_ver = pkt[0] >> 4;
+    LOG_D(c, "tun pkt: ip_ver=%d len=%zu", ip_ver, len);
     if (ip_ver == 4) {
         if (len < IPV4_MIN_HDR) return MQVPN_ERR_INVALID_ARG;
         if (conn->addr_assigned && memcmp(pkt + 12, conn->assigned_ip, 4) != 0) {
@@ -2486,7 +2493,8 @@ tick_recover_degraded_path(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t
 static void
 tick_kick_pending_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
-    if (p->status != MQVPN_PATH_PENDING || !p->platform_attached || p->xquic_path_live) return;
+    if (p->status != MQVPN_PATH_PENDING || !p->platform_attached || p->xquic_path_live)
+        return;
 
     if (p->flags & MQVPN_PATH_FLAG_BACKUP) {
         if (client_scheduler_supports_standby(c))
@@ -2551,8 +2559,7 @@ tick_reconnect(mqvpn_client_t *c)
         uint32_t flags[MQVPN_MAX_PATHS];
         for (int i = 0; i < c->n_paths; i++) {
             flags[i] = c->paths[i].flags;
-            if (!c->paths[i].platform_attached)
-                flags[i] |= MQVPN_PATH_FLAG_BACKUP;
+            if (!c->paths[i].platform_attached) flags[i] |= MQVPN_PATH_FLAG_BACKUP;
         }
         c->primary_path_idx =
             mqvpn_rotate_primary_path(c->primary_path_idx, flags, c->n_paths);
@@ -2669,7 +2676,7 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
         out[i].struct_size = sizeof(out[i]);
         out[i].handle = p->handle;
         out[i].status = p->status;
-        out[i].flags  = p->flags;
+        out[i].flags = p->flags;
         memcpy(out[i].name, p->name, sizeof(out[i].name));
         out[i].bytes_tx = p->bytes_tx;
         out[i].bytes_rx = p->bytes_rx;

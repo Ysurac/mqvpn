@@ -26,7 +26,7 @@
 #define TUN_BUF_SIZE               65536
 #define SOCK_BUF_SIZE              65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
-static int  try_readd_removed_path(platform_ctx_t *p, const char *ifname);
+static int try_readd_removed_path(platform_ctx_t *p, const char *ifname);
 static void recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg);
 #include <stdlib.h>
 #include <string.h>
@@ -390,6 +390,7 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
+    int sent = 0;
     for (int i = 0; i < BULK_READ_COUNT; i++) {
         int n = mqvpn_tun_read(&p->tun, buf, sizeof(buf));
         if (n <= 0) break;
@@ -400,6 +401,15 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
             event_del(p->ev_tun);
             break;
         }
+        if (ret == MQVPN_OK) sent = 1;
+    }
+    /* Drive the xquic engine so queued DATAGRAMs are flushed immediately.
+     * Without this, queued packets wait for the next tick timer (up to 15 s
+     * idle) which causes ping timeouts when no incoming UDP traffic triggers
+     * on_socket_read (e.g. after removing the primary path). */
+    if (sent) {
+        mqvpn_client_tick(p->client);
+        schedule_next_tick(p);
     }
 }
 
@@ -464,6 +474,15 @@ platform_add_path(platform_ctx_t *p, const char *iface, int backup)
     if (idx < 0) return -1;
 
     mqvpn_path_t *mp = &p->path_mgr.paths[idx];
+
+    /* Pin the new socket to its interface so the kernel doesn't route it
+     * via a stale split-tunnel host route (e.g. 10.x.x.1 dev veth-a0)
+     * that was set up for a different path. */
+    if (linux_pin_socket_to_iface(mp->fd, mp->iface) < 0) {
+        mqvpn_path_mgr_remove_at(&p->path_mgr, idx);
+        return -1;
+    }
+
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
     desc.fd = mp->fd;
@@ -499,7 +518,10 @@ platform_remove_path(platform_ctx_t *p, const char *iface)
 
     int idx = -1;
     for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) { idx = i; break; }
+        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) {
+            idx = i;
+            break;
+        }
     }
     if (idx < 0) return -1;
 
@@ -512,11 +534,11 @@ platform_remove_path(platform_ctx_t *p, const char *iface)
 
     /* Compact ev_udp and lib_path_handles in parallel with path_mgr */
     for (int i = idx; i < p->path_mgr.n_paths - 1; i++) {
-        p->ev_udp[i]          = p->ev_udp[i + 1];
+        p->ev_udp[i] = p->ev_udp[i + 1];
         p->lib_path_handles[i] = p->lib_path_handles[i + 1];
     }
-    p->ev_udp[p->path_mgr.n_paths - 1]           = NULL;
-    p->lib_path_handles[p->path_mgr.n_paths - 1]  = -1;
+    p->ev_udp[p->path_mgr.n_paths - 1] = NULL;
+    p->lib_path_handles[p->path_mgr.n_paths - 1] = -1;
 
     mqvpn_path_mgr_remove_at(&p->path_mgr, idx); /* closes fd, compacts paths[] */
     LOG_INF("path removed: %s", iface);
@@ -1109,7 +1131,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
      * Also enable when a control port is configured: the control socket exposes
      * add_path/remove_path commands, so the user intends dynamic path management
      * and multipath negotiation must happen at connection setup time. */
-    mqvpn_config_set_multipath(lib_cfg,
+    mqvpn_config_set_multipath(
+        lib_cfg,
         (cfg->n_paths > 1 || cfg->n_backup_paths > 0 || cfg->control_port > 0) ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
@@ -1217,8 +1240,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Register backup (failover) paths */
     for (int i = 0; i < cfg->n_backup_paths; i++) {
-        int idx = mqvpn_path_mgr_add(&ctx.path_mgr, cfg->backup_ifaces[i],
-                                     &ctx.server_addr);
+        int idx =
+            mqvpn_path_mgr_add(&ctx.path_mgr, cfg->backup_ifaces[i], &ctx.server_addr);
         if (idx < 0) {
             LOG_WRN("backup path %s: socket creation failed, skipping",
                     cfg->backup_ifaces[i]);
@@ -1263,10 +1286,9 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Control API (optional) */
     if (cfg->control_port > 0) {
-        ctx.ctrl = ctrl_socket_create(ctx.eb, cfg->control_addr,
-                                      cfg->control_port, NULL, &ctx);
-        if (!ctx.ctrl)
-            LOG_WRN("client control API setup failed — continuing without it");
+        ctx.ctrl =
+            ctrl_socket_create(ctx.eb, cfg->control_addr, cfg->control_port, NULL, &ctx);
+        if (!ctx.ctrl) LOG_WRN("client control API setup failed — continuing without it");
     }
 
     /* Connect */
@@ -1690,10 +1712,9 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 
     /* Control API (optional) */
     if (cfg->control_port > 0) {
-        sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr,
-                                     cfg->control_port, sp.server, NULL);
-        if (!sp.ctrl)
-            LOG_WRN("control API setup failed — continuing without it");
+        sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr, cfg->control_port,
+                                     sp.server, NULL);
+        if (!sp.ctrl) LOG_WRN("control API setup failed — continuing without it");
     }
 
     LOG_INF("mqvpn server ready — listening on %s:%d, subnet %s",
