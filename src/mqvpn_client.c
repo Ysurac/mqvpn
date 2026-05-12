@@ -460,7 +460,11 @@ static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
-    if (p) return p->fd;
+    /* Guard platform_attached: for the initial path (xqc_path_id=0),
+     * xqc_conn_close_path is intentionally skipped in remove_path, so
+     * cb_path_removed(0) never fires and xquic_path_live stays 1 in the
+     * CLOSED_DROPPED slot — returning its closed fd would EBADF. */
+    if (p && p->platform_attached) return p->fd;
     int pidx = c->primary_path_idx;
     if (pidx < c->n_paths && c->paths[pidx].platform_attached) return c->paths[pidx].fd;
     return mqvpn_client_first_active_fd(c);

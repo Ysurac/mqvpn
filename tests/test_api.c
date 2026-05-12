@@ -1489,6 +1489,9 @@ TEST(activation_failure_eventually_closes_path)
  * This is the path xquic takes when validation fails after we entered
  * VALIDATING. ACTIVE/STANDBY (validated) must instead go to DEGRADED;
  * VALIDATING (never validated) starts retry from CREATE_WAIT. */
+extern int mqvpn_client_test_force_validating(mqvpn_client_t *c,
+                                              mqvpn_path_handle_t handle,
+                                              uint64_t xqc_path_id);
 extern int mqvpn_client_test_force_validating_then_remove(mqvpn_client_t *c,
                                                           mqvpn_path_handle_t handle,
                                                           uint64_t xqc_path_id);
@@ -1794,6 +1797,41 @@ TEST(get_fd_falls_back_to_first_active_when_primary_dropped)
     ASSERT_EQ(mqvpn_client_drop_path(c, h0), MQVPN_OK);
 
     ASSERT_EQ(mqvpn_client_test_get_fd_for_path(c, 99999), 11);
+
+    mqvpn_client_destroy(c);
+}
+
+/* Bug 2 regression: removing the initial path (xqc_path_id=0) must not leave
+ * a stale CLOSED_DROPPED slot visible to find_path_by_xqc_id.  Before the
+ * fix, xqc_conn_close_path was skipped for path_id=0 (intentional — it would
+ * close the whole connection), so cb_path_removed(0) never fired, leaving
+ * xquic_path_live=1 in the dropped slot.  get_fd_for_path(c, 0) then returned
+ * the now-closed fd → EBADF → XQC_SOCKET_ERROR → connection teardown. */
+TEST(get_fd_skips_removed_primary_with_xqc_path_id_zero)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    /* Slot 0: initial path (xqc_path_id=0, xquic_path_live=1). */
+    mqvpn_path_desc_t d0 = {0};
+    snprintf(d0.iface, sizeof(d0.iface), "eth0");
+    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h0, 0), 0);
+
+    /* Slot 1: secondary path (xqc_path_id=2, xquic_path_live=1). */
+    mqvpn_path_desc_t d1 = {0};
+    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
+    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h1, 2), 0);
+
+    /* Remove the initial path.  xqc_conn_close_path is skipped for path_id=0
+     * so xquic_path_live stays 1 in the dropped slot — the bug. */
+    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
+
+    /* get_fd_for_path(0) must NOT return the closed fd of the dropped slot;
+     * it must fall through to the first active sibling (fd=11). */
+    ASSERT_EQ(mqvpn_client_test_get_fd_for_path(c, 0), 11);
 
     mqvpn_client_destroy(c);
 }
@@ -2234,6 +2272,7 @@ main(void)
     /* Primary-path rotation (issue #46) + OMR fallback composite */
     run_get_fd_prefers_rotated_primary_when_active();
     run_get_fd_falls_back_to_first_active_when_primary_dropped();
+    run_get_fd_skips_removed_primary_with_xqc_path_id_zero();
     run_client_next_primary_idx_skips_closed_and_inactive();
 
     /* Permanent path-create failure (XQC_EMP_CREATE_PATH) */
