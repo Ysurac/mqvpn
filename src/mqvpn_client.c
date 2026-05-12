@@ -2121,10 +2121,19 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
     if (!c || fd < 0) return -1;
     ASSERT_TICK_THREAD(c);
 
-    /* Reuse a CLOSED slot if available, otherwise append */
+    /* Reuse a CLOSED slot if available, otherwise append.
+     *
+     * Tighten the predicate with `!xquic_path_live`: a slot in CLOSED_DROPPED
+     * whose xquic-side path hasn't drained yet (xquic_path_live=1 with a
+     * pending cb_path_removed) carries a live xqc_path_id binding. Reusing
+     * the slot now zeroes that binding via path_entry_init() — when the
+     * delayed cb_path_removed fires it can no longer find_path_by_xqc_id,
+     * leaving xquic's removal accounting unreconciled with the lib slot.
+     * Waiting for xquic-side cleanup (xquic_path_live=0) is the natural fence. */
     int idx = -1;
     for (int i = 0; i < c->n_paths; i++) {
-        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached) {
+        if (c->paths[i].status == MQVPN_PATH_CLOSED && !c->paths[i].platform_attached &&
+            !c->paths[i].xquic_path_live) {
             idx = i;
             break;
         }
@@ -2209,20 +2218,44 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 }
 
 int
-mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
+mqvpn_client_drop_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    /* PR5: thin wrapper of mqvpn_client_on_platform_path_dropped() with
+     * NULL info (no diagnostic context). Preserved for ABI compat. */
+    return mqvpn_client_on_platform_path_dropped(c, handle, NULL);
+}
+
+int
+mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                      const mqvpn_platform_path_event_info_t *info)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
-
-    path_entry_t *p = find_path_by_handle(c, path);
+    path_entry_t *p = find_path_by_handle(c, handle);
     if (!p) return MQVPN_ERR_INVALID_ARG;
 
-    /* Spec §5.0: PLATFORM_DROP does NOT call xqc_conn_close_path (lazy
-     * natural death — fd may be dead already). xquic will detect the dead
-     * fd via sendto() errors and remove the path through PTO-based failure
-     * detection. */
+    /* NULL info case is silent (preserve pre-PR5 drop_path log-free behavior).
+     * Only log when caller provided diagnostic context. */
+    if (info && info->iface[0]) {
+        LOG_I(c, "platform path dropped: handle=%lld iface=%s reason=%d",
+              (long long)handle, info->iface, (int)info->reason);
+    }
+
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
+    return MQVPN_OK;
+}
+
+int
+mqvpn_client_on_platform_fd_closed(mqvpn_client_t *c, mqvpn_path_handle_t handle)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    path_event_ctx_t ctx = {.now_us = client_now_us(c)};
+    path_on_event(c, p, PATH_EVENT_FD_CLOSED, &ctx);
     return MQVPN_OK;
 }
 
@@ -2722,6 +2755,13 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
 
     int ms = (int)(c->next_wake_us / 1000);
 
+    /* RECONNECTING / CONNECTING blocks below legitimately extend `ms`
+     * when xquic hasn't requested a wake (`ms <= 0`): the tunnel is not
+     * live in those states, there is no pacing to protect, and we MUST
+     * wake at the reconnect / handshake-stall deadline or the FSM stalls.
+     * The Recovery / Stability blocks further down are different — there
+     * the tunnel is live and extending `ms` would starve BBR pacing. */
+
     /* During reconnect, wake up for the reconnect timer */
     if (c->state == MQVPN_STATE_RECONNECTING && c->reconnect_scheduled_us > 0) {
         uint64_t t = client_now_us(c);
@@ -2749,21 +2789,31 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         uint64_t now_val = client_now_us(c);
         for (int i = 0; i < c->n_paths; i++) {
             const path_entry_t *p = &c->paths[i];
-            /* Recovery timer */
+            /* Recovery timer — shorten `ms` only, never extend. Same shape as
+             * Stability timer below. Unlike the RECONNECTING / CONNECTING
+             * blocks above, the tunnel is live here and BBR pacing depends
+             * on near-term ticks. */
             if (p->status == MQVPN_PATH_DEGRADED && p->recreate_after_us > 0) {
                 if (p->recreate_after_us > now_val) {
                     int pms = (int)((p->recreate_after_us - now_val) / 1000);
-                    if (ms <= 0 || pms < ms) ms = pms;
+                    if (ms > 0 && pms < ms) ms = pms;
                 } else {
                     ms = 1;
                 }
             }
-            /* Stability timer */
+            /* Stability timer — same shape as Recovery timer above. The
+             * earlier `ms <= 0 || sms < ms` form was a latent bug: when
+             * `path_stable_since_us` is set (PR3+ starts doing this on
+             * VALIDATING -> ACTIVE), this block extended `ms` from 0 to
+             * ~30000 (PATH_STABLE_THRESHOLD_US in ms), pinning the next
+             * libevent tick 30 seconds out. Without periodic ticks, BBR
+             * pacing stalled between I/O events, tanking multipath
+             * throughput ~3-4x in the WLB aggregate bench. */
             if (p->path_stable_since_us > 0 && p->xquic_path_live) {
                 uint64_t stable_at = p->path_stable_since_us + PATH_STABLE_THRESHOLD_US;
                 if (stable_at > now_val) {
                     int sms = (int)((stable_at - now_val) / 1000);
-                    if (ms <= 0 || sms < ms) ms = sms;
+                    if (ms > 0 && sms < ms) ms = sms;
                 } else {
                     ms = 1;
                 }

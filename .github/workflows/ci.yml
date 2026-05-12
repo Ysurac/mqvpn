@@ -244,6 +244,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_path_api_test.sh
 
+      - name: E2E carrier-flap test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_carrier_flap_test.sh
+
       - name: E2E backup_fec scheduler test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -393,7 +399,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libevent-dev iptables
+          sudo apt-get install -y libevent-dev iptables iperf3
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
@@ -424,6 +430,12 @@ jobs:
 
       - name: Runtime path add/remove API test (netns) [issue #4271/#4273]
         run: sudo scripts/ci_e2e/run_path_api_test.sh
+
+      - name: Carrier-flap test (netns)
+        run: sudo scripts/ci_e2e/run_carrier_flap_test.sh
+
+      - name: Throughput-floor regression test (netns)
+        run: sudo scripts/ci_e2e/run_throughput_floor_test.sh
 
   ipv6-tests:
     needs: build
