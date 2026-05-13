@@ -353,10 +353,11 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
 
     get_all_fec_done:
 #undef APPEND
-        if (truncated) {
+        if (truncated)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"response too large\"}");
-        }
+        return snprintf(resp, resp_len, "%.*s", pos, buf);
+
     } else if (strcmp(cmd, "add_path") == 0) {
         if (!cli_ctx)
             return snprintf(resp, resp_len,

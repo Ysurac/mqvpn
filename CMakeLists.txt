@@ -292,6 +292,18 @@ if(BUILD_TESTING)
 
     target_include_directories(test_path_error_policy PRIVATE ${XQUIC_INCLUDE_DIR})
 
+    # control_socket dispatch() unit tests (requires libevent for socket machinery)
+    add_executable(test_control_socket tests/test_control_socket.c)
+    target_link_libraries(test_control_socket ${EVENT_LIB})
+    target_include_directories(test_control_socket PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/src/platform/linux
+        ${CMAKE_SOURCE_DIR}/include
+        ${EVENT_INCLUDE_DIR}
+    )
+    set_target_properties(test_control_socket PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_control_socket COMMAND test_control_socket)
+
     # libmqvpn public API test (links libmqvpn + xquic)
     add_executable(test_api tests/test_api.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
