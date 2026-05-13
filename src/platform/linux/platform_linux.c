@@ -217,7 +217,7 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
      * RTM_NEWLINK/NEWADDR before the reconnect completed. */
     if (new_state == MQVPN_STATE_ESTABLISHED) {
         for (int i = 0; i < p->path_mgr.n_paths; i++) {
-            if (p->path_removed_by_platform[i] && p->path_mgr.paths[i].fd < 0)
+            if (p->path_mgr.paths[i].fd < 0)
                 try_readd_removed_path(p, p->path_mgr.paths[i].iface);
         }
     }
