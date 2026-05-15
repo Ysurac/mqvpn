@@ -228,6 +228,9 @@ run_e2e_test "E2E: Path bounce stability — 10 add/remove cycles (#4276)" \
 run_e2e_test "E2E: Congestion-control algorithm selection (bbr2/bbr/cubic)" \
     "${SCRIPT_DIR}/ci_e2e/run_cc_test.sh"
 
+run_e2e_test "E2E: 8-link WLB aggregation (multi/single ratio >= 2x)" \
+    "${SCRIPT_DIR}/ci_e2e/run_8link_aggregation_test.sh"
+
 # ── Test Results Summary ─────────────────────────────────────────────────────
 
 echo ""

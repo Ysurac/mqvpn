@@ -13,7 +13,7 @@
 #endif
 #include <stdint.h>
 
-#define MQVPN_MAX_PATHS 4
+#define MQVPN_MAX_PATHS 8
 
 typedef struct {
     int fd;

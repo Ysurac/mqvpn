@@ -45,7 +45,7 @@ extern "C" {
 /* ─── Capacity constants ─── */
 
 #define MQVPN_MAX_USERS 64
-#define MQVPN_MAX_PATHS 4
+#define MQVPN_MAX_PATHS 8
 
 /* ─── Opaque handles ─── */
 
