@@ -352,22 +352,23 @@ TEST(backup_path_slot_reusable_after_remove)
 {
     mqvpn_client_t *c = make_client_with_events();
 
-    /* Fill all 4 slots — mix primary + backup */
+    /* Fill all MQVPN_MAX_PATHS slots — first two as primary + backup */
     mqvpn_path_desc_t dp = {0}, db = {0};
     dp.fd = 100;
     db.fd = 101; db.flags = MQVPN_PATH_FLAG_BACKUP;
 
     mqvpn_path_handle_t hp = mqvpn_client_add_path_fd(c, 100, &dp);
     mqvpn_path_handle_t hb = mqvpn_client_add_path_fd(c, 101, &db);
-    mqvpn_client_add_path_fd(c, 102, NULL);
-    mqvpn_client_add_path_fd(c, 103, NULL);
+    for (int i = 102; i < 100 + MQVPN_MAX_PATHS; i++)
+        mqvpn_client_add_path_fd(c, i, NULL);
 
-    /* 5th should fail */
-    ASSERT_EQ(mqvpn_client_add_path_fd(c, 104, NULL), (mqvpn_path_handle_t)-1);
+    /* One beyond the limit must fail */
+    ASSERT_EQ(mqvpn_client_add_path_fd(c, 100 + MQVPN_MAX_PATHS, NULL),
+              (mqvpn_path_handle_t)-1);
 
     /* Remove backup, then adding one more should succeed */
     ASSERT_EQ(mqvpn_client_remove_path(c, hb), MQVPN_OK);
-    mqvpn_path_handle_t h_new = mqvpn_client_add_path_fd(c, 105, NULL);
+    mqvpn_path_handle_t h_new = mqvpn_client_add_path_fd(c, 200, NULL);
     ASSERT_NE(h_new, (mqvpn_path_handle_t)-1);
 
     (void)hp;

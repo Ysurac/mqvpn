@@ -372,13 +372,13 @@ TEST(closed_via_drop_readdable)
 /* ═══════════════════════════════════════════════════════════════════════════
  * Group 5: Slot array capacity is not exhausted by bouncing
  *
- * With MQVPN_MAX_PATHS=4, repeated bouncing on a single interface must never
- * cause add_path_fd() to fail with -1 (no available slots).
+ * Repeated bouncing on a single interface must never cause add_path_fd() to
+ * fail with -1 (no available slots).
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /*
  * Filling slots to capacity then bouncing one path must not overflow.
- * Simulates a 4-path setup where one interface (usb1) bounces while the
+ * Simulates a full-slot setup where one interface (eth1) bounces while the
  * others remain stable.
  */
 TEST(full_slot_array_bounce_does_not_overflow)
@@ -388,15 +388,16 @@ TEST(full_slot_array_bounce_does_not_overflow)
 
     /* Fill all slots */
     mqvpn_path_handle_t handles[MQVPN_MAX_PATHS];
-    const char *ifaces[] = {"eth0", "usb1", "wlan0", "eth1"};
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
-        mqvpn_path_desc_t d = make_desc(10 + i, ifaces[i], 0);
+        char name[16];
+        snprintf(name, sizeof(name), "eth%d", i);
+        mqvpn_path_desc_t d = make_desc(10 + i, name, 0);
         handles[i] = mqvpn_client_add_path_fd(c, 10 + i, &d);
         ASSERT_NE(handles[i], (mqvpn_path_handle_t)-1);
     }
     ASSERT_EQ(count_paths(c), MQVPN_MAX_PATHS);
 
-    /* usb1 (slot 1) bounces 4 times; slots must stay at MQVPN_MAX_PATHS */
+    /* eth1 (slot 1) bounces 4 times; slots must stay at MQVPN_MAX_PATHS */
     for (int bounce = 0; bounce < 4; bounce++) {
         ASSERT_EQ(mqvpn_client_drop_path(c, handles[1]), MQVPN_OK);
 
@@ -410,8 +411,8 @@ TEST(full_slot_array_bounce_does_not_overflow)
 
     /* All other paths unaffected */
     ASSERT_EQ(path_status(c, handles[0]), MQVPN_PATH_PENDING); /* eth0 */
-    ASSERT_EQ(path_status(c, handles[2]), MQVPN_PATH_PENDING); /* wlan0 */
-    ASSERT_EQ(path_status(c, handles[3]), MQVPN_PATH_PENDING); /* eth1 */
+    ASSERT_EQ(path_status(c, handles[2]), MQVPN_PATH_PENDING); /* eth2 */
+    ASSERT_EQ(path_status(c, handles[3]), MQVPN_PATH_PENDING); /* eth3 */
 
     mqvpn_client_destroy(c);
 }
@@ -433,7 +434,7 @@ TEST(new_interface_rejected_when_slots_full)
                   (mqvpn_path_handle_t)-1);
     }
 
-    /* All slots active (PENDING) — a fifth interface must be rejected */
+    /* All slots active (PENDING) — one more must be rejected */
     mqvpn_path_desc_t overflow = make_desc(99, "usb2", 0);
     ASSERT_EQ(mqvpn_client_add_path_fd(c, 99, &overflow), (mqvpn_path_handle_t)-1);
 
