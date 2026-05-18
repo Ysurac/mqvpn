@@ -68,6 +68,23 @@ typedef struct cli_stream_s cli_stream_t;
 static int cli_start_connection(mqvpn_client_t *c);
 static void cli_conn_destroy(mqvpn_client_t *c);
 
+/* Look up xquic per-path metrics by path_id in a stats snapshot.
+ *
+ * xqc_conn_stats_t.paths_info is a dynamically allocated buffer of
+ * paths_info_count entries (xquic PR3 §4.3 Rev 4). Returns NULL if
+ * path_id is not found. Read-only — caller may inspect any pm->* field
+ * but must not write through the pointer. */
+static inline const xqc_path_metrics_t *
+xqc_find_path_metrics(const xqc_conn_stats_t *stats, uint64_t path_id)
+{
+    if (stats->paths_info == NULL) return NULL;
+    for (uint32_t j = 0; j < stats->paths_info_count; j++) {
+        const xqc_path_metrics_t *pm = &stats->paths_info[j];
+        if (pm->path_id == path_id) return pm;
+    }
+    return NULL;
+}
+
 /* ─── Internal types ─── */
 
 /* Per-path entry (Level 1 — survives reconnect).
@@ -303,6 +320,29 @@ void
 path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
 {
     if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
+}
+
+/* G-P15 (draft-21 §3.3 ¶6): emit PATH_STATUS to peer when local lifecycle
+ * demotes. app_status: 1=STANDBY, 2=AVAILABLE, 3=FROZEN (xqc_typedef.h).
+ * No-op if engine or conn is missing (e.g. during reconnect, or for
+ * pre-handshake transitions); path-status will be re-asserted by the
+ * caller when the conn is re-established and the lifecycle moves again. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+void
+client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_status)
+{
+    if (!c || !c->engine || !c->conn) return;
+    if (!p->xquic_path_live) return;
+    const xqc_cid_t *cid = &c->conn->cid;
+    uint64_t pid = p->xqc_path_id;
+    switch (app_status) {
+    case 1: xqc_conn_mark_path_standby(c->engine, cid, pid); break;
+    case 2: xqc_conn_mark_path_available(c->engine, cid, pid); break;
+    case 3: xqc_conn_mark_path_frozen(c->engine, cid, pid); break;
+    default: break;
+    }
 }
 
 #define LOG_D(c, ...) client_log(c, MQVPN_LOG_DEBUG, __VA_ARGS__)
@@ -2540,30 +2580,27 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
         path_entry_t *p = &c->paths[i];
         if (p->state != PATH_LC_VALIDATING) continue;
 
-        for (int j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
-            const xqc_path_metrics_t *pm = &st.paths_info[j];
-            if (pm->path_id == UINT64_MAX) break; /* sentinel */
-            if (pm->path_id != p->xqc_path_id) continue;
-            if (pm->path_state != 2)
-                break; /* XQC_PATH_STATE_ACTIVE = 2 lives in private xqc_multipath.h;
-                          still validating */
+        const xqc_path_metrics_t *pm = xqc_find_path_metrics(&st, p->xqc_path_id);
+        if (!pm) continue;
+        if (pm->path_state != 2) continue;
+        /* XQC_PATH_STATE_ACTIVE = 2 lives in private xqc_multipath.h;
+         * still validating below that. */
 
-            /* Branch on connection-scoped scheduler config — secondary paths
-             * created under backup_fec are STANDBY (spec §10.1.1). Scheduler
-             * is immutable per-connection so the result is stable for the
-             * lifetime of this path. Dispatched via VALIDATION_OK; the
-             * handler sets path_stable_since_us = now and transitions to
-             * the carried target. */
-            path_lifecycle_t target = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
-                                          ? PATH_LC_STANDBY
-                                          : PATH_LC_ACTIVE;
-            path_event_ctx_t v_ctx = {.validated_target = target, .now_us = now};
-            path_on_event(c, p, PATH_EVENT_VALIDATION_OK, &v_ctx);
-            LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s state=%s", i,
-                  p->xqc_path_id, p->name, path_lifecycle_name(target));
-            break;
-        }
+        /* Branch on connection-scoped scheduler config — secondary paths
+         * created under backup_fec are STANDBY (spec §10.1.1). Scheduler
+         * is immutable per-connection so the result is stable for the
+         * lifetime of this path. Dispatched via VALIDATION_OK; the
+         * handler sets path_stable_since_us = now and transitions to
+         * the carried target. */
+        path_lifecycle_t target = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
+                                      ? PATH_LC_STANDBY
+                                      : PATH_LC_ACTIVE;
+        path_event_ctx_t v_ctx = {.validated_target = target, .now_us = now};
+        path_on_event(c, p, PATH_EVENT_VALIDATION_OK, &v_ctx);
+        LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s state=%s", i,
+              p->xqc_path_id, p->name, path_lifecycle_name(target));
     }
+    free(st.paths_info);
 }
 
 /* PR4 — tick_confirm_stable_path relocated to path_state_machine.c as
@@ -2705,6 +2742,7 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
     if (c->engine && c->conn) {
         xqc_conn_stats_t xs = xqc_conn_get_stats(c->engine, &c->conn->cid);
         out->srtt_ms = (int)(xs.srtt / 1000);
+        free(xs.paths_info);
     }
     return MQVPN_OK;
 }
@@ -2731,18 +2769,15 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
         out[i].bytes_tx = p->bytes_tx;
         out[i].bytes_rx = p->bytes_rx;
 
-        /* Map SRTT from xquic path metrics (μs → ms) */
+        /* Map SRTT from xquic path metrics (us -> ms) */
         out[i].srtt_ms = 0;
         if (p->xquic_path_live) {
-            for (int j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
-                if (xstats.paths_info[j].path_id == p->xqc_path_id) {
-                    out[i].srtt_ms = (int)(xstats.paths_info[j].path_srtt / 1000);
-                    break;
-                }
-            }
+            const xqc_path_metrics_t *pm = xqc_find_path_metrics(&xstats, p->xqc_path_id);
+            if (pm) out[i].srtt_ms = (int)(pm->path_srtt / 1000);
         }
     }
     *n_paths = count;
+    free(xstats.paths_info);
     return MQVPN_OK;
 }
 

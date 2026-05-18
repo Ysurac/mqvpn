@@ -303,6 +303,24 @@ path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
  * after retry exhausted) would be silently suppressed as self-loops:
  * the state field would update but no transition log fires and
  * path_mark_state_entry never re-anchors the residence timer. */
+/* G-P15 (draft-21 §3.3 ¶6): when local lifecycle demotes ACTIVE↔STANDBY
+ * or ACTIVE/STANDBY→DEGRADED, mirror the new path class onto the xquic
+ * conn so the peer is informed via PATH_STATUS frames. Closing
+ * transitions (→ CLOSED_*) use xquic's path-abandon path, not mark; we
+ * only fire on operational class changes.
+ *   1 = XQC_APP_PATH_STATUS_STANDBY
+ *   2 = XQC_APP_PATH_STATUS_AVAILABLE
+ *   3 = XQC_APP_PATH_STATUS_FROZEN */
+static int
+g_p15_xqc_app_status_for(path_lifecycle_t from, path_lifecycle_t to)
+{
+    if (from == PATH_LC_ACTIVE && to == PATH_LC_STANDBY) return 1;
+    if (from == PATH_LC_STANDBY && to == PATH_LC_ACTIVE) return 2;
+    if ((from == PATH_LC_ACTIVE || from == PATH_LC_STANDBY) && to == PATH_LC_DEGRADED)
+        return 3;
+    return 0; /* no xquic call for other transitions */
+}
+
 void
 set_path_state_with_log(mqvpn_client_t *c, path_entry_t *p, path_lifecycle_t new_state,
                         path_transition_reason_t reason)
@@ -315,6 +333,9 @@ set_path_state_with_log(mqvpn_client_t *c, path_entry_t *p, path_lifecycle_t new
     p->state = new_state;
     path_mark_state_entry(p, client_now_us(c));
     path_log_state_change(c, p, old_state, reason);
+
+    int app_status = g_p15_xqc_app_status_for(old_state, new_state);
+    if (app_status != 0) client_notify_xqc_path_state(c, p, app_status);
 }
 
 /* PR4 — relocated from mqvpn_client.c. Exponential backoff cap. */
@@ -676,11 +697,11 @@ maybe_transition_dropped_to_free(mqvpn_client_t *c, path_entry_t *p,
     set_path_state_with_log(c, p, PATH_LC_CLOSED_FREE, reason);
 }
 
-/* PR4 — Relocated from mqvpn_client.c for §7.1 file-scope allow. The
- * §6.3 re-arm semantic (path_stable_since_us = now after reset) is
- * deliberately NOT fixed here — that is a separate spec-compliance bug
- * fix scheduled for a follow-up PR. PR4 preserves the current
- * `path_stable_since_us = 0` behavior to keep the diff mechanical. */
+/* Spec sec 6.3 re-arm semantic: after firing the 30s reset, set
+ * `path_stable_since_us = now` so the next 30s window starts counting
+ * from now (NOT 0, which would disarm the timer until the path drops
+ * back through VALIDATING and returns to ACTIVE/STANDBY). A path that
+ * stays usable for 60s+ thus experiences 2 resets. */
 void
 path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 {
@@ -692,5 +713,5 @@ path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
     client_log(c, MQVPN_LOG_INFO, "path %s: stable for 30s, resetting retry budget",
                p->name);
     p->recreate_retries = 0;
-    p->path_stable_since_us = 0; /* §6.3 spec divergence — see Out of Scope */
+    p->path_stable_since_us = now; /* sec 6.3 re-arm: next 30s window starts now */
 }
