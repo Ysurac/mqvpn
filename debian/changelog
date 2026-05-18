@@ -1,3 +1,21 @@
+mqvpn (0.5.0-1) unstable; urgency=medium
+
+  * Add QUIC draft-21 support (phase 1, #124).
+  * Add path FSM refactor: pre-active split, closed split, path add with
+    outcome, platform event API, and Linux external state removal (#88,
+    #112, #113, #115, #116, #117).
+  * Add support for up to 8 simultaneous paths (xquic limit).
+  * Fix control socket handling and add unit test.
+  * Fix get_interest timer extension (next_timer_ms only shortened, not
+    extended).
+  * Fix initial path removal regression and related tests.
+  * Fix path_stable_since_us re-arm per RFC spec §6.3; add
+    xqc_find_path_metrics helper.
+  * Fix multipath not enabled when only --control-port is set.
+  * Restore add_path / remove_path / list_paths control API commands.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sun, 18 May 2026 00:00:00 +0000
+
 mqvpn (0.4.2-1) unstable; urgency=medium
 
   * Fix server crash (SIGSEGV) when a non-H3 QUIC probe connects without
