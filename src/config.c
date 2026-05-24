@@ -350,6 +350,14 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
     case SEC_MULTIPATH:
         if (strcasecmp(key, "Scheduler") == 0) {
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
+        } else if (strcasecmp(key, "InitMaxPathId") == 0) {
+            char *end = NULL;
+            unsigned long long v = strtoull(val, &end, 10);
+            if (!end || *end != '\0') {
+                LOG_WRN("%s:%d: invalid InitMaxPathId '%s'", path, lineno, val);
+            } else {
+                cfg->init_max_path_id = v;
+            }
         } else if (strcasecmp(key, "CC") == 0 ||
                    strcasecmp(key, "CongestionControl") == 0) {
             snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
@@ -482,6 +490,13 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "scheduler");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
+
+    v = json_find_key(json_text, "init_max_path_id");
+    if (v) {
+        /* uint64 field; use int64 reader to match INI strtoull width */
+        int64_t iv64 = json_read_int64(v);
+        if (iv64 >= 0) cfg->init_max_path_id = (unsigned long long)iv64;
+    }
 
     v = json_find_key(json_text, "cc");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)

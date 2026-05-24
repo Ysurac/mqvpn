@@ -33,6 +33,7 @@ typedef struct mqvpn_server_cfg_s {
     int max_clients;                /* max concurrent clients (default 64) */
     const char *control_addr;       /* bind address for JSON control API (default 127.0.0.1) */
     int control_port;               /* TCP port for JSON control API (0 = disabled) */
+    uint64_t init_max_path_id;      /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

@@ -52,7 +52,7 @@
 #define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
 #define MAX_CAPSULE_BUF   65536
 #define XQC_SNDQ_MAX_PKTS 16384
-#define PTB_RATE_LIMIT    10
+#define PTB_RATE_LIMIT   10
 
 /* ─── Forward declarations ─── */
 
@@ -227,6 +227,8 @@ now_ms_mono(void)
 static void server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 #endif
+
+#include "mqvpn_conn_settings.h"
 
 static void
 server_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
@@ -1400,6 +1402,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     }
 #endif
     mqvpn_apply_scheduler(&conn_settings, cfg->scheduler);
+    if (cfg->init_max_path_id > 0)
+        conn_settings.init_max_path_id = cfg->init_max_path_id;
 
     if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
         conn_settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;

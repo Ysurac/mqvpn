@@ -43,6 +43,7 @@
 #include "flow_sched.h"
 #include "icmp.h"
 #include "path_state_machine.h"
+#include "mqvpn_conn_settings.h"
 
 /* ─── Constants ─── */
 
@@ -1721,40 +1722,7 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
     return scheduler == MQVPN_SCHED_BACKUP_FEC && n_paths < 2;
 }
 
-/* ─── Scheduler dispatch helper (shared with mqvpn_server.c) ─── */
-
-void
-mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
-{
-    switch (sched) {
-    case MQVPN_SCHED_WLB: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
-    case MQVPN_SCHED_BACKUP: cs->scheduler_callback = xqc_backup_scheduler_cb; break;
-    case MQVPN_SCHED_RAP: cs->scheduler_callback = xqc_rap_scheduler_cb; break;
-    case MQVPN_SCHED_BACKUP_FEC:
-#if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
-        cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
-        cs->enable_encode_fec = 1;
-        cs->enable_decode_fec = 1;
-        cs->fec_params.fec_encoder_schemes_num = 1;
-        cs->fec_params.fec_encoder_schemes[0] = MQVPN_FEC_SCHEME;
-        cs->fec_params.fec_decoder_schemes_num = 1;
-        cs->fec_params.fec_decoder_schemes[0] = MQVPN_FEC_SCHEME;
-        cs->fec_params.fec_code_rate = MQVPN_FEC_CODE_RATE;
-        cs->fec_params.fec_max_symbol_num_per_block = MQVPN_FEC_BLOCK_SIZE;
-        cs->fec_params.fec_mp_mode = XQC_FEC_MP_USE_STB;
-        /* fec_callback intentionally left zero — xqc_set_valid_*_scheme_cb()
-           fills it after FEC scheme negotiation completes. */
-#else
-        /* Built without FEC — silently degrade to MINRTT. main.c parser
-           also rejects "backup_fec" at the CLI surface in this case, so this
-           branch only protects against direct API callers. */
-        cs->scheduler_callback = xqc_minrtt_scheduler_cb;
-#endif
-        break;
-    case MQVPN_SCHED_MINRTT:
-    default: cs->scheduler_callback = xqc_minrtt_scheduler_cb; break;
-    }
-}
+#include "mqvpn_conn_settings.h"
 
 /* ─── Start a QUIC/H3 connection ─── */
 
@@ -1816,6 +1784,8 @@ cli_start_connection(mqvpn_client_t *c)
     cs.so_sndbuf = 8 * 1024 * 1024;
     cs.idle_time_out = 120000;
     cs.init_idle_time_out = 10000;
+    if (c->config.init_max_path_id > 0)
+        cs.init_max_path_id = c->config.init_max_path_id;
     mqvpn_apply_scheduler(&cs, c->config.scheduler);
 
     if (c->config.reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)

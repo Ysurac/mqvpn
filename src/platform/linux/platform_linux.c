@@ -1152,6 +1152,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);
+    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
     mqvpn_config_set_reinjection(lib_cfg, cfg->reinjection_control);
     mqvpn_config_set_reinj_ctl(lib_cfg, (mqvpn_reinj_ctl_t)cfg->reinjection_mode);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
@@ -1652,6 +1653,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);
+    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
     mqvpn_config_set_reinjection(lib_cfg, cfg->reinjection_control);
     mqvpn_config_set_reinj_ctl(lib_cfg, (mqvpn_reinj_ctl_t)cfg->reinjection_mode);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
