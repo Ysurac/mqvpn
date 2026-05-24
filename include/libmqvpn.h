@@ -449,6 +449,10 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
  * (e.g. 2) to deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 
+/* Override TUN MTU. 0 = auto (derived from MASQUE datagram MSS, floor 1280).
+ * Positive values pin the TUN MTU on both client and server. Valid range: 68–65535. */
+MQVPN_API int mqvpn_config_set_mtu(mqvpn_config_t *cfg, int mtu);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,

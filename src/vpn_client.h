@@ -34,6 +34,7 @@ typedef struct mqvpn_client_cfg_s {
     int control_port;           /* TCP port for JSON control API (0 = disabled) */
     const char *control_addr;   /* bind address for control API (NULL = "127.0.0.1") */
     uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
+    int mtu;                    /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

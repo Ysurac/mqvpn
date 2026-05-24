@@ -55,6 +55,10 @@ struct mqvpn_config_s {
     /* draft-21 §4.6: initial Maximum Path Identifier we advertise in TP.
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
     uint64_t init_max_path_id;
+
+    /* TUN MTU override. 0 = auto (derived from MASQUE datagram MSS, floor
+     * IPV6_MIN_MTU=1280). Set to a positive value to pin the TUN MTU. */
+    int mtu;
 };
 
 /* ─── State transition validation (M0-5) ─── */

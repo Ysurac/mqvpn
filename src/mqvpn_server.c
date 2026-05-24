@@ -817,7 +817,7 @@ ip_assigned:;
         client_info.assigned_prefix = 32;
         memcpy(client_info.server_ip, &s->pool.base.s_addr, 4);
         client_info.server_prefix = (uint8_t)s->pool.prefix_len;
-        client_info.mtu = 1280;
+        client_info.mtu = s->config.mtu > 0 ? s->config.mtu : 1280;
         if (conn->has_v6) {
             memcpy(client_info.assigned_ip6, &conn->assigned_ip6, 16);
             client_info.assigned_prefix6 = (uint8_t)s->pool.prefix6;
@@ -1560,7 +1560,7 @@ mqvpn_server_start(mqvpn_server_t *s)
     info.assigned_prefix = (uint8_t)s->pool.prefix_len;
     memcpy(info.server_ip, &s->pool.base.s_addr, 4);
     info.server_prefix = (uint8_t)s->pool.prefix_len;
-    info.mtu = 1280;
+    info.mtu = s->config.mtu > 0 ? s->config.mtu : 1280;
 
     if (s->pool.has_v6) {
         struct in6_addr srv_addr6;

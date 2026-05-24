@@ -1154,14 +1154,19 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
         /* Notify platform on ADDRESS_ASSIGN */
         if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
             c->state != MQVPN_STATE_TUNNEL_READY) {
-            /* Compute MTU */
-            int tun_mtu = IPV6_MIN_MTU;
-            if (conn->dgram_mss > 0) {
-                size_t udp_mss =
-                    xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
-                if (udp_mss >= 68) tun_mtu = (int)udp_mss;
+            /* Compute MTU: use pinned value if set, otherwise derive from MASQUE MSS */
+            int tun_mtu;
+            if (c->config.mtu > 0) {
+                tun_mtu = c->config.mtu;
+            } else {
+                tun_mtu = IPV6_MIN_MTU;
+                if (conn->dgram_mss > 0) {
+                    size_t udp_mss =
+                        xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+                    if (udp_mss >= 68) tun_mtu = (int)udp_mss;
+                }
+                if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
             }
-            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
             c->mtu = tun_mtu;
 
             /* Build tunnel info for callback */

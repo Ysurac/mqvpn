@@ -302,6 +302,9 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         } else if (strcasecmp(key, "ReconnectInterval") == 0) {
             int v = atoi(val);
             if (v > 0) cfg->reconnect_interval = v;
+        } else if (strcasecmp(key, "MTU") == 0 || strcasecmp(key, "Mtu") == 0) {
+            int v = atoi(val);
+            if (v >= 68 && v <= 65535) cfg->mtu = v;
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Interface]", path, lineno, key);
         }
@@ -497,6 +500,9 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         int64_t iv64 = json_read_int64(v);
         if (iv64 >= 0) cfg->init_max_path_id = (unsigned long long)iv64;
     }
+
+    v = json_find_key(json_text, "mtu");
+    if (v && json_read_int(v, &iv) == 0 && iv >= 68 && iv <= 65535) cfg->mtu = iv;
 
     v = json_find_key(json_text, "cc");
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)

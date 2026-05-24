@@ -82,6 +82,7 @@ usage(const char *prog)
         "  --no-fec                  Disable FEC\n"
         "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme (default reed_solomon)\n"
         "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited  Congestion control (default bbr2)\n"
+        "  --mtu N                   TUN MTU (default: auto from MASQUE MSS, floor 1280)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -159,6 +160,7 @@ main(int argc, char *argv[])
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
         {"init-max-path-id", required_argument, NULL, 0x100},
+        {"mtu", required_argument, NULL, 0x101},
         {"reinjection-control", no_argument, NULL, 'Y'},
         {"reinjection-mode", required_argument, NULL, 'Z'},
         {"fec-enable", no_argument, NULL, 'E'},
@@ -202,6 +204,7 @@ main(int argc, char *argv[])
     const char *scheduler_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
+    int mtu = 0; /* 0 = unset → auto */
     int reinjection_control = -1; /* -1 means not set by CLI */
     const char *reinjection_mode_str = NULL;
     int fec_enable = -1; /* -1 means not set by CLI */
@@ -317,6 +320,15 @@ main(int argc, char *argv[])
         case 'e': fec_enable = 0; break;
         case 'F': fec_scheme_str = optarg; break;
         case 'Q': cc_str = optarg; break;
+        case 0x101: {
+            int v = atoi(optarg);
+            if (v < 68 || v > 65535) {
+                fprintf(stderr, "error: --mtu must be between 68 and 65535\n");
+                return 1;
+            }
+            mtu = v;
+            break;
+        }
         case 'M': max_clients = atoi(optarg); break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
@@ -390,6 +402,7 @@ main(int argc, char *argv[])
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
     uint64_t eff_init_max_path_id =
         init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
+    int eff_mtu = mtu > 0 ? mtu : file_cfg.mtu;
     int eff_reinjection_control = reinjection_control >= 0
                                   ? reinjection_control
                                   : file_cfg.reinjection_control;
@@ -610,6 +623,7 @@ main(int argc, char *argv[])
             .control_addr = control_addr ? control_addr
                           : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
             .init_max_path_id = eff_init_max_path_id,
+            .mtu = eff_mtu,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -662,6 +676,7 @@ main(int argc, char *argv[])
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
+            .mtu = eff_mtu,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
