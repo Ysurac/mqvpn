@@ -332,17 +332,31 @@ if ! wait_for_log "${WORK_DIR}/client.log" "path removed.*veth-a0" 10; then
 fi
 echo "OK: path A removed"
 
-# Allow xquic a moment to reroute packets to secondary paths
-sleep 2
-
 # Bug 2 assertion: tunnel must survive on secondary paths.
+# Two valid outcomes:
+#   Fast path  — xqc_conn_close_path() succeeded; xquic seamlessly reroutes
+#                to B/C without reconnecting (sub-second switchover).
+#   Fallback   — xqc_conn_close_path() returned an error (e.g. secondary paths
+#                not yet XQC_PATH_STATE_ACTIVE); mqvpn_client_remove_path()
+#                called xqc_h3_conn_close() → cb_h3_conn_close → tick_reconnect
+#                rotates primary_path_idx to B and reconnects (~3–5 s).
+# Poll for up to 15 s so both outcomes pass in CI.
 echo "Verifying tunnel on secondary paths (Bug 2 regression check)..."
-if ip netns exec "$NS_CLIENT" ping -c 5 -W 2 "$TUNNEL_IP" >/dev/null 2>&1; then
-    echo "OK: tunnel ping works after removing path A"
-else
+ELAPSED=0
+TUNNEL_OK=0
+while [ "$ELAPSED" -lt 15 ]; do
+    if ip netns exec "$NS_CLIENT" ping -c 3 -W 1 "$TUNNEL_IP" >/dev/null 2>&1; then
+        TUNNEL_OK=1
+        break
+    fi
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+if [ "$TUNNEL_OK" -ne 1 ]; then
     echo "FAIL: tunnel ping failed after removing path A (Bug 2 still present?)"
     dump_logs; exit 1
 fi
+echo "OK: tunnel ping works after removing path A (${ELAPSED}s)"
 
 # Verify list_paths shows only secondary paths
 LIST_RESP=$(ctrl_send '{"cmd":"list_paths"}')

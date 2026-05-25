@@ -2237,9 +2237,22 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
      * path_id=0 (the initial QUIC path) is explicitly included: xquic's
      * xqc_conn_close_path() refuses if it would be the last active path,
      * so the call is safe. Without it, xquic keeps routing traffic to the
-     * closed fd and secondary paths never take over. */
-    if (p->xquic_path_live && c->engine && c->conn)
-        xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+     * closed fd, then get_fd_for_path() falls back to a secondary fd
+     * while still handing xquic a path-0 peer address, causing a CID/path
+     * conflict on the server that kills the connection silently. */
+    if (p->xquic_path_live && c->engine && c->conn) {
+        xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+        if (rc != XQC_OK) {
+            LOG_W(c, "xqc_conn_close_path(path_id=%" PRIu64 ") rc=%d; "
+                  "closing connection to force clean failover", p->xqc_path_id, (int)rc);
+            /* Closing the full connection triggers cb_h3_conn_close → tick_reconnect,
+             * which rotates primary_path_idx to a secondary and reconnects.  This is
+             * safer than leaving path 0 active while its fd is gone: xquic would keep
+             * routing on path 0, get_fd_for_path() would send on a secondary fd with
+             * path-0 headers, and the server would see a CID conflict. */
+            xqc_h3_conn_close(c->engine, &c->conn->cid);
+        }
+    }
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_REMOVE_API, &ctx);
