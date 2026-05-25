@@ -501,10 +501,9 @@ static int
 get_fd_for_path(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
-    /* Guard platform_attached: for the initial path (xqc_path_id=0),
-     * xqc_conn_close_path is intentionally skipped in remove_path, so
-     * cb_path_removed(0) never fires and xquic_path_live stays 1 in the
-     * CLOSED_DROPPED slot — returning its closed fd would EBADF. */
+    /* Guard platform_attached: a CLOSED_DROPPED slot may still have
+     * xquic_path_live=1 briefly until cb_path_removed fires; its fd is
+     * already closed so we must not return it (EBADF). */
     if (p && p->platform_attached) return p->fd;
     int pidx = c->primary_path_idx;
     if (pidx < c->n_paths && c->paths[pidx].platform_attached) return c->paths[pidx].fd;
@@ -2234,8 +2233,12 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     if (p->state == PATH_LC_CLOSED_FREE) return MQVPN_OK;
 
     /* Spec §5.0: REMOVE_API allows orderly xquic close. Issue before
-     * dispatch so the FSM stays xquic-API-free (avoids layer leak). */
-    if (p->xquic_path_live && p->xqc_path_id != 0 && c->engine && c->conn)
+     * dispatch so the FSM stays xquic-API-free (avoids layer leak).
+     * path_id=0 (the initial QUIC path) is explicitly included: xquic's
+     * xqc_conn_close_path() refuses if it would be the last active path,
+     * so the call is safe. Without it, xquic keeps routing traffic to the
+     * closed fd and secondary paths never take over. */
+    if (p->xquic_path_live && c->engine && c->conn)
         xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};

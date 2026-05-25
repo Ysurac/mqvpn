@@ -510,12 +510,15 @@ platform_remove_path(platform_ctx_t *p, const char *iface)
     }
     if (idx < 0) return -1;
 
+    /* Save handle before compact so we can notify the library after fd close */
+    mqvpn_path_handle_t removed_handle = p->lib_path_handles[idx];
+
     /* Tear down libevent + library before closing fd */
     if (p->ev_udp[idx]) {
         event_del(p->ev_udp[idx]);
         event_free(p->ev_udp[idx]);
     }
-    mqvpn_client_remove_path(p->client, p->lib_path_handles[idx]);
+    mqvpn_client_remove_path(p->client, removed_handle);
 
     /* Compact ev_udp and lib_path_handles in parallel with path_mgr */
     for (int i = idx; i < p->path_mgr.n_paths - 1; i++) {
@@ -526,6 +529,11 @@ platform_remove_path(platform_ctx_t *p, const char *iface)
     p->lib_path_handles[p->path_mgr.n_paths - 1] = -1;
 
     mqvpn_path_mgr_remove_at(&p->path_mgr, idx); /* closes fd, compacts paths[] */
+
+    /* Tell the library the fd is gone so the CLOSED_DROPPED slot can
+     * reach CLOSED_FREE once xquic also confirms path removal. */
+    mqvpn_client_on_platform_fd_closed(p->client, removed_handle);
+
     LOG_INF("path removed: %s", iface);
     return 0;
 }
