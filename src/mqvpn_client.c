@@ -675,9 +675,11 @@ client_reset_paths_for_reconnect(mqvpn_client_t *c)
     for (int i = 0; i < c->n_paths; i++) {
         client_reset_path_runtime(c, &c->paths[i]);
     }
-    /* Try the next configured path next time so a dead first path
-     * (e.g. interface up but no upstream connectivity) doesn't trap us. */
-    c->primary_path_idx = client_next_primary_idx(c, c->primary_path_idx);
+    /* Path rotation is handled exclusively by tick_reconnect() which builds a
+     * proper flags view marking detached paths as BACKUP before calling
+     * mqvpn_rotate_primary_path(). Rotating here as well causes a double-skip
+     * (dead path → B, then B → C) so the first reconnect attempt lands on C
+     * instead of B when A is removed with B and C still live. */
 }
 
 static int
@@ -2253,23 +2255,31 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
 
     /* Spec §5.0: REMOVE_API allows orderly xquic close. Issue before
      * dispatch so the FSM stays xquic-API-free (avoids layer leak).
-     * path_id=0 (the initial QUIC path) is explicitly included: xquic's
-     * xqc_conn_close_path() refuses if it would be the last active path,
-     * so the call is safe. Without it, xquic keeps routing traffic to the
-     * closed fd, then get_fd_for_path() falls back to a secondary fd
-     * while still handing xquic a path-0 peer address, causing a CID/path
-     * conflict on the server that kills the connection silently. */
+     *
+     * path_id=0 is the initial QUIC path (used for the TLS handshake).
+     * xqc_conn_close_path(path_id=0) may return XQC_OK but leaves xquic's
+     * multipath scheduler in a state where it stops forwarding DATA datagrams
+     * on the remaining paths until the next 15-second PING keepalive fires.
+     * This causes a ~15-second black-hole that is worse than a full reconnect.
+     * Always use xqc_h3_conn_close() for path_id=0 so tick_reconnect()
+     * rebuilds the connection on a secondary path (~5-7 s) with fresh
+     * congestion state and immediate data flow.
+     *
+     * For secondary paths (path_id>0) xqc_conn_close_path() works correctly:
+     * the primary path (path_id=0) keeps forwarding data without interruption.
+     * Only fall back to xqc_h3_conn_close() if the secondary close fails. */
     if (p->xquic_path_live && c->engine && c->conn) {
-        xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
-        if (rc != XQC_OK) {
-            LOG_W(c, "xqc_conn_close_path(path_id=%" PRIu64 ") rc=%d; "
-                  "closing connection to force clean failover", p->xqc_path_id, (int)rc);
-            /* Closing the full connection triggers cb_h3_conn_close → tick_reconnect,
-             * which rotates primary_path_idx to a secondary and reconnects.  This is
-             * safer than leaving path 0 active while its fd is gone: xquic would keep
-             * routing on path 0, get_fd_for_path() would send on a secondary fd with
-             * path-0 headers, and the server would see a CID conflict. */
+        if (p->xqc_path_id == 0) {
+            LOG_I(c, "removing initial path (path_id=0 iface=%s): "
+                  "closing connection for clean failover to secondary", p->name);
             xqc_h3_conn_close(c->engine, &c->conn->cid);
+        } else {
+            xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+            if (rc != XQC_OK) {
+                LOG_W(c, "xqc_conn_close_path(path_id=%" PRIu64 ") rc=%d; "
+                      "closing connection to force clean failover", p->xqc_path_id, (int)rc);
+                xqc_h3_conn_close(c->engine, &c->conn->cid);
+            }
         }
     }
 
