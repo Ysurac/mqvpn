@@ -304,7 +304,12 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             if (v > 0) cfg->reconnect_interval = v;
         } else if (strcasecmp(key, "MTU") == 0 || strcasecmp(key, "Mtu") == 0) {
             int v = atoi(val);
-            if (v >= 68 && v <= 65535) cfg->mtu = v;
+            if (v != 0 && (v < 1280 || v > 9000)) {
+                LOG_WRN("%s:%d: MTU must be 1280..9000, got %d; ignoring", path, lineno,
+                        v);
+            } else {
+                cfg->tun_mtu = v;
+            }
         } else {
             LOG_WRN("%s:%d: unknown key '%s' in [Interface]", path, lineno, key);
         }
@@ -353,6 +358,8 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
     case SEC_MULTIPATH:
         if (strcasecmp(key, "Scheduler") == 0) {
             snprintf(cfg->scheduler, sizeof(cfg->scheduler), "%s", val);
+        } else if (strcasecmp(key, "CC") == 0) {
+            snprintf(cfg->cc, sizeof(cfg->cc), "%s", val);
         } else if (strcasecmp(key, "InitMaxPathId") == 0) {
             char *end = NULL;
             unsigned long long v = strtoull(val, &end, 10);
@@ -494,6 +501,10 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (v && json_read_string(v, s32, sizeof(s32)) == 0)
         mqvpn_copy_str(cfg->scheduler, sizeof(cfg->scheduler), s32);
 
+    v = json_find_key(json_text, "cc");
+    if (v && json_read_string(v, s32, sizeof(s32)) == 0)
+        mqvpn_copy_str(cfg->cc, sizeof(cfg->cc), s32);
+
     v = json_find_key(json_text, "init_max_path_id");
     if (v) {
         /* uint64 field; use int64 reader to match INI strtoull width */
@@ -543,6 +554,15 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "no_routes");
     if (v && json_read_bool(v, &iv) == 0) cfg->no_routes = iv;
+
+    v = json_find_key(json_text, "mtu");
+    if (v && json_read_int(v, &iv) == 0) {
+        if (iv != 0 && (iv < 1280 || iv > 9000)) {
+            LOG_WRN("JSON: MTU must be 1280..9000, got %d; ignoring", iv);
+        } else {
+            cfg->tun_mtu = iv;
+        }
+    }
 
     v = json_find_key(json_text, "control_listen");
     if (v && json_read_string(v, s280, sizeof(s280)) == 0)

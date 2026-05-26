@@ -2,7 +2,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.5.0 (ABI version 2)
+ * Version: 0.6.0 (ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -35,7 +35,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 5
+#define MQVPN_VERSION_MINOR 6
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -98,6 +98,7 @@ typedef enum {
     MQVPN_CC_NEW_RENO  = 3,
     MQVPN_CC_COPA      = 4,
     MQVPN_CC_UNLIMITED = 5,
+    MQVPN_CC_NONE      = 6, /* alias for UNLIMITED: no congestion control */
 } mqvpn_cc_t;
 
 typedef enum {
@@ -448,6 +449,8 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
  * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). Set lower
  * (e.g. 2) to deterministically trigger G-P16 PATHS_BLOCKED. */
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
+/* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
+MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 
 /* Override TUN MTU. 0 = auto (derived from MASQUE datagram MSS, floor 1280).
  * Positive values pin the TUN MTU on both client and server. Valid range: 68–65535. */

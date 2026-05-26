@@ -76,13 +76,13 @@ usage(const char *prog)
         "  --scheduler minrtt|wlb|backup|backup_fec|rap  Multipath scheduler (default wlb)\n"
         "  --init-max-path-id N      Initial max path identifier TP value (default = "
         "xquic default 8, set lower e.g. 2 to test G-P16 trigger).\n"
-        "  --reinjection-control      Enable multipath reinjection control\n"
-        "  --reinjection-mode default|deadline|dgram  Reinjection control mode (default: default)\n"
+        "  --reinjection-control     Enable multipath reinjection control\n"
+        "  --reinjection-mode default|deadline|dgram  Reinjection control mode\n"
         "  --fec-enable              Enable FEC\n"
         "  --no-fec                  Disable FEC\n"
-        "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme (default reed_solomon)\n"
-        "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited  Congestion control (default bbr2)\n"
-        "  --mtu N                   TUN MTU (default: auto from MASQUE MSS, floor 1280)\n"
+        "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme\n"
+        "  --cc bbr2|bbr|cubic|none|unlimited  Congestion control (default bbr2)\n"
+        "  --mtu N                   TUN device MTU cap (1280–9000, default: auto)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
@@ -159,14 +159,14 @@ main(int argc, char *argv[])
         {"backup-path", required_argument, NULL, 'b'},
         {"dns", required_argument, NULL, 'd'},
         {"scheduler", required_argument, NULL, 'S'},
+        {"cc", required_argument, NULL, 0x101},
         {"init-max-path-id", required_argument, NULL, 0x100},
-        {"mtu", required_argument, NULL, 0x101},
+        {"mtu", required_argument, NULL, 0x102},
         {"reinjection-control", no_argument, NULL, 'Y'},
         {"reinjection-mode", required_argument, NULL, 'Z'},
         {"fec-enable", no_argument, NULL, 'E'},
         {"no-fec", no_argument, NULL, 'e'},
         {"fec-scheme", required_argument, NULL, 'F'},
-        {"cc", required_argument, NULL, 'Q'},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -202,14 +202,14 @@ main(int argc, char *argv[])
     int genkey = 0;
     const char *log_level_str = NULL;
     const char *scheduler_str = NULL;
+    const char *cc_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
-    int mtu = 0; /* 0 = unset → auto */
+    int cli_mtu = -1;     /* -1 means "not set by CLI" */
     int reinjection_control = -1; /* -1 means not set by CLI */
     const char *reinjection_mode_str = NULL;
     int fec_enable = -1; /* -1 means not set by CLI */
     const char *fec_scheme_str = NULL;
-    const char *cc_str        = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES];
     int n_paths = 0;
@@ -294,6 +294,7 @@ main(int argc, char *argv[])
             }
             break;
         case 'S': scheduler_str = optarg; break;
+        case 0x101: cc_str = optarg; break;
         case 0x100: {
             /* Reject leading '-' explicitly: strtoull silently wraps "-1" to
              * UINT64_MAX rather than failing. */
@@ -319,14 +320,13 @@ main(int argc, char *argv[])
         case 'E': fec_enable = 1; break;
         case 'e': fec_enable = 0; break;
         case 'F': fec_scheme_str = optarg; break;
-        case 'Q': cc_str = optarg; break;
-        case 0x101: {
+        case 0x102: {
             int v = atoi(optarg);
-            if (v < 68 || v > 65535) {
-                fprintf(stderr, "error: --mtu must be between 68 and 65535\n");
+            if (v != 0 && (v < 1280 || v > 9000)) {
+                fprintf(stderr, "error: --mtu must be 1280..9000\n");
                 return 1;
             }
-            mtu = v;
+            cli_mtu = v;
             break;
         }
         case 'M': max_clients = atoi(optarg); break;
@@ -400,9 +400,9 @@ main(int argc, char *argv[])
     const char *eff_tun_name = tun_name ? tun_name : file_cfg.tun_name;
     const char *eff_log_level = log_level_str ? log_level_str : file_cfg.log_level;
     const char *eff_scheduler = scheduler_str ? scheduler_str : file_cfg.scheduler;
+    const char *eff_cc = cc_str ? cc_str : file_cfg.cc;
     uint64_t eff_init_max_path_id =
         init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
-    int eff_mtu = mtu > 0 ? mtu : file_cfg.mtu;
     int eff_reinjection_control = reinjection_control >= 0
                                   ? reinjection_control
                                   : file_cfg.reinjection_control;
@@ -411,7 +411,6 @@ main(int argc, char *argv[])
                                        : file_cfg.reinjection_mode;
     int eff_fec_enable = fec_enable >= 0 ? fec_enable : file_cfg.fec_enable;
     const char *eff_fec_scheme = fec_scheme_str ? fec_scheme_str : file_cfg.fec_scheme;
-    const char *eff_cc        = cc_str        ? cc_str        : file_cfg.cc;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
     const char *eff_subnet = subnet ? subnet : file_cfg.subnet;
     const char *eff_subnet6 =
@@ -421,6 +420,7 @@ main(int argc, char *argv[])
     const char *eff_tls_ciphers = cipher_list ? cipher_list : file_cfg.tls_ciphers;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
+    int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -512,8 +512,16 @@ main(int argc, char *argv[])
         cc = MQVPN_CC_COPA;
     } else if (strcmp(eff_cc, "unlimited") == 0) {
         cc = MQVPN_CC_UNLIMITED;
+    } else if (strcmp(eff_cc, "none") == 0) {
+#ifdef XQC_ENABLE_UNLIMITED
+        cc = MQVPN_CC_NONE;
+#else
+        fprintf(stderr, "error: --cc 'none' requires rebuild with "
+                        "-DXQC_ENABLE_UNLIMITED=ON in xquic\n");
+        return 1;
+#endif
     } else if (strcmp(eff_cc, "bbr2") != 0) {
-        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', 'new_reno', 'copa' or 'unlimited'\n");
+        fprintf(stderr, "error: --cc must be 'bbr2', 'bbr', 'cubic', 'new_reno', 'copa', 'unlimited', or 'none'\n");
         return 1;
     }
 
@@ -623,7 +631,7 @@ main(int argc, char *argv[])
             .control_addr = control_addr ? control_addr
                           : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
             .init_max_path_id = eff_init_max_path_id,
-            .mtu = eff_mtu,
+            .tun_mtu = eff_tun_mtu,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -676,7 +684,7 @@ main(int argc, char *argv[])
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
-            .mtu = eff_mtu,
+            .tun_mtu = eff_tun_mtu,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

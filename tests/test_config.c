@@ -81,6 +81,7 @@ test_defaults(void)
     ASSERT_EQ_STR(cfg.reinjection_mode, "default", "default reinjection_mode");
     ASSERT_EQ_INT(cfg.fec_enable, 0, "default fec_enable");
     ASSERT_EQ_STR(cfg.fec_scheme, "reed_solomon", "default fec_scheme");
+    ASSERT_EQ_STR(cfg.cc, "bbr2", "default cc");
     ASSERT_EQ_INT(cfg.is_server, 0, "default is_server");
     ASSERT_EQ_STR(cfg.server_addr, "", "default server_addr");
     ASSERT_EQ_STR(cfg.auth_key, "", "default auth_key");
@@ -193,6 +194,33 @@ test_parse_scheduler_backup_fec(void)
 
     ASSERT_EQ_INT(rc, 0, "scheduler backup_fec config parse ok");
     ASSERT_EQ_STR(cfg.scheduler, "backup_fec", "scheduler backup_fec");
+}
+
+static void
+test_parse_cc_ini(void)
+{
+    const char *ini = "[Multipath]\n"
+                      "CC = bbr\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "cc ini parse ok");
+    ASSERT_EQ_STR(cfg.cc, "bbr", "cc bbr from INI");
+}
+
+static void
+test_parse_cc_json(void)
+{
+    const char *json = "{\"cc\": \"cubic\"}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+
+    ASSERT_EQ_INT(rc, 0, "cc json parse ok");
+    ASSERT_EQ_STR(cfg.cc, "cubic", "cc cubic from JSON");
 }
 
 static void
@@ -702,6 +730,64 @@ test_reconnect_interval_invalid(void)
     unlink(path);
 
     ASSERT_EQ_INT(cfg.reconnect_interval, 5, "negative interval → default 5");
+}
+
+/* ================================================================
+ *  MTU config tests
+ * ================================================================ */
+
+static void
+test_mtu_default(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "default tun_mtu is 0 (auto)");
+}
+
+static void
+test_mtu_config_parse(void)
+{
+    const char *ini = "[Interface]\nMTU = 1350\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 1350, "MTU 1350 parsed");
+}
+
+static void
+test_mtu_below_floor_ignored(void)
+{
+    const char *ini = "[Interface]\nMTU = 500\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU < 1280 ignored → stays 0");
+}
+
+static void
+test_mtu_above_ceiling_ignored(void)
+{
+    const char *ini = "[Interface]\nMTU = 9001\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "MTU > 9000 ignored → stays 0");
+}
+
+static void
+test_mtu_json_parse(void)
+{
+    const char *json = "{\"mtu\": 1400}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_INT(cfg.tun_mtu, 1400, "JSON MTU 1400 parsed");
 }
 
 /* ================================================================
@@ -1588,6 +1674,8 @@ main(void)
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
+    test_parse_cc_ini();
+    test_parse_cc_json();
     test_comments_whitespace();
     test_unknown_key_warns();
     test_missing_file_error();
@@ -1618,6 +1706,13 @@ main(void)
     test_reconnect_config_parse();
     test_reconnect_config_true();
     test_reconnect_interval_invalid();
+
+    /* MTU tests */
+    test_mtu_default();
+    test_mtu_config_parse();
+    test_mtu_below_floor_ignored();
+    test_mtu_above_ceiling_ignored();
+    test_mtu_json_parse();
 
     /* subnet6 tests */
     test_subnet6_default();

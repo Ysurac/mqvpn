@@ -21,7 +21,6 @@ typedef struct mqvpn_client_cfg_s {
     int reinjection_mode;       /* 0=default, 1=deadline, 2=dgram */
     int fec_enable;             /* 1=enable FEC */
     int fec_scheme;             /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
-    int cc;                     /* 0=bbr2 (default), 1=bbr, 2=cubic, 3=new_reno, 4=copa, 5=unlimited */
     const char *auth_key;       /* PSK for server authentication (NULL = no auth) */
     const char *auth_username;  /* client username sent to server via x-user header (NULL = none) */
     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
@@ -34,7 +33,8 @@ typedef struct mqvpn_client_cfg_s {
     int control_port;           /* TCP port for JSON control API (0 = disabled) */
     const char *control_addr;   /* bind address for control API (NULL = "127.0.0.1") */
     uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
-    int mtu;                    /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
+    int tun_mtu;                /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
+    int cc;                     /* mqvpn_cc_t: congestion control algorithm */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

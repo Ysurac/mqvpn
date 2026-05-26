@@ -63,7 +63,7 @@ typedef struct mqvpn_file_config_s {
     char reinjection_mode[16]; /* default|deadline|dgram */
     int fec_enable; /* 1=enable FEC, 0=off */
     char fec_scheme[32]; /* galois_calculation|packet_mask|reed_solomon|xor */
-    char cc[16];
+    char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;
@@ -81,6 +81,8 @@ typedef struct mqvpn_file_config_s {
     /* [Control] — server */
     int control_port;           /* TCP port for JSON control API (0 = disabled) */
     char control_addr[64];      /* bind address for control API (default "127.0.0.1") */
+
+    int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
 
     /* Inferred mode: 1=server, 0=client */
     int is_server;

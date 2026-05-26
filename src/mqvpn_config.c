@@ -157,7 +157,7 @@ mqvpn_config_new(void)
     cfg->max_clients = 64;
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
-    cfg->mtu = 0; /* 0 = auto */
+    cfg->tun_mtu = 0; /* 0 = auto */
 
     return cfg;
 }
@@ -435,7 +435,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "mtu");
-    if (v && json_read_int(v, &iv) == 0 && iv > 0) cfg->mtu = iv;
+    if (v && json_read_int(v, &iv) == 0 && iv > 0) cfg->tun_mtu = iv;
 
     /* "paths" auto-enables multipath only if it wasn't explicitly set.
      * Individual interface names are not stored in the opaque config —
@@ -527,7 +527,7 @@ mqvpn_config_set_mtu(mqvpn_config_t *cfg, int mtu)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     if (mtu != 0 && (mtu < 68 || mtu > 65535)) return MQVPN_ERR_INVALID_ARG;
-    cfg->mtu = mtu;
+    cfg->tun_mtu = mtu;
     return MQVPN_OK;
 }
 
@@ -620,5 +620,14 @@ mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->max_clients = max;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (mtu != 0 && (mtu < 1280 || mtu > 9000)) return MQVPN_ERR_INVALID_ARG;
+    cfg->tun_mtu = mtu;
     return MQVPN_OK;
 }

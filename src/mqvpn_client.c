@@ -1118,6 +1118,22 @@ cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
 }
 
 static int
+apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
+{
+    if (cfg_mtu > 0) {
+        if (cfg_mtu < negotiated) {
+            LOG_D(c, "capping MTU %d to config MTU %d", negotiated, cfg_mtu);
+            return cfg_mtu;
+        }
+        if (cfg_mtu > negotiated) {
+            LOG_W(c, "config MTU %d exceeds negotiated MTU %d, using %d", cfg_mtu,
+                  negotiated, negotiated);
+        }
+    }
+    return negotiated;
+}
+
+static int
 cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 void *user_data)
 {
@@ -1155,8 +1171,8 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
             c->state != MQVPN_STATE_TUNNEL_READY) {
             /* Compute MTU: use pinned value if set, otherwise derive from MASQUE MSS */
             int tun_mtu;
-            if (c->config.mtu > 0) {
-                tun_mtu = c->config.mtu;
+            if (c->config.tun_mtu > 0) {
+                tun_mtu = c->config.tun_mtu;
             } else {
                 tun_mtu = IPV6_MIN_MTU;
                 if (conn->dgram_mss > 0) {
@@ -1166,6 +1182,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 }
                 if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
             }
+            tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
             c->mtu = tun_mtu;
 
             /* Build tunnel info for callback */
@@ -1341,6 +1358,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
         if (udp_mss >= 68) {
             int new_mtu = (int)udp_mss;
             if (conn->addr6_assigned && new_mtu < IPV6_MIN_MTU) new_mtu = IPV6_MIN_MTU;
+            new_mtu = apply_mtu_cap(c->config.tun_mtu, new_mtu, c);
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;
@@ -1782,6 +1800,7 @@ cli_start_connection(mqvpn_client_t *c)
         cs.cong_ctrl_callback = xqc_bbr2_cb;
 #endif
         break;
+    case MQVPN_CC_NONE:      /* alias for unlimited (main compat) */
     case MQVPN_CC_UNLIMITED:
 #ifdef XQC_ENABLE_UNLIMITED
         cs.cong_ctrl_callback = xqc_unlimited_cc_cb;

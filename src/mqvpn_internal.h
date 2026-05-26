@@ -58,7 +58,7 @@ struct mqvpn_config_s {
 
     /* TUN MTU override. 0 = auto (derived from MASQUE datagram MSS, floor
      * IPV6_MIN_MTU=1280). Set to a positive value to pin the TUN MTU. */
-    int mtu;
+    int tun_mtu;
 };
 
 /* ─── State transition validation (M0-5) ─── */
