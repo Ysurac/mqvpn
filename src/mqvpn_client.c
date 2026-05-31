@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * mqvpn_client.c — Client lifecycle, xquic engine, MASQUE CONNECT-IP
  *
@@ -2500,7 +2503,8 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     }
 
     uint64_t dgram_id;
-    uint32_t fh = flow_hash_pkt(pkt, (int)len);
+    uint32_t fh =
+        flow_hash_pkt(pkt, (int)len, c->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
     xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
     xret = xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
                                     mqvpn_dgram_qos_level(c->config.scheduler));

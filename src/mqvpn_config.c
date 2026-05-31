@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * mqvpn_config.c — Configuration builder (opaque handle + setter pattern)
  *
@@ -153,6 +156,10 @@ parse_scheduler_name(const char *s, mqvpn_scheduler_t *out)
         *out = MQVPN_SCHED_BACKUP;
         return MQVPN_OK;
     }
+    if (strcmp(s, "wlb_udp_pin") == 0) {
+        *out = MQVPN_SCHED_WLB_UDP_PIN;
+        return MQVPN_OK;
+    }
     if (strcmp(s, "backup_fec") == 0) {
         *out = MQVPN_SCHED_BACKUP_FEC;
         return MQVPN_OK;
@@ -204,7 +211,7 @@ is_valid_scheduler(mqvpn_scheduler_t sched)
 {
     return sched == MQVPN_SCHED_MINRTT || sched == MQVPN_SCHED_WLB ||
            sched == MQVPN_SCHED_BACKUP || sched == MQVPN_SCHED_BACKUP_FEC ||
-           sched == MQVPN_SCHED_RAP;
+           sched == MQVPN_SCHED_RAP || sched == MQVPN_SCHED_WLB_UDP_PIN;
 }
 
 static int

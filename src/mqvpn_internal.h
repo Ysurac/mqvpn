@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * mqvpn_internal.h — Internal type definitions for libmqvpn
  *
@@ -87,8 +90,9 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 #  define MQVPN_INTERNAL
 #endif
 
-/* Returns "minrtt" / "wlb" / "backup_fec" / "unknown" — caller-owned static
- * string, do not free. Used by control_socket.c for get_build_info JSON. */
+/* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
+ * caller-owned static string, do not free.
+ * Used by control_socket.c for get_build_info JSON. */
 MQVPN_INTERNAL const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s);
 
 /* Map xquic xqc_path_state_t (uint8) to a stable, operator-readable string.

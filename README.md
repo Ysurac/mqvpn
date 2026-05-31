@@ -111,6 +111,7 @@ Config files support both INI and JSON. CLI arguments override config values.
 Listen = 0.0.0.0:443
 Subnet = 10.0.0.0/24
 Subnet6 = 2001:db8:1::/112
+# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -152,6 +153,7 @@ Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
 DNS = 1.1.1.1, 8.8.8.8
 # RouteViaServer = false   # add a host route to the server IP before setting the default route
 # NoRoutes = false         # skip all automatic route setup (manage routes manually)
+# MTU = 1280               # TUN MTU cap (1280–9000, default: auto)
 
 [Multipath]
 Scheduler = wlb
@@ -195,6 +197,7 @@ Server example:
     "cc": "bbr2",
     "fec_enable": true,
     "fec_scheme": "reed_solomon",
+    "mtu": 1280,
     "control_port": 9090,
     "control_addr": "127.0.0.1"
 }
@@ -220,6 +223,7 @@ Client example:
     "no_routes": false,
     "scheduler": "wlb",
     "cc": "bbr2",
+    "mtu": 1280,
     "reinjection_control": true,
     "reinjection_mode": "deadline",
     "fec_enable": true,
@@ -235,6 +239,7 @@ Notes:
 - `auth_key` remains supported as a single legacy/global key.
 - `auth_username` is client-side only: the name sent to the server for identification in logs and status output. It does not affect authentication.
 - `mode` is optional if it can be inferred (`listen` implies server).
+- `manage_routes` defaults to `true`; set it to `false` on router/embedded integrations where an external orchestrator owns the host routing table and mqvpn should only bring up the TUN.
 - **[mqvpn-prometheus-exporter](https://github.com/mp0rta/mqvpn-prometheus-exporter) requires per-user keys.** Using mqvpn-prometheus-exporter, you can correct and visualize mqvpn metrics. If you use it, sharing a single `auth_key` across
   multiple clients works for the VPN data plane, but the control API
   surfaces those sessions as `user="(global)"` and the Prometheus exporter
@@ -247,6 +252,31 @@ Notes:
 sudo mqvpn --config /etc/mqvpn/server.conf
 sudo mqvpn --config /etc/mqvpn/client.conf
 ```
+
+## Schedulers
+
+| Scheduler       | TCP        | UDP        | Typical use                                     |
+|-----------------|------------|------------|-------------------------------------------------|
+| `minrtt`        | min RTT    | min RTT    | latency-first                                   |
+| `wlb` (default) | flow pin   | unpinned   | general use; UDP packets distributed per-packet |
+| `wlb_udp_pin`   | flow pin   | flow pin   | each UDP connection kept on a single path       |
+| `backup_fec`    | redundant  | redundant  | resilience-first (requires XQC_ENABLE_FEC)      |
+
+**Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
+paths per-packet, which gives better aggregate throughput when the inner
+protocol tolerates reorder. Some inner UDP protocols, however, maintain their
+own packet ordering and may treat reorder as packet loss — under asymmetric-RTT
+paths this can slow them down and throughput drops. `wlb_udp_pin` keeps each
+UDP connection on a single path to avoid that case. If you observe degraded UDP
+throughput under `wlb`, try `wlb_udp_pin`; otherwise `wlb` is the better
+default.
+
+**Trade-off note (`wlb_udp_pin`):** the xquic WLB flow table is a fixed 4096-entry
+open-addressed structure with 60s idle eviction. Workloads with very high
+short-flow UDP churn (e.g. high-rate DNS, mDNS bursts) may evict longer-lived
+inner flows under probe-region pressure. `wlb_udp_pin` is intended for tunnels
+carrying a small-to-moderate set of long-lived inner UDP flows; high-churn UDP
+profiles are better served by `wlb`.
 
 ## systemd
 
@@ -557,7 +587,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-    --scheduler minrtt|wlb|backup|backup_fec|rap Multipath scheduler (default: wlb)
+    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap Multipath scheduler (default: wlb)
     --cc bbr2|bbr|cubic|new_reno|copa|unlimited Congestion control (default: bbr2)
     --reinjection-control  Enable multipath reinjection control
     --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)

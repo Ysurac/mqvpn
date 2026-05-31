@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * socket_compat.h — Thin wrappers over Berkeley/Winsock differences.
  *

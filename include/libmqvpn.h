@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * libmqvpn — Multipath QUIC VPN library
  *
@@ -103,11 +106,12 @@ typedef enum {
 } mqvpn_cc_t;
 
 typedef enum {
-    MQVPN_SCHED_MINRTT     = 0,
-    MQVPN_SCHED_WLB        = 1,
-    MQVPN_SCHED_BACKUP     = 2,
-    MQVPN_SCHED_BACKUP_FEC = 3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
-    MQVPN_SCHED_RAP        = 4,
+    MQVPN_SCHED_MINRTT      = 0,
+    MQVPN_SCHED_WLB         = 1,
+    MQVPN_SCHED_BACKUP      = 2,
+    MQVPN_SCHED_BACKUP_FEC  = 3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
+    MQVPN_SCHED_RAP         = 4,
+    MQVPN_SCHED_WLB_UDP_PIN = 5, /* WLB + 5-tuple pin for UDP flows. */
 } mqvpn_scheduler_t;
 
 typedef enum {

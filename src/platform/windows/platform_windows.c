@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * platform_windows.c — Windows platform layer for libmqvpn
  *
@@ -159,10 +162,27 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     LOG_INF("TUN %s configured: %s -> %s (mtu=%d)", p->tun.name, local_ip, peer_ip,
             info->mtu);
 
-    /* Set up routes, killswitch, DNS */
-    if (win_setup_routes(p) < 0) {
-        LOG_ERR("route setup failed, aborting tunnel");
-        goto fail;
+    /* Set up routes, killswitch, DNS.
+     *
+     * manage_routes=false skips win_setup_routes() entirely. TUN
+     * (Wintun) is still created + addressed + UP and Windows auto-adds
+     * the connected route for the tunnel subnet.
+     *
+     * Skipped: server-pin route via the original adapter + catch-all
+     * 0.0.0.0/1 + 128.0.0.0/1 split-default into the TUN (via
+     * CreateIpForwardEntry2). Without these, traffic outside the
+     * tunnel subnet uses the existing default route — the integrator
+     * must add IP Helper / netsh routes externally (router/embedded
+     * use case). killswitch (WFP) and DNS overrides remain
+     * independently controllable.
+     */
+    if (p->manage_routes) {
+        if (win_setup_routes(p) < 0) {
+            LOG_ERR("route setup failed, aborting tunnel");
+            goto fail;
+        }
+    } else {
+        LOG_INF("manage_routes=off: host routing table left untouched");
     }
     if (win_setup_killswitch(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
@@ -195,7 +215,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
 fail:
     win_cleanup_killswitch(p);
-    win_cleanup_routes(p);
+    if (p->manage_routes) win_cleanup_routes(p);
     win_cleanup_dns(p);
     if (p->tun.adapter) mqvpn_tun_win_destroy(&p->tun);
     p->tun_up = 0;
@@ -235,7 +255,7 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
 
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
         win_cleanup_killswitch(p);
-        win_cleanup_routes(p);
+        if (p->manage_routes) win_cleanup_routes(p);
         win_cleanup_dns(p);
         if (p->tun_up) {
             if (p->ev_tun) {
@@ -469,6 +489,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     memset(&ctx, 0, sizeof(ctx));
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
+    ctx.manage_routes = cfg->manage_routes;
 
     if (cfg->n_paths == 0) {
         LOG_ERR("--path is required on Windows: specify at least one adapter "
@@ -532,6 +553,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     case MQVPN_SCHED_BACKUP: sched = MQVPN_SCHED_BACKUP; break;
     case MQVPN_SCHED_BACKUP_FEC: sched = MQVPN_SCHED_BACKUP_FEC; break;
     case MQVPN_SCHED_RAP: sched = MQVPN_SCHED_RAP; break;
+    case MQVPN_SCHED_WLB_UDP_PIN: sched = MQVPN_SCHED_WLB_UDP_PIN; break;
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);
@@ -650,7 +672,7 @@ cleanup:
     g_signal_ctx = NULL;
 
     win_cleanup_killswitch(&ctx);
-    win_cleanup_routes(&ctx);
+    if (ctx.manage_routes) win_cleanup_routes(&ctx);
     win_cleanup_dns(&ctx);
 
     if (ctx.tun_up) {

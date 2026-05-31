@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 package com.mqvpn.sdk.core.model
 
 import android.os.Parcelable
@@ -26,6 +29,7 @@ data class MqvpnConfig(
         MIN_RTT(0),
         WLB(1),
         BACKUP_FEC(2),
+        WLB_UDP_PIN(3),
     }
 
     @Serializable

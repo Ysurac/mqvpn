@@ -7,7 +7,7 @@ Subnet = 10.0.0.0/24
 # Subnet6 = 2001:db8:1::/112
 TunName = mqvpn0
 LogLevel = info
-# MTU = 1280
+# MTU = 1280                   # TUN MTU cap (1280–9000, default: auto)
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -37,3 +37,9 @@ Scheduler = wlb
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
+
+# [Control]
+# Local-only TCP control/admin API (add/remove users, query stats).
+# Uncomment to enable. No authentication — bind 127.0.0.1 only unless you
+# place it behind a reverse proxy / SSH tunnel / firewall.
+# Listen = 127.0.0.1:9090

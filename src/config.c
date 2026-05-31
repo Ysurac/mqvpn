@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * config.c — INI/JSON configuration file parser for mqvpn
  */
@@ -753,6 +756,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
+    cfg->no_routes = 0;
 }
 
 int

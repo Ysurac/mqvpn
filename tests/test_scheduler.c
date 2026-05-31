@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +46,33 @@ test_wlb_dispatch(void)
     mqvpn_apply_scheduler(&cs, MQVPN_SCHED_WLB);
     ASSERT_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
               xqc_wlb_scheduler_cb.xqc_scheduler_get_path);
+    return 0;
+}
+
+static int
+test_wlb_udp_pin_dispatch(void)
+{
+    xqc_conn_settings_t cs;
+    memset(&cs, 0, sizeof(cs));
+    mqvpn_apply_scheduler(&cs, MQVPN_SCHED_WLB_UDP_PIN);
+    /* Same xquic callback as WLB. UDP pin policy is caller-side via
+     * flow_hash_pkt(udp_pin=true); xquic WLB is polymorphic on hash value. */
+    ASSERT_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+              xqc_wlb_scheduler_cb.xqc_scheduler_get_path);
+    return 0;
+}
+
+static int
+test_wlb_udp_pin_single_path_no_warn(void)
+{
+    ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_WLB_UDP_PIN, 1), false);
+    return 0;
+}
+
+static int
+test_dgram_qos_for_wlb_udp_pin(void)
+{
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_WLB_UDP_PIN), XQC_DATA_QOS_HIGH);
     return 0;
 }
 
@@ -151,6 +181,9 @@ main(void)
     int failed = 0;
     failed += test_minrtt_dispatch();
     failed += test_wlb_dispatch();
+    failed += test_wlb_udp_pin_dispatch();
+    failed += test_wlb_udp_pin_single_path_no_warn();
+    failed += test_dgram_qos_for_wlb_udp_pin();
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
     failed += test_backup_fec_dispatch();
 #else

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * test_config.c — unit tests for INI config parser
  *
@@ -205,6 +208,29 @@ test_parse_scheduler_backup_fec(void)
 
     ASSERT_EQ_INT(rc, 0, "scheduler backup_fec config parse ok");
     ASSERT_EQ_STR(cfg.scheduler, "backup_fec", "scheduler backup_fec");
+}
+
+static void
+test_parse_scheduler_wlb_udp_pin(void)
+{
+    const char *ini = "[Server]\n"
+                      "Address = vpn.example.com:443\n"
+                      "\n"
+                      "[Auth]\n"
+                      "Key = myclientkey\n"
+                      "\n"
+                      "[Multipath]\n"
+                      "Scheduler = wlb_udp_pin\n"
+                      "Path = eth0\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "scheduler wlb_udp_pin config parse ok");
+    ASSERT_EQ_STR(cfg.scheduler, "wlb_udp_pin", "scheduler wlb_udp_pin");
 }
 
 static void
@@ -720,6 +746,30 @@ test_killswitch_config_false(void)
     ASSERT_EQ_INT(cfg.kill_switch, 0, "kill_switch disabled from config");
 }
 
+static void
+test_manage_routes_default_on(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+
+    ASSERT_EQ_INT(cfg.no_routes, 0, "default no_routes off (routes managed)");
+}
+
+static void
+test_manage_routes_ini_false(void)
+{
+    const char *ini = "[Interface]\n"
+                      "NoRoutes = true\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(cfg.no_routes, 1, "no_routes enabled from INI");
+}
+
 /* ================================================================
  *  Reconnect config tests
  * ================================================================ */
@@ -1065,6 +1115,7 @@ test_json_client_config_load(void)
                        "\"reconnect\":false,"
                        "\"reconnect_interval\":9,"
                        "\"kill_switch\":true,"
+                       "\"no_routes\":true,"
                        "\"scheduler\":\"minrtt\""
                        "}";
 
@@ -1088,6 +1139,7 @@ test_json_client_config_load(void)
     ASSERT_EQ_INT(cfg.reconnect, 0, "json client reconnect");
     ASSERT_EQ_INT(cfg.reconnect_interval, 9, "json client reconnect interval");
     ASSERT_EQ_INT(cfg.kill_switch, 1, "json client kill switch");
+    ASSERT_EQ_INT(cfg.no_routes, 1, "json client no_routes");
     ASSERT_EQ_STR(cfg.scheduler, "minrtt", "json client scheduler");
 }
 
@@ -1139,6 +1191,26 @@ test_json_users_with_fixed_ip(void)
     ASSERT_EQ_STR(cfg.user_fixed_ips[0], "10.0.0.5", "json user[0] fixed_ip");
     ASSERT_EQ_STR(cfg.user_names[1], "bob", "json user[1] name");
     ASSERT_EQ_STR(cfg.user_fixed_ips[1], "", "json user[1] no fixed_ip");
+}
+
+static void
+test_parse_json_scheduler_wlb_udp_pin(void)
+{
+    const char *json = "{"
+                       "\"mode\":\"client\","
+                       "\"server_addr\":\"vpn.example.com:443\","
+                       "\"auth_key\":\"k\","
+                       "\"paths\":[\"eth0\"],"
+                       "\"scheduler\":\"wlb_udp_pin\""
+                       "}";
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json scheduler wlb_udp_pin parse ok");
+    ASSERT_EQ_STR(cfg.scheduler, "wlb_udp_pin", "json scheduler wlb_udp_pin");
 }
 
 static void
@@ -1751,6 +1823,7 @@ main(void)
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();
+    test_parse_scheduler_wlb_udp_pin();
     test_parse_cc_ini();
     test_parse_cc_json();
     test_parse_init_max_path_id_bounds();
@@ -1780,6 +1853,10 @@ main(void)
     test_killswitch_config_parse();
     test_killswitch_config_false();
 
+    /* manage_routes tests */
+    test_manage_routes_default_on();
+    test_manage_routes_ini_false();
+
     /* reconnect tests */
     test_reconnect_defaults();
     test_reconnect_config_parse();
@@ -1808,6 +1885,7 @@ main(void)
     test_json_config_load();
     test_json_client_config_load();
     test_json_users_with_fixed_ip();
+    test_parse_json_scheduler_wlb_udp_pin();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
 

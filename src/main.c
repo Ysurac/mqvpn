@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 #include "libmqvpn.h"
 #include "log.h"
 #include "config.h"
@@ -74,7 +77,7 @@ usage(const char *prog)
         "  --status                  Query server status via control API and exit\n"
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
-        "  --scheduler minrtt|wlb|backup|backup_fec|rap  Multipath scheduler (default wlb)\n"
+        "  --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap  Multipath scheduler (default wlb)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
         "                            TP (default = xquic default 8; set lower, "
@@ -222,9 +225,9 @@ main(int argc, char *argv[])
     const char *dns_servers[4];
     int n_dns = 0;
     int no_reconnect = 0;
-    int kill_switch = -1; /* -1 = not set by CLI */
-    int route_via_server = -1; /* -1 = not set by CLI */
-    int no_routes = -1;        /* -1 = not set by CLI */
+    int kill_switch = -1;        /* -1 = not set by CLI */
+    int route_via_server = -1;   /* -1 = not set by CLI */
+    int no_routes = -1;          /* -1 = not set by CLI */
     int control_port = 0;
     int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
@@ -502,12 +505,14 @@ main(int argc, char *argv[])
         scheduler = MQVPN_SCHED_WLB;
     } else if (strcmp(eff_scheduler, "backup") == 0) {
         scheduler = MQVPN_SCHED_BACKUP;
+    } else if (strcmp(eff_scheduler, "wlb_udp_pin") == 0) {
+        scheduler = MQVPN_SCHED_WLB_UDP_PIN;
     } else if (strcmp(eff_scheduler, "backup_fec") == 0) {
         scheduler = MQVPN_SCHED_BACKUP_FEC;
     } else if (strcmp(eff_scheduler, "rap") == 0) {
         scheduler = MQVPN_SCHED_RAP;
     } else if (strcmp(eff_scheduler, "minrtt") != 0) {
-        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', 'backup_fec' or 'rap'\n");
+        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', 'wlb_udp_pin', 'backup_fec' or 'rap'\n");
         return 1;
     }
 
