@@ -15,6 +15,12 @@
  *   {"cmd":"get_fec_stats","user":"alice"}
  *   {"cmd":"get_all_fec_stats"}
  *
+ * Client-only commands (not available in server mode):
+ *   {"cmd":"add_path",        "iface":"eth0"}
+ *   {"cmd":"remove_path",     "iface":"eth0"}
+ *   {"cmd":"list_paths"}
+ *   {"cmd":"set_path_weight", "iface":"eth0","weight":3}
+ *
  * Responses:
  *   {"ok":true}
  *   {"ok":false,"error":"<reason>"}
@@ -375,6 +381,28 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         if (platform_add_path(cli_ctx, iface, backup) < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"add_path failed\"}");
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+
+    } else if (strcmp(cmd, "set_path_weight") == 0) {
+        if (!cli_ctx)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
+        char iface[IFNAMSIZ] = {0};
+        const char *iv = json_find_key(req, "iface");
+        if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"iface required\"}");
+        const char *wv = json_find_key(req, "weight");
+        if (!wv)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"weight required\"}");
+        long w = strtol(wv, NULL, 10);
+        if (w < 0 || w > 65535)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"weight must be 0-65535\"}");
+        if (platform_set_path_weight(cli_ctx, iface, (uint32_t)w) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"path not found\"}");
         return snprintf(resp, resp_len, "{\"ok\":true}");
 
     } else if (strcmp(cmd, "remove_path") == 0) {

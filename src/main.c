@@ -511,8 +511,10 @@ main(int argc, char *argv[])
         scheduler = MQVPN_SCHED_BACKUP_FEC;
     } else if (strcmp(eff_scheduler, "rap") == 0) {
         scheduler = MQVPN_SCHED_RAP;
+    } else if (strcmp(eff_scheduler, "wrtt") == 0) {
+        scheduler = MQVPN_SCHED_WRTT;
     } else if (strcmp(eff_scheduler, "minrtt") != 0) {
-        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', 'wlb_udp_pin', 'backup_fec' or 'rap'\n");
+        fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', 'wlb_udp_pin', 'backup_fec', 'rap' or 'wrtt'\n");
         return 1;
     }
 

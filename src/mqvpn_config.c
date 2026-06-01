@@ -168,6 +168,10 @@ parse_scheduler_name(const char *s, mqvpn_scheduler_t *out)
         *out = MQVPN_SCHED_RAP;
         return MQVPN_OK;
     }
+    if (strcmp(s, "wrtt") == 0) {
+        *out = MQVPN_SCHED_WRTT;
+        return MQVPN_OK;
+    }
     return MQVPN_ERR_INVALID_ARG;
 }
 
@@ -211,7 +215,8 @@ is_valid_scheduler(mqvpn_scheduler_t sched)
 {
     return sched == MQVPN_SCHED_MINRTT || sched == MQVPN_SCHED_WLB ||
            sched == MQVPN_SCHED_BACKUP || sched == MQVPN_SCHED_BACKUP_FEC ||
-           sched == MQVPN_SCHED_RAP || sched == MQVPN_SCHED_WLB_UDP_PIN;
+           sched == MQVPN_SCHED_RAP || sched == MQVPN_SCHED_WLB_UDP_PIN ||
+           sched == MQVPN_SCHED_WRTT;
 }
 
 static int

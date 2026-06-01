@@ -196,6 +196,7 @@ mqvpn_scheduler_label(int s)
     case MQVPN_SCHED_WLB: return "wlb";
     case MQVPN_SCHED_BACKUP_FEC: return "backup_fec";
     case MQVPN_SCHED_WLB_UDP_PIN: return "wlb_udp_pin";
+    case MQVPN_SCHED_WRTT: return "wrtt";
     default: return "unknown";
     }
 }

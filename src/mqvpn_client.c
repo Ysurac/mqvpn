@@ -1411,6 +1411,10 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
                                          : "TRANSIENT",
           (unsigned long long)new_id);
 
+    if (r == ACTIVATE_OK && p->weight > 0 && c->conn) {
+        xqc_conn_set_path_weight(c->engine, &c->conn->cid, new_id, p->weight);
+    }
+
     path_event_ctx_t ctx = {
         .result = r,
         .new_xqc_path_id = new_id,
@@ -2218,6 +2222,7 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
         p->local_addr_len = desc->local_addr_len;
         p->platform_net_id = desc->platform_net_id;
         p->flags = desc->flags;
+        p->weight = desc->weight;
     }
 
     /* CLOSED_FREE -> PENDING via EVENT_ADD_FD. path_on_add_fd handler sets
@@ -2244,6 +2249,23 @@ mqvpn_path_handle_t
 mqvpn_client_add_path_fd(mqvpn_client_t *c, int fd, const mqvpn_path_desc_t *desc)
 {
     return mqvpn_client_add_path_fd_with_outcome(c, fd, desc, NULL);
+}
+
+int
+mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint32_t weight)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    p->weight = weight;
+
+    if (p->xquic_path_live && c->engine && c->conn) {
+        xqc_conn_set_path_weight(c->engine, &c->conn->cid, p->xqc_path_id, weight);
+    }
+    return MQVPN_OK;
 }
 
 int

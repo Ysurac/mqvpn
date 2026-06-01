@@ -59,6 +59,7 @@ typedef struct path_entry_s {
     uint32_t local_addr_len;
     int64_t platform_net_id;
     uint32_t flags;
+    uint32_t weight;         /* WRR scheduler weight from mqvpn_path_desc_t (0 = default/1) */
     uint64_t xqc_path_id;
     int xquic_path_live; /* PR0 rename of `in_use` */
     int srtt_ms;

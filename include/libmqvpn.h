@@ -112,6 +112,10 @@ typedef enum {
     MQVPN_SCHED_BACKUP_FEC  = 3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
     MQVPN_SCHED_RAP         = 4,
     MQVPN_SCHED_WLB_UDP_PIN = 5, /* WLB + 5-tuple pin for UDP flows. */
+    MQVPN_SCHED_WRTT        = 6, /* Weight+RTT: higher weight wins; equal-weight paths
+                                   * broken by min RTT. Overflow to lower-weight paths
+                                   * when cwnd-full. Set via mqvpn_path_desc_t.weight
+                                   * (like ip route nexthop weight N). Default: 1. */
 } mqvpn_scheduler_t;
 
 typedef enum {
@@ -314,6 +318,8 @@ typedef struct {
     uint32_t local_addr_len;
     int64_t platform_net_id; /* Android: Network handle */
     uint32_t flags;          /* MQVPN_PATH_FLAG_* bitmask */
+    uint32_t weight;         /* WRR scheduler weight (0 = default/1). Analogous to
+                              * 'ip route nexthop weight N'. Ignored by other schedulers. */
 } mqvpn_path_desc_t;
 
 /* Path descriptor flags */
@@ -516,6 +522,15 @@ MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path_fd_with_outcome(
     mqvpn_add_path_outcome_t *outcome);
 
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
+
+/**
+ * Set the WRTT scheduler weight for a path identified by its handle.
+ * Persists across path reconnects. weight=0 is treated as 1 (default/equal).
+ * Has no effect when the active scheduler ignores path weights.
+ */
+MQVPN_API int mqvpn_client_set_path_weight(mqvpn_client_t *client,
+                                            mqvpn_path_handle_t handle,
+                                            uint32_t weight);
 
 /*
  * Drop a path slot without notifying xquic (no PATH_ABANDON, no draining).
