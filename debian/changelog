@@ -1,3 +1,20 @@
+mqvpn (0.6.0-1) unstable; urgency=medium
+
+  * Add configurable TUN MTU via --mtu CLI flag and INI/JSON config; cap
+    server per-client MTU notification to actual TUN MTU (#131, #132).
+  * Add --cc flag for congestion control selection (bbr2, bbr, cubic, none).
+  * Add wlb_udp_pin scheduler support (#140).
+  * Add routes management option (#143).
+  * Fix failover storm crash and add dynamic path budget expansion.
+  * Fix always reconnect on path_id=0 removal; fix double-rotation.
+  * Fix xqc_conn_close_path() failure when removing path_id=0.
+  * Fix path add/remove race.
+  * Fix JSON MTU upper bound to match INI parser (65535 → 9000).
+  * Raise max_path_id_grant_max_value from 64 to 128; bump xquic submodule
+    for reciprocal MAX_PATH_ID fix.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 01 Jun 2026 00:00:00 +0000
+
 mqvpn (0.5.0-1) unstable; urgency=medium
 
   * Add QUIC draft-21 support (phase 1, #124).
