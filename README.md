@@ -4,7 +4,7 @@ Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.o
 
 ## Features
 
-- **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB scheduler.
+- **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB or WRTT scheduler.
 - **Standards-based** — MASQUE CONNECT-IP (RFC 9484), no proprietary tunnel format.
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
 - **Multi-Platform** — Available on Linux (server/client), Windows (client only) and Android (client only) support.
@@ -126,6 +126,7 @@ User = carol:carol-secret:10.0.0.50   # fixed IP — always assigned this addres
 
 [Multipath]
 Scheduler = wlb
+# Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
@@ -157,6 +158,7 @@ DNS = 1.1.1.1, 8.8.8.8
 
 [Multipath]
 Scheduler = wlb
+# Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
 # ReinjectionControl = true
 # ReinjectionMode = deadline  # default|deadline|dgram
 # FecEnable = true
@@ -255,12 +257,13 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 
 ## Schedulers
 
-| Scheduler       | TCP        | UDP        | Typical use                                     |
-|-----------------|------------|------------|-------------------------------------------------|
-| `minrtt`        | min RTT    | min RTT    | latency-first                                   |
-| `wlb` (default) | flow pin   | unpinned   | general use; UDP packets distributed per-packet |
-| `wlb_udp_pin`   | flow pin   | flow pin   | each UDP connection kept on a single path       |
-| `backup_fec`    | redundant  | redundant  | resilience-first (requires XQC_ENABLE_FEC)      |
+| Scheduler       | TCP              | UDP              | Typical use                                               |
+|-----------------|------------------|------------------|-----------------------------------------------------------|
+| `minrtt`        | min RTT          | min RTT          | latency-first                                             |
+| `wlb` (default) | flow pin         | unpinned         | general use; UDP packets distributed per-packet           |
+| `wlb_udp_pin`   | flow pin         | flow pin         | each UDP connection kept on a single path                 |
+| `wrtt`          | weight × RTT     | weight × RTT     | weighted aggregation; RTT as tiebreaker when weights equal |
+| `backup_fec`    | redundant        | redundant        | resilience-first (requires XQC_ENABLE_FEC)                |
 
 **Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
 paths per-packet, which gives better aggregate throughput when the inner
@@ -277,6 +280,16 @@ short-flow UDP churn (e.g. high-rate DNS, mDNS bursts) may evict longer-lived
 inner flows under probe-region pressure. `wlb_udp_pin` is intended for tunnels
 carrying a small-to-moderate set of long-lived inner UDP flows; high-churn UDP
 profiles are better served by `wlb`.
+
+**`wrtt` — weighted RTT scheduler:** each packet is sent on the path with the
+best weight-to-RTT score. When weights are equal, the lowest-RTT path leads.
+When weights differ, the higher-weight path dominates even if its RTT is worse.
+When the preferred path is congestion-limited, traffic spills over to secondary
+paths automatically (cwnd-block fallback). Path weights are set at runtime via
+`set_path_weight` (see [Client commands](#client-commands) below). Use `wrtt`
+when you need fine-grained per-link preference in addition to aggregation — for
+example, to prioritise a high-bandwidth fibre link over a metered LTE backup
+while still drawing on both under load.
 
 ## systemd
 
@@ -295,8 +308,6 @@ sudo systemctl enable --now mqvpn-client@home
 ## Control API
 
 Both the server and the client can be managed at runtime over a TCP port using newline-delimited JSON.
-
-Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-protocol reference (all 8 commands, request/response schemas, error strings).
 
 Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-protocol reference (all 8 commands, request/response schemas, error strings).
 
@@ -452,6 +463,32 @@ echo '{"cmd":"list_paths"}' | nc 127.0.0.1 9091
 {"ok":true,"paths":["eth0","wlan0"]}
 ```
 
+#### Set path weight
+
+Set the scheduler weight for a path. Only effective with the `wrtt` scheduler.
+Higher weight directs more traffic to that path; when weights are equal, the
+lowest-RTT path is preferred. Weight `0` resets to the default (equivalent to
+`1`). Valid range: `0`–`65535`.
+
+```bash
+echo '{"cmd":"set_path_weight","iface":"eth0","weight":10}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true}
+```
+
+Example — prioritise `eth0` (fibre) over `wlan0` (WiFi) while keeping both active:
+
+```bash
+echo '{"cmd":"set_path_weight","iface":"eth0","weight":10}' | nc 127.0.0.1 9091
+echo '{"cmd":"set_path_weight","iface":"wlan0","weight":1}' | nc 127.0.0.1 9091
+```
+
+> **Note:** weights take effect once each path has completed its QUIC
+> PATH_CHALLENGE/RESPONSE handshake and reached the `active` state. Calling
+> `set_path_weight` before paths are active is accepted but the weight is applied
+> as soon as the path activates.
+
 ### From code (Python example)
 
 ```python
@@ -469,6 +506,10 @@ ctrl(9090, {"cmd": "set_user_fixed_ip", "name": "dave", "fixed_ip": ""})  # clea
 ctrl(9090, {"cmd": "remove_user",       "name": "dave"})
 print(ctrl(9090, {"cmd": "list_users"}))   # {'ok': True, 'users': ['alice', 'bob', 'eve']}
 print(ctrl(9090, {"cmd": "get_stats"}))    # {'ok': True, 'n_clients': 1, ...}
+
+# WRTT weight control (client port)
+ctrl(9091, {"cmd": "set_path_weight", "iface": "eth0",  "weight": 10})
+ctrl(9091, {"cmd": "set_path_weight", "iface": "wlan0", "weight": 1})
 ```
 
 ## Benchmarks
@@ -587,7 +628,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap Multipath scheduler (default: wlb)
+    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt Multipath scheduler (default: wlb)
     --cc bbr2|bbr|cubic|new_reno|copa|unlimited Congestion control (default: bbr2)
     --reinjection-control  Enable multipath reinjection control
     --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)
@@ -610,6 +651,7 @@ mqvpn [--config PATH] --mode client|server [options]
 - [x] Per-client token auth
 - [x] resolvectl DNS support (with resolv.conf fallback)
 - [x] v0.4.0 — Experimental backup_fec scheduler, Windows client, server control API support
+- [x] WRTT scheduler with per-path weight control
 - [ ] netlink API for routing (replace fork+exec of `ip` command)
 - [ ] Performance: GSO/GRO, sendmmsg, native Android I/O
 - [ ] Interop testing (masque-go, QUICHE)
