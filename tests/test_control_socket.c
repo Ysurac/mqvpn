@@ -98,6 +98,9 @@ int platform_remove_path(platform_ctx_t *p, const char *iface)
 int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
 { (void)p; (void)names; (void)max; return 0; }
 
+int platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight)
+{ (void)p; (void)iface; (void)weight; return 0; }
+
 /* ── Pull in the implementation under test ──────────────────────────────── */
 #include "../src/platform/linux/control_socket.c"
 

@@ -1435,14 +1435,18 @@ static void test_backup_path_ini_parse(void)
 
 static void test_backup_path_ini_max_cap(void)
 {
-    /* 5 backup paths → capped at MQVPN_CONFIG_MAX_PATHS (4) */
+    /* 9 backup paths → capped at MQVPN_CONFIG_MAX_PATHS (8) */
     const char *ini =
         "[Multipath]\n"
         "BackupPath = b0\n"
         "BackupPath = b1\n"
         "BackupPath = b2\n"
         "BackupPath = b3\n"
-        "BackupPath = b4\n";
+        "BackupPath = b4\n"
+        "BackupPath = b5\n"
+        "BackupPath = b6\n"
+        "BackupPath = b7\n"
+        "BackupPath = b8\n";
 
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
@@ -1451,8 +1455,8 @@ static void test_backup_path_ini_max_cap(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "backup path cap no error");
-    ASSERT_EQ_INT(cfg.n_backup_paths, 4, "capped at 4 backup paths");
-    ASSERT_EQ_STR(cfg.backup_paths[3], "b3", "backup_path[3]");
+    ASSERT_EQ_INT(cfg.n_backup_paths, 8, "capped at 8 backup paths");
+    ASSERT_EQ_STR(cfg.backup_paths[7], "b7", "backup_path[7]");
 }
 
 static void test_backup_path_json_parse(void)

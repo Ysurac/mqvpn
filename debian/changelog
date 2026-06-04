@@ -1,3 +1,19 @@
+mqvpn (0.7.0-1) unstable; urgency=medium
+
+  * Add WRTT (Weighted Round-Trip Time) multipath scheduler: selects paths
+    by weight-to-RTT score; RTT acts as tiebreaker when weights are equal;
+    spills to secondary paths on cwnd congestion.
+  * Add set_path_weight control API command (client): adjust per-path WRTT
+    weight at runtime without reconnecting (range 0–65535; 0 = default/1).
+  * Raise MQVPN_MAX_PATHS cap from 4 to 8.
+  * fix(control): emit n_paths field in per-client get_status JSON response.
+  * fix(build): bump libmqvpn soversion for path ABI change.
+  * fix(build): forward-declare struct event_base in control_socket.h.
+  * Add test_control_response_bound unit test (worst-case JSON fits buffer).
+  * Add test_cli_path_argv shell test (8-path CLI argv overflow guard).
+
+ -- mqvpn maintainers <maintainers@example.com>  Thu, 04 Jun 2026 00:00:00 +0000
+
 mqvpn (0.6.0-1) unstable; urgency=medium
 
   * Add configurable TUN MTU via --mtu CLI flag and INI/JSON config; cap
