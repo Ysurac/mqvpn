@@ -30,6 +30,8 @@ LogLevel = info
 # Addr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
 
 [Multipath]
+# Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|backup_fec|rap (default: wlb)
+# wrtt = weighted RTT aggregation; adjust per-path weights at runtime via set_path_weight control API
 Scheduler = wlb
 # CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited (default bbr2)
 # ReinjectionControl = true

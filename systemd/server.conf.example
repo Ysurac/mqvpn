@@ -30,7 +30,8 @@ MaxClients = 64
 # ControlAddr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
 
 [Multipath]
-# Scheduler: minrtt|wlb|backup|backup_fec|rap
+# Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|backup_fec|rap
+# wrtt = weighted RTT aggregation; adjust per-path weights at runtime via set_path_weight control API
 Scheduler = wlb
 # CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited (default bbr2)
 # ReinjectionControl = true

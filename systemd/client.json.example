@@ -13,6 +13,7 @@
   "route_via_server": false,
   "no_routes": false,
   "scheduler": "wlb",
+  "mtu": 0,
   "cc": "bbr2",
   "reinjection_control": true,
   "reinjection_mode": "deadline",
