@@ -16,6 +16,15 @@
 /* ─── Constants ─── */
 /* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
 
+/* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
+ * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
+ * startup, so "auto" uses the typical negotiated value on a 1500-MTU path
+ * with default engine settings (max_pkt_out_size 1400 − QUIC short header
+ * − DATAGRAM/MASQUE headers = 1382).  Clients that negotiated less are
+ * handled per-client via ICMP PTB in mqvpn_server_on_tun_packet(), so a
+ * high default is safe. */
+#define MQVPN_TUN_MTU_AUTO 1382
+
 /* ─── Config (opaque to callers) ─── */
 
 struct mqvpn_config_s {
@@ -59,9 +68,8 @@ struct mqvpn_config_s {
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
     uint64_t init_max_path_id;
 
-    /* TUN MTU override. 0 = auto (derived from MASQUE datagram MSS, floor
-     * IPV6_MIN_MTU=1280). Set to a positive value to pin the TUN MTU. */
-    int tun_mtu;
+    int tun_mtu; /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
+                    TUN MTU */
 };
 
 /* ─── State transition validation (M0-5) ─── */
