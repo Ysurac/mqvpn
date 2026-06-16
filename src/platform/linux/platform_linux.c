@@ -17,6 +17,7 @@
 #include "platform_linux.h"
 #include "control_socket.h"
 #include "log.h"
+#include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -1138,6 +1139,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.route_via_server = cfg->route_via_server;
     ctx.no_routes = cfg->no_routes;
+    ctx.manage_routes = !cfg->no_routes;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -1208,6 +1210,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_config_set_reinj_ctl(lib_cfg, (mqvpn_reinj_ctl_t)cfg->reinjection_mode);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
     mqvpn_config_set_fec_scheme(lib_cfg, (mqvpn_fec_scheme_t)cfg->fec_scheme);
+    mqvpn_config_apply_reorder(lib_cfg,
+                               &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1712,6 +1716,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_reinj_ctl(lib_cfg, (mqvpn_reinj_ctl_t)cfg->reinjection_mode);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
     mqvpn_config_set_fec_scheme(lib_cfg, (mqvpn_fec_scheme_t)cfg->fec_scheme);
+    mqvpn_config_apply_reorder(lib_cfg,
+                               &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 

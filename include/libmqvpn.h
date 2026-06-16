@@ -118,6 +118,20 @@ typedef enum {
                                    * (like ip route nexthop weight N). Default: 1. */
 } mqvpn_scheduler_t;
 
+/* Flow-aware reorder-only datagram delivery (see reorder design spec).
+ * AUTO is deferred to a later phase and will be appended as = 2. */
+typedef enum {
+    MQVPN_REORDER_OFF = 0,
+    MQVPN_REORDER_ON = 1,
+} mqvpn_reorder_mode_t;
+
+/* Per-rule reorder profile (§16.1). v1 is a fixed 3-value enum. */
+typedef enum {
+    MQVPN_RPROF_QUIC_BULK = 0,
+    MQVPN_RPROF_LOW_LATENCY = 1,
+    MQVPN_RPROF_DEFAULT_UDP = 2,
+} mqvpn_reorder_profile_t;
+
 typedef enum {
     MQVPN_REINJ_CTL_DEFAULT  = 0,
     MQVPN_REINJ_CTL_DEADLINE = 1,
@@ -467,6 +481,33 @@ MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Override TUN MTU. 0 = auto (derived from MASQUE datagram MSS, floor 1280).
  * Positive values pin the TUN MTU on both client and server. Valid range: 68–65535. */
 MQVPN_API int mqvpn_config_set_mtu(mqvpn_config_t *cfg, int mtu);
+
+/* ─── Flow-aware reorder shim config (§16.1) ───
+ *
+ * These mirror the reorder design spec's builder surface. Values are validated
+ * (cross-side invariants like cap-power-of-two and ingress < egress) when the
+ * config is applied by the library, not by the setters. Calling none of these
+ * leaves the shim disabled (mode OFF, the default). */
+MQVPN_API int mqvpn_config_set_reorder_enabled(mqvpn_config_t *cfg,
+                                               mqvpn_reorder_mode_t mode);
+MQVPN_API int mqvpn_config_set_reorder_wait(mqvpn_config_t *cfg, uint32_t max_wait_ms);
+MQVPN_API int mqvpn_config_set_reorder_cap(mqvpn_config_t *cfg, uint32_t cap_packets,
+                                           uint64_t max_bytes_per_flow);
+MQVPN_API int mqvpn_config_set_reorder_classify(mqvpn_config_t *cfg, uint16_t window,
+                                                uint16_t max_large,
+                                                uint32_t small_threshold);
+MQVPN_API int mqvpn_config_set_reorder_reset(mqvpn_config_t *cfg, uint32_t mark_packets,
+                                             uint32_t idle_grace_ms);
+MQVPN_API int mqvpn_config_set_reorder_limits(mqvpn_config_t *cfg, uint32_t max_flows,
+                                              uint64_t global_max_bytes,
+                                              uint32_t ingress_idle_sec,
+                                              uint32_t egress_idle_sec);
+/* Append one port/protocol → profile rule. Rules are matched in insertion
+ * order. Returns MQVPN_ERR_INVALID_ARG if more than the fixed rule cap are
+ * added or the profile enum is out of range. */
+MQVPN_API int mqvpn_config_add_reorder_rule(mqvpn_config_t *cfg, uint8_t proto,
+                                            uint16_t port,
+                                            mqvpn_reorder_profile_t profile);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
