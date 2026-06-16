@@ -86,6 +86,9 @@ int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
     return n;
 }
 
+int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_t *out)
+{ (void)s; if (out) memset(out, 0, sizeof(*out)); return 0; }
+
 /* ── Platform stubs ─────────────────────────────────────────────────────── */
 #include "platform_internal.h"
 
