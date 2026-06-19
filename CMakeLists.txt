@@ -306,7 +306,7 @@ if(BUILD_TESTING)
     target_include_directories(test_path_error_policy PRIVATE ${XQUIC_INCLUDE_DIR})
 
     # control_socket dispatch() unit tests (requires libevent for socket machinery)
-    add_executable(test_control_socket tests/test_control_socket.c)
+    add_executable(test_control_socket tests/test_control_socket.c src/reorder_rx.c)
     target_link_libraries(test_control_socket ${EVENT_LIB})
     target_include_directories(test_control_socket PRIVATE
         ${CMAKE_SOURCE_DIR}/src
