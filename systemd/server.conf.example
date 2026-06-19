@@ -39,6 +39,21 @@ Scheduler = wlb
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
 
+# [Reorder]
+# Enabled = off              # on|off — reorder buffer for inner UDP (off by default)
+# MaxWaitMs = 30             # max hold time before releasing a gap (ms)
+# CapPackets = 1024          # max buffered datagrams per flow (power of two)
+
+# [ReorderRule]              # bulk inner QUIC: reorder on
+# Proto = udp
+# Port = 443
+# Profile = fiber_lte        # cellular_bond|fiber_lte|quic_bulk|default_udp (pass-through)
+
+# [ReorderRule]              # DNS: never delay
+# Proto = udp
+# Port = 53
+# Profile = default_udp
+
 # [Control]
 # Local-only TCP control/admin API (add/remove users, query stats).
 # Uncomment to enable. No authentication — bind 127.0.0.1 only unless you

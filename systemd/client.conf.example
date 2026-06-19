@@ -41,3 +41,18 @@ Scheduler = wlb
 # Path = eth0
 # Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
+
+# [Reorder]
+# Enabled = off              # on|off — reorder buffer for inner UDP (off by default)
+# MaxWaitMs = 30             # max hold time before releasing a gap (ms)
+# CapPackets = 1024          # max buffered datagrams per flow (power of two)
+
+# [ReorderRule]              # bulk inner QUIC: reorder on
+# Proto = udp
+# Port = 443
+# Profile = fiber_lte        # cellular_bond|fiber_lte|quic_bulk|default_udp (pass-through)
+
+# [ReorderRule]              # DNS: never delay
+# Proto = udp
+# Port = 53
+# Profile = default_udp
