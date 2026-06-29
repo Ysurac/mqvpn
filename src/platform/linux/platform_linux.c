@@ -1170,6 +1170,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     }
 
     mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
+    if (cfg->tls_server_name)
+        mqvpn_config_set_tls_server_name(lib_cfg, cfg->tls_server_name);
     if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
     if (cfg->auth_username && cfg->auth_username[0])
         mqvpn_config_set_auth_username(lib_cfg, cfg->auth_username);

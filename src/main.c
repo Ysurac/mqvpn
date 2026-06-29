@@ -49,11 +49,12 @@ usage(const char *prog)
         "  --listen BIND:PORT        Listen address (server mode, default 0.0.0.0:443)\n"
         "  --subnet CIDR             Client IP pool (server mode, default 10.0.0.0/24)\n"
         "  --subnet6 CIDR            IPv6 client IP pool (server mode, e.g. "
-        "2001:db8:1::/112)\n"
+        "fd00:abcd::/112)\n"
         "  --tun-name NAME           TUN device name (default mqvpn0)\n"
         "  --cert PATH               TLS certificate (server mode)\n"
         "  --key PATH                TLS private key (server mode)\n"
         "  --cipher LIST             TLS cipher suites list (colon-separated)\n"
+        "  --tls-server-name NAME    TLS SNI / cert verify name (client mode)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
         "  --auth-key KEY            PSK for authentication\n"
         "  --user NAME:KEY           Add a server user credential (repeatable)\n"
@@ -184,6 +185,7 @@ main(int argc, char *argv[])
         {"routesviaserver", no_argument, NULL, 'w'},
         {"no-routes", no_argument, NULL, 'W'},
         {"noroutes", no_argument, NULL, 'W'},
+        {"tls-server-name", required_argument, NULL, 0x104},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -203,6 +205,7 @@ main(int argc, char *argv[])
     const char *key_file = NULL;
     const char *cipher_list = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
+    const char *tls_server_name = NULL;
     const char *auth_key = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
     char cli_user_keys[MQVPN_CONFIG_MAX_USERS][256];
@@ -349,6 +352,7 @@ main(int argc, char *argv[])
         case 'K': kill_switch = 1; break;
         case 'w': route_via_server = 1; break;
         case 'W': no_routes = 1; break;
+        case 0x104: tls_server_name = optarg; break;
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -621,10 +625,15 @@ main(int argc, char *argv[])
             if (!eff_auth_username)
                 eff_auth_username = eff_user_names[0];
         }
+        const char *eff_tls_name = tls_server_name ? tls_server_name
+                                   : file_cfg.tls_server_name[0]
+                                       ? file_cfg.tls_server_name
+                                       : NULL;
 
         mqvpn_client_cfg_t cfg = {
             .server_addr = host,
             .server_port = port,
+            .tls_server_name = eff_tls_name,
             .tun_name = eff_tun_name,
             .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .insecure = eff_insecure,

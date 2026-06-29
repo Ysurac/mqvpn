@@ -1,4 +1,6 @@
-# mqvpn
+<p align="center">
+  <img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
+</p>
 
 Multipath QUIC VPN using [MASQUE CONNECT-IP (RFC 9484)](https://www.rfc-editor.org/rfc/rfc9484) over [HTTP Datagrams (RFC 9297)](https://www.rfc-editor.org/rfc/rfc9297) / [QUIC DATAGRAMs (RFC 9221)](https://www.rfc-editor.org/rfc/rfc9221), built on a [fork of XQUIC](https://github.com/mp0rta/xquic/tree/mqvpn-main) with [Multipath QUIC](https://datatracker.ietf.org/doc/draft-ietf-quic-multipath/).
 
@@ -142,6 +144,7 @@ Scheduler = wlb
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
+# ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
 
 [TLS]
 # Cipher = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256
@@ -211,10 +214,11 @@ Client example:
 {
     "mode": "client",
     "server_addr": "203.0.113.1:443",
+    "tls_server_name": "vpn.example.com",
     "auth_key": "client-key",
     "auth_username": "alice",
     "cipher": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
-    "insecure": true,
+    "insecure": false,
     "dns": ["1.1.1.1", "8.8.8.8"],
     "paths": ["eth0", "wlan0"],
     "backup_paths": ["lte0"],

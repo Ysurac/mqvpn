@@ -30,6 +30,7 @@
 
 struct mqvpn_config_s {
     char server_host[256];
+    char tls_server_name[256];
     int server_port;
     char auth_key[256];
     char auth_username[64]; /* client-only: name to send in x-user header */
@@ -200,6 +201,8 @@ MQVPN_INTERNAL int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
  * breakdown): the e2e/exporter only needs the engine-fired evidence
  * (gap_count > 0), and per-conn detail is not required at this layer. */
 MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
+                                                  mqvpn_reorder_stats_t *out);
+MQVPN_INTERNAL int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c,
                                                   mqvpn_reorder_stats_t *out);
 
 #endif /* MQVPN_INTERNAL_H */

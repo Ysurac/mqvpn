@@ -207,6 +207,7 @@ TEST(config_load_json)
     const char *json = "{"
                        "\"server_host\":\"vpn.example.com\","
                        "\"server_port\":8443,"
+                       "\"tls_server_name\":\"sni.example.com\","
                        "\"auth_key\":\"legacy-key\","
                        "\"insecure\":true,"
                        "\"multipath\":false,"
@@ -233,6 +234,7 @@ TEST(config_load_json)
     ASSERT_EQ(mqvpn_config_load_json(cfg, json), MQVPN_OK);
     ASSERT_STR_EQ(cfg->server_host, "vpn.example.com");
     ASSERT_EQ(cfg->server_port, 8443);
+    ASSERT_STR_EQ(cfg->tls_server_name, "sni.example.com");
     ASSERT_STR_EQ(cfg->auth_key, "legacy-key");
     ASSERT_EQ(cfg->insecure, 1);
     ASSERT_EQ(cfg->multipath, 0);
@@ -292,6 +294,18 @@ TEST(config_load_json_invalid_tuning)
               MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cc\":\"reno\"}"), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"mtu\":\"bad\"}"), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_set_tls_server_name)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->tls_server_name[0], '\0');
+    ASSERT_EQ(mqvpn_config_set_tls_server_name(cfg, "vpn.example.com"), MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_server_name, "vpn.example.com");
+    ASSERT_EQ(mqvpn_config_set_tls_server_name(cfg, NULL), MQVPN_OK);
+    ASSERT_EQ(cfg->tls_server_name[0], '\0');
+    ASSERT_EQ(mqvpn_config_set_tls_server_name(NULL, "x"), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
 
@@ -726,6 +740,32 @@ TEST(client_get_interest)
     /* NULL args */
     ASSERT_EQ(mqvpn_client_get_interest(NULL, &interest), MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_client_get_interest(c, NULL), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_get_reorder_stats_null_args)
+{
+    mqvpn_reorder_stats_t st;
+    ASSERT_EQ(mqvpn_client_get_reorder_stats(NULL, &st), -1);
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(mqvpn_client_get_reorder_stats(c, NULL), -1);
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_get_reorder_stats_zero_fill_when_unconnected)
+{
+    mqvpn_client_t *c = make_test_client();
+    ASSERT_NOT_NULL(c);
+
+    mqvpn_reorder_stats_t st;
+    memset(&st, 0xAB, sizeof(st));
+    ASSERT_EQ(mqvpn_client_get_reorder_stats(c, &st), 0);
+    ASSERT_EQ(st.delivered_count, 0u);
+    ASSERT_EQ(st.gap_count, 0u);
+    ASSERT_EQ(st.gap_filled_count, 0u);
+    ASSERT_EQ(st.residence_max_us, 0u);
 
     mqvpn_client_destroy(c);
 }
@@ -2257,6 +2297,7 @@ main(void)
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
     run_config_load_json_invalid_tuning();
+    run_config_set_tls_server_name();
     run_config_set_insecure();
     run_config_set_tun_mtu();
     run_config_set_scheduler();
@@ -2297,6 +2338,8 @@ main(void)
     /* Query tests */
     run_client_get_state_null();
     run_client_get_stats();
+    run_client_get_reorder_stats_null_args();
+    run_client_get_reorder_stats_zero_fill_when_unconnected();
     run_client_get_interest();
 
     /* Path management tests */

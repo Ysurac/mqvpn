@@ -141,9 +141,5 @@ class UdpReaderPoolTest {
      * Create a MqvpnTunnel with dummy handles.
      * The tunnel is never actually called (threads die before reaching onSocketRecv).
      */
-    private fun createDummyTunnel(): MqvpnTunnel {
-        val ctor = MqvpnTunnel::class.java.getDeclaredConstructor(Long::class.java, Long::class.java)
-        ctor.isAccessible = true
-        return ctor.newInstance(0L, 0L)
-    }
+    private fun createDummyTunnel(): MqvpnTunnel = TestReflection.createDummyTunnel()
 }

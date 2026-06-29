@@ -144,6 +144,7 @@ test_parse_client_config(void)
 {
     const char *ini = "[Server]\n"
                       "Address = vpn.example.com:443\n"
+                      "ServerName = sni.example.com\n"
                       "Insecure = true\n"
                       "\n"
                       "[Auth]\n"
@@ -171,6 +172,7 @@ test_parse_client_config(void)
     ASSERT_EQ_INT(rc, 0, "client config parse ok");
     ASSERT_EQ_INT(cfg.is_server, 0, "detected client mode");
     ASSERT_EQ_STR(cfg.server_addr, "vpn.example.com:443", "server_addr");
+    ASSERT_EQ_STR(cfg.tls_server_name, "sni.example.com", "tls_server_name");
     ASSERT_EQ_INT(cfg.insecure, 1, "insecure");
     ASSERT_EQ_STR(cfg.auth_key, "myclientkey", "auth_key");
     ASSERT_EQ_STR(cfg.tun_name, "tun-client", "tun_name");
@@ -1132,6 +1134,7 @@ test_json_client_config_load(void)
     const char *json = "{"
                        "\"mode\":\"client\","
                        "\"server_addr\":\"vpn.example.com:443\","
+                       "\"tls_server_name\":\"sni.example.com\","
                        "\"auth_key\":\"client-key\","
                        "\"insecure\":true,"
                        "\"tun_name\":\"mqvpn7\","
@@ -1154,6 +1157,7 @@ test_json_client_config_load(void)
     ASSERT_EQ_INT(rc, 0, "json client config parse ok");
     ASSERT_EQ_INT(cfg.is_server, 0, "json client mode");
     ASSERT_EQ_STR(cfg.server_addr, "vpn.example.com:443", "json client server_addr");
+    ASSERT_EQ_STR(cfg.tls_server_name, "sni.example.com", "json client tls_server_name");
     ASSERT_EQ_STR(cfg.auth_key, "client-key", "json client auth_key");
     ASSERT_EQ_INT(cfg.insecure, 1, "json client insecure");
     ASSERT_EQ_STR(cfg.tun_name, "mqvpn7", "json client tun_name");

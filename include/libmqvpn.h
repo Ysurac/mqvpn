@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.7.0 (callback ABI version 2)
+ * Version: 0.8.0 (callback ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -38,7 +38,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 7
+#define MQVPN_VERSION_MINOR 8
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -450,6 +450,7 @@ MQVPN_API mqvpn_config_t *mqvpn_config_new(void);
 MQVPN_API void mqvpn_config_free(mqvpn_config_t *cfg);
 
 MQVPN_API int mqvpn_config_set_server(mqvpn_config_t *cfg, const char *host, int port);
+MQVPN_API int mqvpn_config_set_tls_server_name(mqvpn_config_t *cfg, const char *name);
 MQVPN_API int mqvpn_config_set_auth_key(mqvpn_config_t *cfg, const char *key);
 MQVPN_API int mqvpn_config_set_auth_username(mqvpn_config_t *cfg, const char *username);
 MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,

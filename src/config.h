@@ -33,7 +33,7 @@ typedef struct mqvpn_file_config_s {
     /* [Interface] — server */
     char listen[280]; /* "bind:port" */
     char subnet[32];
-    char subnet6[64]; /* IPv6 tunnel subnet CIDR (e.g. "2001:db8:1::/112") */
+    char subnet6[64]; /* IPv6 tunnel subnet CIDR (e.g. "fd00:abcd::/112") */
 
     /* [Interface] — client */
     char dns_servers[MQVPN_CONFIG_MAX_DNS][64];
@@ -41,6 +41,7 @@ typedef struct mqvpn_file_config_s {
 
     /* [Server] — client */
     char server_addr[280]; /* "host:port" */
+    char tls_server_name[256];
     int insecure;
 
     /* [Auth] — client */
