@@ -19,11 +19,10 @@ DNS = 1.1.1.1, 8.8.8.8
 LogLevel = info
 # MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
 # KillSwitch = false
-# ManageRoutes = true            # set to false on router/embedded integrations to keep host routes untouched
+# NoRoutes = false         # set to true on router/embedded integrations to keep host routes untouched
 # Reconnect = true
 # ReconnectInterval = 5
 # RouteViaServer = false   # add a host route to the server IP before setting the default route
-# NoRoutes = false         # skip all automatic route setup (manage routes manually)
 
 [Control]
 # Port = 9091          # enable JSON control API on this TCP port
