@@ -716,6 +716,132 @@ test_cidr_non_aligned(void)
     ASSERT_EQ_INT(off, 2, "first alloc offset is 2");
 }
 
+/* ── mqvpn_addr_pool_alloc_at tests ──────────────────────────────────────── */
+
+static void
+test_alloc_at_basic(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "pool init /24");
+
+    struct in_addr out;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 5, &out), 0, "alloc_at offset 5");
+
+    /* Resulting IP must be base + 5 = 10.0.0.5 */
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &out, str, sizeof(str));
+    ASSERT_EQ_STR(str, "10.0.0.5", "alloc_at gives 10.0.0.5");
+
+    /* Slot is now marked used — sequential alloc must not return the same offset */
+    struct in_addr seq;
+    int found_5 = 0;
+    for (int i = 0; i < 10; i++) {
+        if (mqvpn_addr_pool_alloc(&pool, &seq) < 0) break;
+        uint32_t off = ntohl(seq.s_addr) - ntohl(pool.base.s_addr);
+        if (off == 5) found_5 = 1;
+    }
+    ASSERT_EQ_INT(found_5, 0, "sequential alloc skips pinned offset 5");
+}
+
+static void
+test_alloc_at_offset_one_rejected(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "pool init /24");
+    struct in_addr out;
+    /* offset=1 is the server address — alloc_at must refuse it */
+    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 1, &out) < 0, "offset 1 rejected");
+}
+
+static void
+test_alloc_at_offset_zero_rejected(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "pool init /24");
+    struct in_addr out;
+    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 0, &out) < 0, "offset 0 rejected");
+}
+
+static void
+test_alloc_at_already_used_rejected(void)
+{
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/24"), 0, "pool init /24");
+    struct in_addr out;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 10, &out), 0, "first alloc_at 10");
+    /* Second call for the same offset must fail */
+    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 10, &out) < 0, "duplicate alloc_at rejected");
+}
+
+static void
+test_alloc_at_beyond_pool_size_rejected(void)
+{
+    /* /28: pool_size = 14; valid client offsets are 2..14 inclusive.
+     * alloc_at uses `offset > pool_size` (strict), so 14 is valid but 15 is not. */
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
+    struct in_addr out;
+    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 15, &out) < 0,
+                "offset 15 (> pool_size) rejected");
+    /* Offset 14 == pool_size is the last valid slot */
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 14, &out), 0,
+                "offset 14 (== pool_size) is the last valid slot");
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &out, str, sizeof(str));
+    ASSERT_EQ_STR(str, "10.0.0.14", "offset 14 gives 10.0.0.14");
+}
+
+static void
+test_alloc_at_release_realloc(void)
+{
+    /* Pin a slot, release it, then verify sequential alloc can reuse it */
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
+
+    struct in_addr pinned;
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 7, &pinned), 0, "pin offset 7");
+    char str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &pinned, str, sizeof(str));
+    ASSERT_EQ_STR(str, "10.0.0.7", "pinned addr is 10.0.0.7");
+
+    mqvpn_addr_pool_release(&pool, &pinned);
+
+    /* Exhaust remaining slots so we must eventually hit 7 */
+    struct in_addr tmp;
+    int got_7 = 0;
+    while (mqvpn_addr_pool_alloc(&pool, &tmp) == 0) {
+        if (ntohl(tmp.s_addr) - ntohl(pool.base.s_addr) == 7) got_7 = 1;
+    }
+    ASSERT_EQ_INT(got_7, 1, "released pinned slot 7 reused by sequential alloc");
+}
+
+static void
+test_alloc_at_interleave_with_sequential(void)
+{
+    /* Mix alloc_at and alloc: pinned slots must not be returned by alloc. */
+    mqvpn_addr_pool_t pool;
+    ASSERT_EQ_INT(mqvpn_addr_pool_init(&pool, "10.0.0.0/28"), 0, "pool init /28");
+
+    struct in_addr p3, p9;
+    /* Pin offsets 3 and 9 */
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 3, &p3), 0, "pin offset 3");
+    ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 9, &p9), 0, "pin offset 9");
+
+    /* Sequential alloc should fill the other 11 client slots (total 13 - 2 pinned) */
+    struct in_addr tmp;
+    int count = 0;
+    int hit_3 = 0, hit_9 = 0;
+    while (mqvpn_addr_pool_alloc(&pool, &tmp) == 0) {
+        uint32_t off = ntohl(tmp.s_addr) - ntohl(pool.base.s_addr);
+        if (off == 3) hit_3 = 1;
+        if (off == 9) hit_9 = 1;
+        count++;
+    }
+    ASSERT_EQ_INT(count, 11, "sequential fills 11 remaining slots");
+    ASSERT_EQ_INT(hit_3, 0, "pinned offset 3 not returned by sequential alloc");
+    ASSERT_EQ_INT(hit_9, 0, "pinned offset 9 not returned by sequential alloc");
+}
+
 int
 main(void)
 {
@@ -754,6 +880,15 @@ main(void)
     test_pool_max_boundary();
     test_ipv6_large_offset_no_overflow();
     test_cidr_non_aligned();
+
+    /* alloc_at (fixed IP) tests */
+    test_alloc_at_basic();
+    test_alloc_at_offset_one_rejected();
+    test_alloc_at_offset_zero_rejected();
+    test_alloc_at_already_used_rejected();
+    test_alloc_at_beyond_pool_size_rejected();
+    test_alloc_at_release_realloc();
+    test_alloc_at_interleave_with_sequential();
 
     printf("\n=== test_session: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

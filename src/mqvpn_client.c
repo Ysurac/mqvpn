@@ -721,6 +721,23 @@ mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us)
     return 0;
 }
 
+/* Test-only: seed path_stable_since_us + xquic_path_live on a slot so
+ * the Stability timer block in get_interest() fires without a live engine. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                     uint64_t stable_since_us)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    p->path_stable_since_us = stable_since_us; /* LINT-ALLOW: test wrapper seed */
+    p->xquic_path_live = 1;                    /* LINT-ALLOW: test wrapper seed */
+    return 0;
+}
+
 /* ─── ICMP PTB rate limiter ─── */
 
 static int
