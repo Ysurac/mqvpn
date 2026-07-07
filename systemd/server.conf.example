@@ -26,8 +26,8 @@ MaxClients = 64
 # User = carol:carol-secret:10.0.0.50
 
 [Control]
-# ControlPort = 9090          # enable JSON control API on this TCP port
-# ControlAddr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
+# Port = 9090          # enable JSON control API on this TCP port
+# Addr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
 
 [Multipath]
 # Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|backup_fec|rap
@@ -38,6 +38,19 @@ Scheduler = wlb
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
+
+# [Hybrid]
+# Hybrid TCP lane: relay inbound TCP from clients through the server's egress
+# instead of the MASQUE IP tunnel, reducing head-of-line blocking for TCP apps.
+# Requires MQVPN_HYBRID_TCP_LANE_ENABLED at build time (default: off).
+# Enabled = false
+# Tcp = auto             # stream|raw|auto (default: auto — SNI probe then fallback to raw)
+# TcpMaxFlows = 256      # per-session concurrent TCP flows cap
+# TcpMaxGlobalFlows = 1024 # server-wide TCP flow cap (across all sessions)
+# TcpIdleTimeoutSec = 300  # evict idle flows after N seconds (0 = never)
+# TcpConnectTimeoutSec = 10 # abort connect() if not established within N seconds
+# EgressAllow = 0.0.0.0/0   # CIDR whitelist for TCP egress destinations (default: allow all)
+# EgressDeny = 10.0.0.0/8   # CIDR blacklist (evaluated after allow list)
 
 # [Reorder]
 # Enabled = off              # on|off — reorder buffer for inner UDP (off by default)
@@ -53,9 +66,3 @@ Scheduler = wlb
 # Proto = udp
 # Port = 53
 # Profile = default_udp
-
-# [Control]
-# Local-only TCP control/admin API (add/remove users, query stats).
-# Uncomment to enable. No authentication — bind 127.0.0.1 only unless you
-# place it behind a reverse proxy / SSH tunnel / firewall.
-# Listen = 127.0.0.1:9090

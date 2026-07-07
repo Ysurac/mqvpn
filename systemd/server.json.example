@@ -24,6 +24,16 @@
   "fec_scheme": "reed_solomon",
   "control_port": 0,
   "control_addr": "127.0.0.1",
+  "hybrid": {
+    "enabled": false,
+    "tcp": "auto",
+    "tcp_max_flows": 256,
+    "tcp_max_global_flows": 1024,
+    "tcp_idle_timeout_sec": 300,
+    "tcp_connect_timeout_sec": 10,
+    "egress_allow": [],
+    "egress_deny": []
+  },
   "reorder": {
     "enabled": "off",
     "max_wait_ms": 30,
