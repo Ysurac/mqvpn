@@ -623,6 +623,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     /* [TLS] */
     CFG_STR(SEC_TLS, "Cert", "cert_file", cert_file),
     CFG_STR(SEC_TLS, "Key", "key_file", key_file),
+    CFG_STR(SEC_TLS, NULL, "tls_ciphers", tls_ciphers),
     CFG_STR(SEC_TLS, "Cipher", "cipher", tls_ciphers),
     CFG_STR(SEC_TLS, "Ciphers", "ciphers", tls_ciphers),
     /* [Auth] — INI Key is mode-agnostic dual-write; JSON has two keys */

@@ -3843,7 +3843,7 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
     }
 
     /* Account for path recovery and stability timers */
-    if (c->config.multipath && c->conn && c->state == MQVPN_STATE_ESTABLISHED) {
+    if (c->multipath_ready && c->state == MQVPN_STATE_ESTABLISHED) {
         uint64_t now_val = client_now_us(c);
         for (int i = 0; i < c->n_paths; i++) {
             const path_entry_t *p = &c->paths[i];
