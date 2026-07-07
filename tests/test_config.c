@@ -1850,6 +1850,432 @@ test_resolve_port_leading_junk(void)
     ASSERT_EQ_INT(rc, -1, "empty port returns -1");
 }
 
+/* ── [Hybrid] section (H1) ──────────────────────────────────────────────── */
+
+static void
+test_hybrid_defaults_when_absent(void)
+{
+    /* No [Hybrid] section → classifier defaults (0/AUTO/256/300). */
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.hybrid.enabled, 0, "hybrid default enabled off");
+    ASSERT_EQ_INT(cfg.hybrid.tcp_mode, MQVPN_HYBRID_TCP_AUTO, "hybrid default tcp auto");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_flows, 256, "hybrid default tcp_max_flows");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 300,
+                  "hybrid default tcp_idle_timeout_sec");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 10,
+                  "hybrid default tcp_connect_timeout_sec");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows,
+                  MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT,
+                  "hybrid default tcp_max_global_flows");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 0, "hybrid default no egress_allow entries");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 0, "hybrid default no egress_deny entries");
+
+    /* Loading a config without [Hybrid] must keep the defaults. */
+    char *p = write_tmp("[Interface]\nListen = 0.0.0.0:443\n");
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "no-hybrid ini load ok");
+    ASSERT_EQ_INT(cfg.hybrid.enabled, 0, "no-hybrid keeps enabled off");
+    ASSERT_EQ_INT(cfg.hybrid.tcp_mode, MQVPN_HYBRID_TCP_AUTO, "no-hybrid keeps tcp auto");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_flows, 256, "no-hybrid keeps tcp_max_flows");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 300,
+                  "no-hybrid keeps tcp_idle_timeout_sec");
+}
+
+static void
+test_hybrid_section_parse(void)
+{
+    mqvpn_file_config_t cfg;
+
+    /* INI parse */
+    char *p = write_tmp("[Hybrid]\n"
+                        "Enabled = true\n"
+                        "Tcp = raw\n"
+                        "TcpMaxFlows = 128\n"
+                        "TcpIdleTimeoutSec = 60\n");
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "hybrid ini load ok");
+    ASSERT_EQ_INT(cfg.hybrid.enabled, 1, "hybrid ini enabled");
+    ASSERT_EQ_INT(cfg.hybrid.tcp_mode, MQVPN_HYBRID_TCP_RAW, "hybrid ini tcp raw");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_flows, 128, "hybrid ini tcp_max_flows");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 60, "hybrid ini idle timeout");
+
+    /* Tcp mode value is case-insensitive (mirrors reorder Enabled=/Profile=) */
+    p = write_tmp("[Hybrid]\nTcp = STREAM\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "hybrid ini stream load ok");
+    ASSERT_EQ_INT(cfg.hybrid.tcp_mode, MQVPN_HYBRID_TCP_STREAM,
+                  "hybrid ini tcp STREAM case-insensitive");
+
+    /* JSON parse: same keys inside a bounded "hybrid" object */
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{"
+                                              "\"enabled\":true,"
+                                              "\"tcp\":\"raw\","
+                                              "\"tcp_max_flows\":128,"
+                                              "\"tcp_idle_timeout_sec\":60"
+                                              "}}");
+    ASSERT_EQ_INT(rc, 0, "hybrid json load ok");
+    ASSERT_EQ_INT(cfg.hybrid.enabled, 1, "hybrid json enabled");
+    ASSERT_EQ_INT(cfg.hybrid.tcp_mode, MQVPN_HYBRID_TCP_RAW, "hybrid json tcp raw");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_flows, 128, "hybrid json tcp_max_flows");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 60, "hybrid json idle timeout");
+}
+
+/* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
+
+static void
+test_hybrid_egress_acl_ini(void)
+{
+    const char *ini = "[Hybrid]\n"
+                      "EgressAllow = 10.0.0.0/8\n"
+                      "EgressAllow = 192.168.1.0/24\n"
+                      "EgressDeny = 172.16.5.0/24\n"
+                      "TcpConnectTimeoutSec = 20\n"
+                      "TcpMaxGlobalFlows = 8192\n";
+
+    char *p = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "egress acl ini load ok");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 2, "2 egress_allow entries parsed");
+    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000, "allow[0] net");
+    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].mask, (int)0xFF000000, "allow[0] mask");
+    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[1].net, (int)0xC0A80100, "allow[1] net");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed");
+    ASSERT_EQ_INT((int)cfg.hybrid.egress_deny[0].net, (int)0xAC100500, "deny[0] net");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20, "tcp_connect_timeout_sec");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows, 8192, "tcp_max_global_flows");
+
+    /* Host bits in the address part are deliberately masked off (route-table
+     * convention): "10.0.0.5/8" stores net 10.0.0.0, not 10.0.0.5. */
+    mqvpn_cidr_entry_t e;
+    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.5/8", &e), 0, "host-bits cidr parses");
+    ASSERT_EQ_INT((int)e.net, (int)0x0A000000, "host bits normalized off the net");
+}
+
+static void
+test_hybrid_egress_acl_ini_invalid_ignored(void)
+{
+    const char *ini = "[Hybrid]\n"
+                      "EgressAllow = not-a-cidr\n"
+                      "EgressAllow = 10.0.0.0/8\n"
+                      "EgressAllow = 1.2.3.4/33\n";
+
+    char *p = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "malformed egress acl entries don't abort load");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "only the valid entry parsed");
+    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000,
+                  "valid entry kept");
+}
+
+static void
+test_hybrid_egress_acl_json(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{"
+                                                  "\"egress_allow\":[\"10.0.0.0/8\"],"
+                                                  "\"egress_deny\":[\"172.16.5.0/24\"],"
+                                                  "\"tcp_connect_timeout_sec\":20,"
+                                                  "\"tcp_max_global_flows\":8192"
+                                                  "}}");
+    ASSERT_EQ_INT(rc, 0, "egress acl json load ok");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "1 egress_allow entry parsed (json)");
+    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000,
+                  "allow[0] net (json)");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed (json)");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20,
+                  "tcp_connect_timeout_sec (json)");
+    ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows, 8192,
+                  "tcp_max_global_flows (json)");
+}
+
+/* ── INI ↔ JSON scalar-key parity (pins the descriptor-table refactor) ──── */
+
+static void
+test_ini_json_scalar_parity(void)
+{
+    /* Every scalar key, non-default value. Complex keys (DNS/User/Path/
+     * ReorderRule) are deliberately absent so both structs keep defaults
+     * there and whole-struct memcmp is meaningful. */
+    const char *ini = "[Interface]\n"
+                      "TunName = tparity0\n"
+                      "Listen = 192.0.2.1:8443\n"
+                      "Subnet = 10.99.0.0/24\n"
+                      "Subnet6 = fd00:beef::/112\n"
+                      "LogLevel = debug\n"
+                      "KillSwitch = true\n"
+                      "ManageRoutes = false\n"
+                      "Reconnect = false\n"
+                      "ReconnectInterval = 17\n"
+                      "MTU = 1420\n"
+                      "[Server]\n"
+                      "Address = vpn.parity.test:4433\n"
+                      "ServerName = sni.parity.test\n"
+                      "Insecure = true\n"
+                      "[TLS]\n"
+                      "Cert = /tmp/parity.crt\n"
+                      "Key = /tmp/parity.key\n"
+                      "[Auth]\n"
+                      "MaxClients = 120\n"
+                      "[Control]\n"
+                      "Listen = 127.0.0.2:9091\n"
+                      "[Multipath]\n"
+                      "Scheduler = min_srtt\n"
+                      "CC = cubic\n"
+                      "InitMaxPathId = 16\n"
+                      "[Reorder]\n"
+                      "Enabled = on\n"
+                      "MaxWaitMs = 55\n"
+                      "CapPackets = 256\n"
+                      "MaxBytesPerFlow = 5000000\n"
+                      "ClassifyWindow = 33\n"
+                      "AckDemoteMaxLarge = 7\n"
+                      "SmallPacketThreshold = 333\n"
+                      "ResetMarkPackets = 9\n"
+                      "ResetIdleGraceMs = 400\n"
+                      "MaxFlows = 77\n"
+                      "GlobalMaxBytes = 9000000\n"
+                      "IngressIdleSec = 11\n"
+                      "EgressIdleSec = 22\n"
+                      "[Hybrid]\n"
+                      "Enabled = true\n"
+                      "Tcp = raw\n"
+                      "TcpMaxFlows = 128\n"
+                      "TcpIdleTimeoutSec = 60\n"
+                      "TcpConnectTimeoutSec = 20\n"
+                      "TcpMaxGlobalFlows = 8192\n";
+    /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
+     * mirror it in JSON by setting BOTH json keys to the same value. */
+    const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
+    const char *json = "{"
+                       "\"tun_name\":\"tparity0\","
+                       "\"listen\":\"192.0.2.1:8443\","
+                       "\"subnet\":\"10.99.0.0/24\","
+                       "\"subnet6\":\"fd00:beef::/112\","
+                       "\"log_level\":\"debug\","
+                       "\"kill_switch\":true,"
+                       "\"manage_routes\":false,"
+                       "\"reconnect\":false,"
+                       "\"reconnect_interval\":17,"
+                       "\"mtu\":1420,"
+                       "\"server_addr\":\"vpn.parity.test:4433\","
+                       "\"tls_server_name\":\"sni.parity.test\","
+                       "\"insecure\":true,"
+                       "\"cert_file\":\"/tmp/parity.crt\","
+                       "\"key_file\":\"/tmp/parity.key\","
+                       "\"auth_key\":\"parity-secret\","
+                       "\"server_auth_key\":\"parity-secret\","
+                       "\"max_clients\":120,"
+                       "\"control_listen\":\"127.0.0.2:9091\","
+                       "\"scheduler\":\"min_srtt\","
+                       "\"cc\":\"cubic\","
+                       "\"init_max_path_id\":16,"
+                       "\"reorder\":{"
+                       "\"enabled\":\"on\","
+                       "\"max_wait_ms\":55,"
+                       "\"cap_packets\":256,"
+                       "\"max_bytes_per_flow\":5000000,"
+                       "\"classify_window\":33,"
+                       "\"ack_demote_max_large\":7,"
+                       "\"small_packet_threshold\":333,"
+                       "\"reset_mark_packets\":9,"
+                       "\"reset_idle_grace_ms\":400,"
+                       "\"max_flows\":77,"
+                       "\"global_max_bytes\":9000000,"
+                       "\"ingress_idle_sec\":11,"
+                       "\"egress_idle_sec\":22"
+                       "},"
+                       "\"hybrid\":{"
+                       "\"enabled\":true,"
+                       "\"tcp\":\"raw\","
+                       "\"tcp_max_flows\":128,"
+                       "\"tcp_idle_timeout_sec\":60,"
+                       "\"tcp_connect_timeout_sec\":20,"
+                       "\"tcp_max_global_flows\":8192"
+                       "}"
+                       "}";
+
+    mqvpn_file_config_t a, b;
+
+    /* INI side: concat base + auth extra into one temp file. */
+    char ini_full[4096];
+    snprintf(ini_full, sizeof(ini_full), "%s%s", ini, ini_auth_extra);
+    char *path = write_tmp(ini_full);
+    mqvpn_config_defaults(&a);
+    int rc = mqvpn_config_load(&a, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parity ini load ok");
+
+    mqvpn_config_defaults(&b);
+    rc = mqvpn_config_load_json_filecfg(&b, json);
+    ASSERT_EQ_INT(rc, 0, "parity json load ok");
+
+    /* Spot asserts first — memcmp failure alone is undebuggable. */
+    ASSERT_EQ_STR(a.tun_name, b.tun_name, "parity tun_name");
+    ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
+    ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
+    ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
+    ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
+                  "parity init_max_path_id");
+    ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
+    ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
+    ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
+    ASSERT_EQ_INT((int)a.reorder.max_wait_ms, (int)b.reorder.max_wait_ms,
+                  "parity reorder max_wait_ms");
+    ASSERT_EQ_INT(a.reorder.has_explicit_wait, b.reorder.has_explicit_wait,
+                  "parity has_explicit_wait");
+    ASSERT_EQ_INT(a.reorder.has_explicit_cap, b.reorder.has_explicit_cap,
+                  "parity has_explicit_cap");
+    ASSERT_EQ_INT((int)a.reorder.classify_window, (int)b.reorder.classify_window,
+                  "parity classify_window");
+    ASSERT_EQ_INT(a.hybrid.enabled, b.hybrid.enabled, "parity hybrid enabled");
+    ASSERT_EQ_INT(a.hybrid.tcp_mode, b.hybrid.tcp_mode, "parity hybrid tcp_mode");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_max_flows, (int)b.hybrid.tcp_max_flows,
+                  "parity hybrid tcp_max_flows");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_idle_timeout_sec, (int)b.hybrid.tcp_idle_timeout_sec,
+                  "parity hybrid tcp_idle_timeout_sec");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_connect_timeout_sec,
+                  (int)b.hybrid.tcp_connect_timeout_sec,
+                  "parity hybrid tcp_connect_timeout_sec");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, (int)b.hybrid.tcp_max_global_flows,
+                  "parity hybrid tcp_max_global_flows");
+
+    /* Non-default guards: prove these asserts pass because the value was
+     * actually parsed, not because it silently failed to parse on BOTH
+     * sides and both structs just kept the (equal) default. */
+    ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
+    ASSERT_EQ_INT((int)a.reorder.max_flows, 77,
+                  "parity reorder max_flows is non-default");
+    ASSERT_EQ_INT((int)a.reorder.classify_window, 33,
+                  "parity classify_window is non-default");
+    ASSERT_EQ_INT((int)a.reorder.small_packet_threshold_bytes, 333,
+                  "guard small_packet_threshold parsed");
+    ASSERT_EQ_INT(a.hybrid.tcp_mode, MQVPN_HYBRID_TCP_RAW,
+                  "parity hybrid tcp_mode is non-default");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_max_flows, 128,
+                  "parity hybrid tcp_max_flows is non-default");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_connect_timeout_sec, 20,
+                  "parity hybrid tcp_connect_timeout_sec is non-default");
+    ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, 8192,
+                  "parity hybrid tcp_max_global_flows is non-default");
+
+    /* Both structs were memset by mqvpn_config_defaults → padding is zero
+     * → whole-struct compare is deterministic. */
+    ASSERT_EQ_INT(memcmp(&a, &b, sizeof(a)), 0, "parity full-struct memcmp");
+}
+
+static void
+test_ini_json_invalid_scalar_parity(void)
+{
+    /* Invalid values must leave the same struct outcome on both surfaces.
+     * (Warnings differ historically; only the resulting struct is pinned.)
+     * Every INI load must return 0: invalid scalars warn-and-continue, they
+     * never fail the load. */
+    mqvpn_file_config_t a, b;
+    int rc;
+
+    /* MTU out of range → keep default (0) on both sides */
+    char *p = write_tmp("[Interface]\nMTU = 100\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "invalid mtu ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"mtu\":100}");
+    ASSERT_EQ_INT(a.tun_mtu, 0, "invalid mtu ini keeps default");
+    ASSERT_EQ_INT(b.tun_mtu, 0, "invalid mtu json keeps default");
+
+    /* MaxClients invalid → 64 on both sides */
+    p = write_tmp("[Auth]\nMaxClients = -3\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "invalid max_clients ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"max_clients\":-3}");
+    ASSERT_EQ_INT(a.max_clients, 64, "invalid max_clients ini -> 64");
+    ASSERT_EQ_INT(b.max_clients, 64, "invalid max_clients json -> 64");
+
+    /* MaxClients PARSE-FAIL → 64 on both sides. NOTE: on the JSON side this
+     * passes against pre-refactor code for a coincidental reason (old code
+     * silently skips the write and the default happens to be 64); after A3
+     * the table writes the 64 fallback explicitly + warns (accepted
+     * deviation (2) in the plan background). The struct outcome is pinned
+     * either way, so this block stays in the A1 listing unconditionally. */
+    p = write_tmp("[Auth]\nMaxClients = abc\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "parse-fail max_clients ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"max_clients\":\"abc\"}");
+    ASSERT_EQ_INT(a.max_clients, 64, "parse-fail max_clients ini -> 64");
+    ASSERT_EQ_INT(b.max_clients, 64, "parse-fail max_clients json -> 64");
+
+    /* InitMaxPathId over bound → keep default 0 on both sides */
+    p = write_tmp("[Multipath]\nInitMaxPathId = 4294967296\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "over-bound impid ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"init_max_path_id\":4294967296}");
+    ASSERT_EQ_INT((int)a.init_max_path_id, 0, "over-bound impid ini keeps 0");
+    ASSERT_EQ_INT((int)b.init_max_path_id, 0, "over-bound impid json keeps 0");
+
+    /* Reorder u16 over 0xffff → keep default on both sides */
+    p = write_tmp("[Reorder]\nClassifyWindow = 70000\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "over-bound classify_window ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"reorder\":{\"classify_window\":70000}}");
+    ASSERT_EQ_INT((int)a.reorder.classify_window, (int)b.reorder.classify_window,
+                  "over-bound classify_window parity");
+
+    /* Reorder u32 in (2^31, 2^32) must parse on BOTH sides (deb2115 pin) */
+    p = write_tmp("[Reorder]\nMaxFlows = 3000000000\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "u32 high ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"reorder\":{\"max_flows\":3000000000}}");
+    ASSERT_EQ_INT(a.reorder.max_flows == 3000000000u, 1, "u32 high ini");
+    ASSERT_EQ_INT(b.reorder.max_flows == 3000000000u, 1, "u32 high json");
+
+    /* Hybrid Tcp invalid → warn and fall back to default AUTO on both sides
+     * (mirrors the reorder Enabled= invalid handling: value ignored). */
+    p = write_tmp("[Hybrid]\nTcp = bogus\n");
+    mqvpn_config_defaults(&a);
+    rc = mqvpn_config_load(&a, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "invalid hybrid tcp ini load rc 0");
+    mqvpn_config_defaults(&b);
+    mqvpn_config_load_json_filecfg(&b, "{\"hybrid\":{\"tcp\":\"bogus\"}}");
+    ASSERT_EQ_INT(a.hybrid.tcp_mode, MQVPN_HYBRID_TCP_AUTO,
+                  "invalid hybrid tcp ini falls back to auto");
+    ASSERT_EQ_INT(b.hybrid.tcp_mode, MQVPN_HYBRID_TCP_AUTO,
+                  "invalid hybrid tcp json falls back to auto");
+}
+
 int
 main(void)
 {
@@ -1971,6 +2397,17 @@ main(void)
     test_resolve_malformed_ini();
     test_resolve_trailing_garbage_port();
     test_resolve_port_leading_junk();
+
+    /* [Hybrid] section tests */
+    test_hybrid_defaults_when_absent();
+    test_hybrid_section_parse();
+    test_hybrid_egress_acl_ini();
+    test_hybrid_egress_acl_ini_invalid_ignored();
+    test_hybrid_egress_acl_json();
+
+    /* INI/JSON scalar-key parity */
+    test_ini_json_scalar_parity();
+    test_ini_json_invalid_scalar_parity();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

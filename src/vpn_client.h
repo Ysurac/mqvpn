@@ -6,8 +6,9 @@
 
 #include <stdint.h>
 
-#include "libmqvpn.h" /* for MQVPN_MAX_PATHS */
-#include "reorder.h"  /* mqvpn_reorder_config_t (INI [Reorder] bridge) */
+#include "libmqvpn.h"          /* for MQVPN_MAX_PATHS */
+#include "reorder.h"           /* mqvpn_reorder_config_t (INI [Reorder] bridge) */
+#include "hybrid/classifier.h" /* mqvpn_hybrid_config_t (INI [Hybrid] bridge) */
 
 #define MQVPN_MAX_PATH_IFACES 8
 _Static_assert(MQVPN_MAX_PATH_IFACES == MQVPN_MAX_PATHS,
@@ -45,7 +46,8 @@ typedef struct mqvpn_client_cfg_s {
     int tun_mtu;                /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
     int cc;                     /* mqvpn_cc_t: congestion control algorithm */
     mqvpn_reorder_config_t
-        reorder; /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
+        reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
+    mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */
