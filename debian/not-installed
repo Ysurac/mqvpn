@@ -2,4 +2,5 @@ usr/lib/libxquic.so
 usr/share/doc/mqvpn/LICENSE
 usr/share/doc/mqvpn/NOTICE
 usr/share/doc/mqvpn/third-party/boringssl.txt
+usr/share/doc/mqvpn/third-party/lwip.txt
 usr/share/doc/mqvpn/third-party/xquic.txt
