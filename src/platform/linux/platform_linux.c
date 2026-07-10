@@ -308,8 +308,41 @@ cb_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 static void
 cb_reconnect_scheduled(int delay_sec, void *user_ctx)
 {
-    (void)user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     LOG_INF("reconnect scheduled in %d seconds", delay_sec);
+
+    /* Re-resolve the server hostname so a reconnect picks up a changed IP
+     * (dynamic DNS, DNS failover) instead of retrying a stale address
+     * forever. Literal IPs round-trip through mqvpn_resolve_host() as a
+     * no-op. Kill switch / split-tunnel routing are pinned to the address
+     * resolved at startup and are NOT updated here — if either is active
+     * and the IP actually changes, a client restart is still required. */
+    struct sockaddr_storage new_addr;
+    socklen_t new_addrlen;
+    if (mqvpn_resolve_host(p->server_host, &new_addr, &new_addrlen) < 0) {
+        LOG_WRN("dns: could not re-resolve '%s', keeping previous server address",
+                p->server_host);
+        return;
+    }
+    mqvpn_sa_set_port(&new_addr, (uint16_t)p->server_port);
+
+    char old_ip[INET6_ADDRSTRLEN], new_ip[INET6_ADDRSTRLEN];
+    mqvpn_sa_ntop(&p->server_addr, old_ip, sizeof(old_ip));
+    mqvpn_sa_ntop(&new_addr, new_ip, sizeof(new_ip));
+    if (new_addr.ss_family != p->server_addr.ss_family || strcmp(old_ip, new_ip) != 0) {
+        LOG_INF("dns: '%s' resolved to %s (was %s)", p->server_host, new_ip, old_ip);
+        if (p->killswitch_active || p->routing_configured) {
+            LOG_WRN("kill switch / split-tunnel routing still reference %s; "
+                     "restart mqvpn to fully apply the new address",
+                     old_ip);
+        }
+    }
+
+    p->server_addr = new_addr;
+    p->server_addrlen = new_addrlen;
+    if (p->client) {
+        mqvpn_client_set_server_addr(p->client, (struct sockaddr *)&new_addr, new_addrlen);
+    }
 }
 
 static void
@@ -1337,7 +1370,10 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     for (int i = 0; i < cfg->n_dns; i++)
         mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]);
 
-    /* Resolve server address */
+    /* Resolve server address. The original host string is kept around so
+     * cb_reconnect_scheduled() can re-resolve it before each reconnect
+     * attempt (picks up DNS changes without a client restart). */
+    snprintf(ctx.server_host, sizeof(ctx.server_host), "%s", cfg->server_addr);
     if (mqvpn_resolve_host(cfg->server_addr, &ctx.server_addr, &ctx.server_addrlen) < 0) {
         LOG_ERR("could not resolve server address: %s", cfg->server_addr);
         return 1;

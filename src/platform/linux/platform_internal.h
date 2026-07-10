@@ -55,6 +55,7 @@ typedef struct {
     /* Server address */
     struct sockaddr_storage server_addr;
     socklen_t server_addrlen;
+    char server_host[256]; /* original hostname/IP string, re-resolved on reconnect */
 
     /* Split tunneling state */
     int routing_configured;
