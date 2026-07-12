@@ -1,3 +1,68 @@
+mqvpn (0.11.1-1) unstable; urgency=medium
+
+  * fix(windows): bridge [Reorder] INI config into the library (was
+    silently dropped).
+  * docs: document the reorder buffer ([Reorder]/[ReorderRule])
+    datagram-lane aggregation in the README.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 13 Jul 2026 01:33:05 +0900
+
+mqvpn (0.11.0-1) unstable; urgency=medium
+
+  * Enable the hybrid TCP lane on macOS, Android and Windows (MSVC lwIP
+    port, CI coverage, lwIP license shipped in release artifacts).
+  * Split the hybrid gate into client-lane and server-egress build options
+    (MQVPN_ENABLE_HYBRID_TCP_LANE / MQVPN_ENABLE_HYBRID_TCP_EGRESS).
+  * Expose hybridEnabled and hybridTcpMode in the Android SDK; add a hybrid
+    TCP lane toggle to the sample app.
+  * fix(platform): re-arm the tick timer after TUN-driven sends so
+    outbound-only traffic does not wait on a stale PTO timer.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 13 Jul 2026 00:50:29 +0900
+
+mqvpn (0.10.0-1) unstable; urgency=medium
+
+  * Add macOS client support: Darwin platform layer (TUN, routing, DNS,
+    pf kill switch) and PF_ROUTE path recovery accelerator.
+  * Add Windows path recovery accelerator.
+  * Refactor: split the Linux netlink monitor out of platform_linux.c
+    (netlink_mon.c); move shared POSIX platform headers to platform/posix.
+  * Backfill unit tests for control socket dispatch, ICMP and the
+    get_interest stability timer.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sat, 11 Jul 2026 02:52:53 +0900
+
+mqvpn (0.9.0-1) unstable; urgency=medium
+
+  * Add hybrid mode (TCP lane): inner TCP connections are terminated
+    locally (embedded lwIP) and relayed over a dedicated HTTP/3 stream for
+    multipath TCP aggregation; ship it in Linux release builds with the
+    lwIP license bundled.
+  * Extend the control API get_stats response with hybrid lane counters.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 6 Jul 2026 21:49:48 +0900
+
+mqvpn (0.8.2-1) unstable; urgency=medium
+
+  * Bump xquic submodule (upstream security/RFC merge).
+  * fix(linux): handle RTM_DELADDR-driven failover and the deladdr reason
+    race in the netlink monitor.
+  * fix(linux): gate path re-add/reactivate on FIB route reachability to
+    the server.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 6 Jul 2026 21:11:14 +0900
+
+mqvpn (0.8.1-1) unstable; urgency=medium
+
+  * Promote v0.8.0 GA; finalize Android 0.8.1 release.
+  * fix: path stuck PENDING after re-add.
+  * fix(reorder): TX no-rules-eligible handling; allow portless reorder
+    rules and add reorder stats display on Android.
+  * Refactor config table dispatch; fix subnet6 example.
+  * test(e2e): assert carrier-restore recovery latency under 5 s.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sun, 5 Jul 2026 23:09:15 +0900
+
 mqvpn (0.7.0-1) unstable; urgency=medium
 
   * Add WRTT (Weighted Round-Trip Time) multipath scheduler: selects paths

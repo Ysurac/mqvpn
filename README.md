@@ -299,6 +299,33 @@ when you need fine-grained per-link preference in addition to aggregation — fo
 example, to prioritise a high-bandwidth fibre link over a metered LTE backup
 while still drawing on both under load.
 
+## Reorder buffer (datagram lane)
+
+A single inner UDP/QUIC flow striped across paths with different RTTs arrives
+reordered, and many inner protocols treat reorder as loss and back off. The
+reorder buffer holds datagrams in a short receive-side window and releases them
+in order, so one inner flow can aggregate both paths — the datagram-lane
+counterpart to what the [hybrid TCP stream lane](#hybrid-mode-tcp-lane) does for
+TCP. Off by default; negotiated end-to-end (both client and server must enable
+it) and a no-op when either side has it off.
+
+```ini
+[Reorder]
+Enabled = on
+MaxWaitMs = 50           # reorder window: hold out-of-order datagrams up to this long
+CapPackets = 1024        # per-flow buffer cap (packets)
+
+# Optional: target specific inner flows with a tuned preset
+[ReorderRule]
+Proto = udp
+Port = 443
+Profile = cellular_bond  # cellular_bond (wait=50ms, cap=1024) | fiber_lte (wait=50ms, cap=2048)
+```
+
+INI/JSON only (no CLI flag). Best on asymmetric-RTT path pairs (e.g. Wi-Fi +
+LTE); for symmetric, loss-dominated paths leave it off. See
+[docs/report/](docs/report/) for the parameter sweep and measured numbers.
+
 ## Hybrid mode (TCP lane)
 
 Optionally terminates inner TCP connections locally (embedded lwIP) and relays them over a dedicated HTTP/3 request stream instead of the datagram CONNECT-IP path — trades small per-flow overhead for multipath TCP aggregation (see docs/report/ for measured numbers).
