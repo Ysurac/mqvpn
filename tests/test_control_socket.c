@@ -1,13 +1,18 @@
 /*
  * test_control_socket.c — Unit tests for control_socket.c dispatch()
  *
- * Covers the get_all_fec_stats branch which had a missing return value when
- * truncated == 0.  Also tests the error paths: FEC not built, unknown cmd,
- * missing cmd.
+ * Drives dispatch() end to end with the server-facing API mocked: command
+ * routing, argument validation, error codes and response JSON shape for the
+ * server commands (user management, stats/status/build info, FEC and reorder
+ * stats) and the client-mode path commands (add_path/remove_path/list_paths/
+ * set_path_weight), including the get_all_fec_stats branch which had a
+ * missing return value when truncated == 0.
  *
  * Includes control_socket.c directly (same technique as test_status.c) and
  * provides lightweight stubs for all external API dependencies.  Links only
- * libevent (needed by the non-dispatch socket machinery in control_socket.c).
+ * libevent (needed by the non-dispatch socket machinery in control_socket.c)
+ * and reorder_rx.c (real latency-percentile helpers used by
+ * get_reorder_stats).
  */
 
 #include <stdio.h>
@@ -47,6 +52,15 @@ static int g_remove_user_rc   = MQVPN_OK;
 static int g_list_users_n     = 0;
 static char g_list_users_names[MQVPN_MAX_USERS][64];
 
+/* Configurable state for stats/status/FEC/reorder stubs */
+static int g_n_clients = 0;
+static uint64_t g_uptime = 0;
+static int g_client_info_n = 0;
+static mqvpn_client_info_t g_client_info_tmpl;
+static int g_client_fec_rc = -1; /* -1 = not built, 0 = not found, 1 = found */
+static mqvpn_internal_fec_stats_t g_client_fec_tmpl;
+static int g_reorder_rc = 0;
+
 /* ── Server API stubs ────────────────────────────────────────────────────── */
 int mqvpn_server_add_user(mqvpn_server_t *s, const char *n, const char *k)
 { (void)s; (void)n; (void)k; return g_add_user_rc; }
@@ -67,27 +81,48 @@ int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
 }
 
 int mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *st)
-{ (void)s; (void)st; return MQVPN_OK; }
+{
+    (void)s;
+    uint32_t sz = st->struct_size;
+    memset(st, 0, sizeof(*st));
+    st->struct_size = sz;
+    st->bytes_tx = 111;
+    st->tcp_flows_total = 7;
+    return MQVPN_OK;
+}
 
-int mqvpn_server_get_n_clients(const mqvpn_server_t *s) { (void)s; return 0; }
+int mqvpn_server_get_n_clients(const mqvpn_server_t *s) { (void)s; return g_n_clients; }
 
-uint64_t mqvpn_server_uptime_seconds(const mqvpn_server_t *s) { (void)s; return 0; }
+uint64_t mqvpn_server_uptime_seconds(const mqvpn_server_t *s) { (void)s; return g_uptime; }
 
 int mqvpn_server_get_client_info(const mqvpn_server_t *s,
                                   mqvpn_client_info_t *out, int max, int *n)
-{ (void)s; (void)out; (void)max; *n = 0; return MQVPN_OK; }
+{
+    (void)s;
+    int nn = g_client_info_n < max ? g_client_info_n : max;
+    for (int i = 0; i < nn; i++)
+        out[i] = g_client_info_tmpl;
+    *n = nn;
+    return MQVPN_OK;
+}
 
 const char *mqvpn_version_string(void) { return "test"; }
 
 const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s)
 { (void)s; return "none"; }
 
-const char *mqvpn_path_state_label(int state) { (void)state; return "unknown"; }
+const char *mqvpn_path_state_label(int state)
+{ return state == 2 ? "active" : "validating"; }
 
 int mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s,
                                        const char *user,
                                        mqvpn_internal_fec_stats_t *out)
-{ (void)s; (void)user; (void)out; return -1; }
+{
+    (void)s;
+    (void)user;
+    if (g_client_fec_rc == 1) *out = g_client_fec_tmpl;
+    return g_client_fec_rc;
+}
 
 int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
                                     mqvpn_internal_fec_entry_t *out, int max)
@@ -100,7 +135,14 @@ int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
 }
 
 int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_t *out)
-{ (void)s; if (out) memset(out, 0, sizeof(*out)); return 0; }
+{
+    (void)s;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->delivered_count = 55;
+    }
+    return g_reorder_rc;
+}
 
 /* ── Platform stubs ─────────────────────────────────────────────────────── */
 #include "platform_internal.h"
@@ -404,6 +446,133 @@ TEST(list_users_two_entries)
     g_list_users_n = 0;
 }
 
+/* ── get_stats / get_status / get_build_info ─────────────────────────────── */
+
+TEST(get_stats)
+{
+    g_n_clients = 3;
+    g_uptime = 4242;
+    char resp[2048];
+    call_dispatch("{\"cmd\":\"get_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":true");
+    ASSERT_CONTAINS(resp, "\"n_clients\":3");
+    ASSERT_CONTAINS(resp, "\"bytes_tx\":111");
+    ASSERT_CONTAINS(resp, "\"tcp_flows_total\":7");
+    ASSERT_CONTAINS(resp, "\"uptime_sec\":4242");
+    g_n_clients = 0;
+    g_uptime = 0;
+}
+
+TEST(get_status_empty)
+{
+    g_client_info_n = 0;
+    char resp[4096];
+    call_dispatch("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true,\"n_clients\":0,\"clients\":[]}");
+}
+
+TEST(get_status_one_client_with_path)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strncpy(g_client_info_tmpl.username, "alice",
+            sizeof(g_client_info_tmpl.username) - 1);
+    strncpy(g_client_info_tmpl.endpoint, "1.2.3.4:443",
+            sizeof(g_client_info_tmpl.endpoint) - 1);
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2; /* -> "active" */
+    g_client_info_n = 1;
+
+    char resp[8192];
+    call_dispatch("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"n_clients\":1");
+    ASSERT_CONTAINS(resp, "\"user\":\"alice\"");
+    ASSERT_CONTAINS(resp, "\"endpoint\":\"1.2.3.4:443\"");
+    ASSERT_CONTAINS(resp, "\"path_id\":7");
+    ASSERT_CONTAINS(resp, "\"state_label\":\"active\"");
+    g_client_info_n = 0;
+}
+
+TEST(get_build_info)
+{
+    char resp[512];
+    call_dispatch("{\"cmd\":\"get_build_info\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"version\":\"test\"");
+    ASSERT_CONTAINS(resp, "\"scheduler\":\"none\"");
+    ASSERT_CONTAINS(resp, "\"fec_enabled\":");
+}
+
+/* ── get_fec_stats (per user) ────────────────────────────────────────────── */
+
+TEST(get_fec_stats_missing_user)
+{
+    char resp[512];
+    call_dispatch("{\"cmd\":\"get_fec_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user required");
+}
+
+TEST(get_fec_stats_user_not_found)
+{
+    g_client_fec_rc = 0;
+    char resp[512];
+    call_dispatch("{\"cmd\":\"get_fec_stats\",\"user\":\"ghost\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user not found");
+}
+
+TEST(get_fec_stats_not_built)
+{
+    g_client_fec_rc = -1;
+    char resp[512];
+    call_dispatch("{\"cmd\":\"get_fec_stats\",\"user\":\"alice\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "fec not built");
+}
+
+TEST(get_fec_stats_success)
+{
+    memset(&g_client_fec_tmpl, 0, sizeof(g_client_fec_tmpl));
+    g_client_fec_tmpl.enable_fec      = 1;
+    g_client_fec_tmpl.mp_state        = 1;
+    g_client_fec_tmpl.mp_state_label  = "active_with_standby";
+    g_client_fec_tmpl.fec_send_cnt    = 142;
+    g_client_fec_tmpl.fec_recover_cnt = 17;
+    g_client_fec_rc = 1;
+    char resp[1024];
+    call_dispatch("{\"cmd\":\"get_fec_stats\",\"user\":\"alice\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"user\":\"alice\"");
+    ASSERT_CONTAINS(resp, "\"mp_state_label\":\"active_with_standby\"");
+    ASSERT_CONTAINS(resp, "\"fec_send_cnt\":142");
+    ASSERT_CONTAINS(resp, "\"fec_recover_cnt\":17");
+    g_client_fec_rc = -1;
+}
+
+/* ── get_reorder_stats ───────────────────────────────────────────────────── */
+
+TEST(get_reorder_stats)
+{
+    g_reorder_rc = 0;
+    char resp[2048];
+    call_dispatch("{\"cmd\":\"get_reorder_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"reorder\":{");
+    ASSERT_CONTAINS(resp, "\"delivered_count\":55");
+    ASSERT_CONTAINS(resp, "\"added_latency_p99_ms\":");
+}
+
+TEST(get_reorder_stats_internal_error)
+{
+    /* Failure-branch parity with get_fec_stats / get_all_fec_stats: a negative
+     * getter return must surface {"error":"internal error"}, not a malformed
+     * or half-built reorder object. */
+    g_reorder_rc = -1;
+    char resp[512];
+    call_dispatch("{\"cmd\":\"get_reorder_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "internal error");
+    g_reorder_rc = 0;
+}
+
 /* ── path commands (client mode only) ───────────────────────────────────── */
 
 TEST(add_path_success)
@@ -554,6 +723,22 @@ main(void)
     /* list_users */
     run_list_users_empty();
     run_list_users_two_entries();
+
+    /* stats / status / build info */
+    run_get_stats();
+    run_get_status_empty();
+    run_get_status_one_client_with_path();
+    run_get_build_info();
+
+    /* get_fec_stats (per user) */
+    run_get_fec_stats_missing_user();
+    run_get_fec_stats_user_not_found();
+    run_get_fec_stats_not_built();
+    run_get_fec_stats_success();
+
+    /* get_reorder_stats */
+    run_get_reorder_stats();
+    run_get_reorder_stats_internal_error();
 
     /* path commands */
     run_add_path_success();

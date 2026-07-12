@@ -23,10 +23,14 @@
 #  include <windows.h>
 #  include <process.h>
 #  define MSG_DONTWAIT 0
-#  define EAGAIN       WSAEWOULDBLOCK
-#  define EWOULDBLOCK  WSAEWOULDBLOCK
-#  define EINTR        WSAEINTR
-#  define errno        WSAGetLastError()
+#  undef EAGAIN
+#  define EAGAIN WSAEWOULDBLOCK
+#  undef EWOULDBLOCK
+#  define EWOULDBLOCK WSAEWOULDBLOCK
+#  undef EINTR
+#  define EINTR WSAEINTR
+#  undef errno
+#  define errno WSAGetLastError()
 #else
 #  include <unistd.h>
 #  include <sys/time.h>
@@ -721,23 +725,6 @@ mqvpn_client_test_set_next_wake_us(mqvpn_client_t *c, uint64_t us)
     return 0;
 }
 
-/* Test-only: seed path_stable_since_us + xquic_path_live on a slot so
- * the Stability timer block in get_interest() fires without a live engine. */
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((visibility("hidden")))
-#endif
-int
-mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c, mqvpn_path_handle_t handle,
-                                     uint64_t stable_since_us)
-{
-    if (!c) return -1;
-    path_entry_t *p = find_path_by_handle(c, handle);
-    if (!p) return -1;
-    p->path_stable_since_us = stable_since_us; /* LINT-ALLOW: test wrapper seed */
-    p->xquic_path_live = 1;                    /* LINT-ALLOW: test wrapper seed */
-    return 0;
-}
-
 /* ─── ICMP PTB rate limiter ─── */
 
 static int
@@ -921,6 +908,39 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
 /* ─── UDP write callback (xquic → network) ─── */
 
+/* Return code for a per-path send that failed on the transport socket.
+ *
+ * Per xquic's write_socket_ex contract (xquic.h xqc_socket_write_ex_pt),
+ * XQC_SOCKET_ERROR triggers xqc_conn_should_close(), which tears down the
+ * WHOLE connection once it is down to its last active path (active_path_count
+ * < 2).
+ *
+ * Design: a send error is NEVER taken as proof of path death. Path life is
+ * decided solely by the platform monitors (netlink_mon / route_mon), which
+ * detach a dead path (platform_attached=0, fd closed). While any path is
+ * still attached, a failed send is downgraded to EAGAIN (xquic keeps the
+ * connection and retries); only when the monitors have detached every path
+ * does the hard XQC_SOCKET_ERROR propagate and close/reconnect.
+ *
+ * Send errors are untrustworthy on macOS because IP_BOUND_IF does not
+ * restrict the route lookup to the bound device up front the way Linux's
+ * SO_BINDTODEVICE does — it validates interface consistency against a lookup
+ * on the SHARED routing tree. A failover on a DIFFERENT interface invalidates
+ * cached routes, forcing surviving sockets to re-run the lookup, and while
+ * the table is being reconstructed there may transiently be no route
+ * consistent with the bound scope: sendto() on a perfectly healthy path
+ * fails. This applies even to a sole remaining path (e.g. during the scoped
+ * server-pin re-install window), so the downgrade deliberately covers the
+ * single-path case too — do NOT "tighten" this guard to exclude the failing
+ * path itself; that reintroduces the ~5s full reconnect (new tunnel IP) on
+ * transient flux. Other platforms' sockets do not fail this way, so this
+ * branch rarely fires there. */
+static ssize_t
+path_send_dead_retcode(const mqvpn_client_t *c)
+{
+    return (mqvpn_client_first_active_fd(c) >= 0) ? XQC_SOCKET_EAGAIN : XQC_SOCKET_ERROR;
+}
+
 static ssize_t
 cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
                 socklen_t peerlen, void *conn_user_data)
@@ -943,7 +963,8 @@ cb_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *pe
 
     ssize_t res;
     do {
-        res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen);
+        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
+        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
@@ -961,15 +982,16 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
     mqvpn_client_t *c = conn->client;
     int fd = get_fd_for_path(c, path_id);
-    if (fd < 0) return XQC_SOCKET_ERROR;
+    if (fd < 0) return path_send_dead_retcode(c);
 
     ssize_t res;
     do {
-        res = sendto(fd, buf, size, MSG_DONTWAIT, peer, peerlen);
+        /* Winsock sendto() len is int; cast silences C4267 under /WX (size<=MTU). */
+        res = sendto(fd, buf, (int)size, MSG_DONTWAIT, peer, peerlen);
     } while (res < 0 && errno == EINTR);
     if (res < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return XQC_SOCKET_EAGAIN;
-        return XQC_SOCKET_ERROR;
+        return path_send_dead_retcode(c);
     }
     c->bytes_tx += (uint64_t)res;
     {
@@ -2270,6 +2292,32 @@ mqvpn_client_test_force_validating(mqvpn_client_t *c, mqvpn_path_handle_t handle
     return 0;
 }
 
+/* PR3 test-only: seed a path slot's Stability-timer inputs
+ * (path_stable_since_us + xquic_path_live) so the Stability-timer block in
+ * mqvpn_client_get_interest can be exercised without a live xquic engine
+ * driving the VALIDATING -> ACTIVE transition that normally sets them. This
+ * is the parallel of the Recovery-timer seed used by the recovery tests
+ * (recreate_after_us via apply_path_activation_failure). Pass xquic_live=0 to
+ * model a stability anchor left on a path xquic no longer considers live — the
+ * block must stay inert in that case (guard: path_stable_since_us > 0 &&
+ * xquic_path_live). Does NOT run path_invariant_check: it deliberately writes
+ * a non-lifecycle-consistent shape to isolate the get_interest read path.
+ * Hidden from libmqvpn.so's dynamic export table (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_set_path_stable_us(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                     uint64_t stable_since_us, int xquic_live)
+{
+    if (!c) return -1;
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return -1;
+    p->path_stable_since_us = stable_since_us; /* LINT-ALLOW: test wrapper seed */
+    p->xquic_path_live = xquic_live ? 1 : 0;   /* LINT-ALLOW: test wrapper seed */
+    return 0;
+}
+
 /* PR3 test-only wrapper: forces a slot into VALIDATING then dispatches
  * path_on_event(XQUIC_REMOVED). Used by test_api to pin the
  * VALIDATING -> CREATE_WAIT dispatch without spinning up a live xquic
@@ -2874,11 +2922,11 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
 
     /* Ensure adequate socket buffers for high-throughput UDP (ref: WireGuard) */
     int bufsize = SOCKET_BUF_SIZE;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bufsize, sizeof(bufsize));
 #ifdef SO_SNDBUFFORCE
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, (const char *)&bufsize, sizeof(bufsize));
 #endif
 
     if (desc) {

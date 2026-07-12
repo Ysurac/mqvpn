@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.9.0 (callback ABI version 2)
+ * Version: 0.10.0 (callback ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -38,7 +38,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 9
+#define MQVPN_VERSION_MINOR 10
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -665,10 +665,13 @@ MQVPN_API int mqvpn_client_set_path_weight(mqvpn_client_t *client,
                                             uint32_t weight);
 
 /*
- * Drop a path slot without notifying xquic (no PATH_ABANDON, no draining).
- * Used when the platform detects interface removal (RTM_DELLINK) — the fd is
- * already dead, so xquic will detect the failure naturally via sendto() errors
- * (same as link-down). This frees the slot for re-use by add_path_fd().
+ * Drop a path slot on platform-detected removal (carrier loss, RTM_DELLINK,
+ * address loss). Moves the slot to the CLOSED_DROPPED cleanup state and emits
+ * a non-blocking PATH_ABANDON so xquic releases the dead path's CID/path_id
+ * slot for reuse (draft-21); this does not stall surviving paths. The fd is
+ * assumed already dead: close it and call mqvpn_client_on_platform_fd_closed()
+ * to drive the lazy cleanup to completion (CLOSED_FREE), after which the slot
+ * is reusable by add_path_fd().
  */
 MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
