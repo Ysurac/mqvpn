@@ -14,6 +14,7 @@
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
+#include "mqvpn_sched_names.h"
 #include "mqvpn_server_internal.h"
 
 #include <stdlib.h>
@@ -56,6 +57,7 @@
 #include "flow_sched.h"
 #include "icmp.h"
 #include "reorder.h"
+#include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
@@ -68,7 +70,6 @@
 #define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
 #define MAX_CAPSULE_BUF   65536
 #define XQC_SNDQ_MAX_PKTS 16384
-#define PTB_RATE_LIMIT   10
 
 /* ─── Forward declarations ─── */
 
@@ -204,8 +205,7 @@ struct mqvpn_server_s {
     int tun_mtu;
 
     /* ICMP PTB rate limit */
-    int ptb_tokens;
-    int64_t ptb_refill_ms;
+    mqvpn_ptb_bucket_t ptb_bucket;
 
     /* Stats */
     uint64_t bytes_tx;
@@ -273,14 +273,7 @@ struct mqvpn_server_s {
 static const char *
 mqvpn_scheduler_label(int s)
 {
-    switch (s) {
-    case MQVPN_SCHED_MINRTT: return "minrtt";
-    case MQVPN_SCHED_WLB: return "wlb";
-    case MQVPN_SCHED_BACKUP_FEC: return "backup_fec";
-    case MQVPN_SCHED_WLB_UDP_PIN: return "wlb_udp_pin";
-    case MQVPN_SCHED_WRTT: return "wrtt";
-    default: return "unknown";
-    }
+    return mqvpn_sched_to_name((mqvpn_scheduler_t)s);
 }
 
 static uint64_t
@@ -408,21 +401,15 @@ svr_log_conn_stats(mqvpn_server_t *s, const char *tag, const xqc_cid_t *cid)
     free(st.paths_info);
 }
 
-/* ─── ICMP PTB rate limiter ─── */
+/* ─── ICMP PTB rate limiter ───
+ * Thin wrapper around the shared bucket (src/reorder_gate.h, also used by
+ * mqvpn_client.c) so the many call sites below stay untouched; only the
+ * struct field and the refill logic itself moved. */
 
 static int
 ptb_rate_allow(mqvpn_server_t *s)
 {
-    int64_t ms = now_ms_mono();
-    if (ms - s->ptb_refill_ms >= 1000) {
-        s->ptb_tokens = PTB_RATE_LIMIT;
-        s->ptb_refill_ms = ms;
-    }
-    if (s->ptb_tokens > 0) {
-        s->ptb_tokens--;
-        return 1;
-    }
-    return 0;
+    return mqvpn_ptb_bucket_allow(&s->ptb_bucket, now_ms_mono());
 }
 
 /* ─── Thin wrapper: send ICMP packet via MASQUE datagram to client ─── */
@@ -1267,23 +1254,49 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
 }
 
 /* Egress ACL policy snapshot for src/hybrid/tcp_egress.c (connect-tcp
- * destination check). Declared in mqvpn_server_internal.h. The tunnel
- * subnet is derived from the SAME address pool CONNECT-IP address
- * assignment uses (s->pool) — addr_pool.c enforces prefix_len in [16,30]
- * at init time, so the mask/shift below never hits the n=0/n=32 edge cases
- * mqvpn_cidr_mask_from_prefix guards for arbitrary (config-supplied)
- * egress_allow/egress_deny entries. */
+ * destination check). Declared in mqvpn_server_internal.h. The v4 tunnel
+ * subnet (tunnels[0]) is derived from the SAME address pool CONNECT-IP
+ * address assignment uses (s->pool) — addr_pool.c enforces prefix_len in
+ * [16,30] at init time, so mqvpn_cidr_premask below never hits a
+ * pathological prefix from arbitrary (config-supplied) egress_allow/
+ * egress_deny entries. tunnels[1] (v6) mirrors tunnels[0] from s->pool.base6/
+ * prefix6, but ONLY when s->pool.has_v6 (i.e. Subnet6 was configured) —
+ * left at family == 0 (the unset sentinel) otherwise. This gate is
+ * load-bearing, not cosmetic: mqvpn_cidr_match ignores prefix_len when
+ * family == 0, but a same-shaped {family=6, prefix_len=0} would be
+ * indistinguishable from a real "::/0" entry and would match EVERY v6
+ * address, silently denying all v6 egress for any server that never
+ * configured Subnet6. */
 void
 svr_get_egress_policy(const mqvpn_server_t *s, const mqvpn_cidr_entry_t **allow,
                       int *n_allow, const mqvpn_cidr_entry_t **deny, int *n_deny,
-                      uint32_t *tunnel_net, uint32_t *tunnel_mask)
+                      mqvpn_cidr_entry_t tunnels[2])
 {
     *allow = s->config.hybrid.egress_allow;
     *n_allow = s->config.hybrid.n_egress_allow;
     *deny = s->config.hybrid.egress_deny;
     *n_deny = s->config.hybrid.n_egress_deny;
-    *tunnel_mask = mqvpn_cidr_mask_from_prefix(s->pool.prefix_len);
-    *tunnel_net = ntohl(s->pool.base.s_addr) & *tunnel_mask;
+
+    memset(&tunnels[0], 0, sizeof(tunnels[0]));
+    tunnels[0].family = 4;
+    tunnels[0].prefix_len = (uint8_t)s->pool.prefix_len;
+    uint32_t net_hip = ntohl(s->pool.base.s_addr);
+    tunnels[0].net[0] = (uint8_t)(net_hip >> 24);
+    tunnels[0].net[1] = (uint8_t)(net_hip >> 16);
+    tunnels[0].net[2] = (uint8_t)(net_hip >> 8);
+    tunnels[0].net[3] = (uint8_t)(net_hip);
+    mqvpn_cidr_premask(tunnels[0].net, tunnels[0].prefix_len);
+
+    memset(&tunnels[1], 0, sizeof(tunnels[1]));
+    if (s->pool.has_v6) {
+        tunnels[1].family = 6;
+        tunnels[1].prefix_len = (uint8_t)s->pool.prefix6;
+        memcpy(tunnels[1].net, s->pool.base6.s6_addr, 16);
+        mqvpn_cidr_premask(tunnels[1].net, tunnels[1].prefix_len);
+    }
+    /* else: family stays 0 (memset above) — the unset sentinel, NOT a
+     * {family=6, prefix_len=0} "match everything" shape. See the has_v6
+     * gate rationale in this function's docstring. */
 }
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
@@ -1782,7 +1795,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     /* caller guarantees lifetime exceeds this object */ // lgtm[cpp/stack-address-escape]
     s->udp_fd = -1;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
-    s->ptb_tokens = PTB_RATE_LIMIT;
+    mqvpn_ptb_bucket_init(&s->ptb_bucket);
     s->boot_us = now_us();
     /* Sanitize the [Hybrid] block at its consumer (validate-at-consumer
      * pattern — same as mqvpn_reorder_config_validate run by
@@ -2288,65 +2301,40 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         udp_mss = xqc_h3_ext_masque_udp_mss(target->dgram_mss, target->masque_stream_id);
 
     mqvpn_reorder_tx_peek_t peek = {0};
-    int do_stamp = 0;
-    if (target->reorder_tx && target->peer_reorder_supported &&
-        s->config.reorder.mode != MQVPN_REORDER_OFF && udp_mss > 0) {
-        mqvpn_reorder_tx_action_t act = mqvpn_reorder_tx_peek(
-            target->reorder_tx, pkt, len, now_us(), (uint32_t)udp_mss, &peek);
-        if (act == MQVPN_REORDER_TX_STAMP) {
-            do_stamp = 1;
-        } else if (act == MQVPN_REORDER_TX_DROP_MTU) {
-            /* 8 + len exceeds the DATAGRAM payload: emit ICMP PTB advertising the
-             * reorder-reduced effective MTU (udp_mss - 8) and drop. */
-            size_t eff_mtu =
-                udp_mss > MQVPN_REORDER_HDR_LEN ? udp_mss - MQVPN_REORDER_HDR_LEN : 0;
-            if (ip_ver == 4) {
-                if (ptb_rate_allow(s)) {
-                    struct in_addr srv;
-                    mqvpn_addr_pool_server_addr(&s->pool, &srv);
-                    mqvpn_icmp_send_v4(
-                        s->cbs.tun_output, s->user_ctx, (const uint8_t *)&srv.s_addr, 3,
-                        4, (eff_mtu > 0xFFFF) ? 0xFFFF : (uint16_t)eff_mtu, pkt, len);
-                    LOG_D(s, "sent ICMP Frag Needed (reorder mtu=%zu) to TUN", eff_mtu);
-                }
-            } else {
-                if (s->pool.has_v6 && ptb_rate_allow(s)) {
-                    struct in6_addr srv6;
-                    mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
-                    mqvpn_icmp_send_v6(s->cbs.tun_output, s->user_ctx, srv6.s6_addr, 2, 0,
-                                       (uint32_t)eff_mtu, pkt, len);
-                    LOG_D(s, "sent ICMPv6 PTB (reorder mtu=%zu) to TUN", eff_mtu);
-                }
-            }
-            return MQVPN_OK;
+    size_t ptb_mtu = 0;
+    mqvpn_rgate_verdict_t rv = mqvpn_rgate_decide(
+        target->reorder_tx, target->peer_reorder_supported, s->config.reorder.mode, pkt,
+        len, now_us(), (uint32_t)udp_mss, &peek, &ptb_mtu);
+    int do_stamp = (rv == MQVPN_RGATE_STAMP);
+    if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
+        int sent;
+        if (ip_ver == 4) {
+            struct in_addr srv;
+            mqvpn_addr_pool_server_addr(&s->pool, &srv);
+            sent = mqvpn_rgate_send_ptb(&s->ptb_bucket, now_ms_mono(), 4, /*addr_ok=*/1,
+                                        (const uint8_t *)&srv.s_addr, ptb_mtu,
+                                        s->cbs.tun_output, s->user_ctx, pkt, len);
+        } else {
+            struct in6_addr srv6;
+            mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
+            sent = mqvpn_rgate_send_ptb(&s->ptb_bucket, now_ms_mono(), 6, s->pool.has_v6,
+                                        srv6.s6_addr, ptb_mtu, s->cbs.tun_output,
+                                        s->user_ctx, pkt, len);
         }
-        /* MQVPN_REORDER_TX_RAW falls through. */
-    }
-
-    /* ICMP PTB if a RAW packet exceeds tunnel capacity. (When stamping, the
-     * peek's DROP_MTU branch above already handled over-MTU.) */
-    if (!do_stamp && udp_mss > 0) {
-        if (len > udp_mss) {
-            if (ip_ver == 4) {
-                if (ptb_rate_allow(s)) {
-                    struct in_addr srv;
-                    mqvpn_addr_pool_server_addr(&s->pool, &srv);
-                    mqvpn_icmp_send_v4(
-                        s->cbs.tun_output, s->user_ctx, (const uint8_t *)&srv.s_addr, 3,
-                        4, (udp_mss > 0xFFFF) ? 0xFFFF : (uint16_t)udp_mss, pkt, len);
-                    LOG_D(s, "sent ICMP Fragmentation Needed (mtu=%zu) to TUN", udp_mss);
-                }
+        if (sent) {
+            if (rv == MQVPN_RGATE_DROP_REORDER_MTU) {
+                if (ip_ver == 4)
+                    LOG_D(s, "sent ICMP Frag Needed (reorder mtu=%zu) to TUN", ptb_mtu);
+                else
+                    LOG_D(s, "sent ICMPv6 PTB (reorder mtu=%zu) to TUN", ptb_mtu);
             } else {
-                if (s->pool.has_v6 && ptb_rate_allow(s)) {
-                    struct in6_addr srv6;
-                    mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
-                    mqvpn_icmp_send_v6(s->cbs.tun_output, s->user_ctx, srv6.s6_addr, 2, 0,
-                                       (uint32_t)udp_mss, pkt, len);
-                    LOG_D(s, "sent ICMPv6 Packet Too Big (mtu=%zu) to TUN", udp_mss);
-                }
+                if (ip_ver == 4)
+                    LOG_D(s, "sent ICMP Fragmentation Needed (mtu=%zu) to TUN", ptb_mtu);
+                else
+                    LOG_D(s, "sent ICMPv6 Packet Too Big (mtu=%zu) to TUN", ptb_mtu);
             }
-            return MQVPN_OK;
         }
+        return MQVPN_OK;
     }
 
     /* §7.3 step 4: TTL / Hop Limit decrement (RFC 9484 §4.3) */
@@ -2507,21 +2495,21 @@ mqvpn_server_scheduler_label(const mqvpn_server_t *s)
     return mqvpn_scheduler_label(s->config.scheduler);
 }
 
-/* xquic XQC_PATH_STATE_* values (xqc_multipath.h). Kept as switch on raw int
- * rather than the xquic enum so this TU does not need to include xquic
- * internal headers — values are part of the on-wire xquic stats contract.
- * The _Static_assert in derive_mp_state_label below pins the active value
- * we depend on; if any other value drifts, the labels here become wrong
- * silently and the catch is e2e-only. */
+/* xqc_path_state_t values (private xqc_multipath.h). Uses the mqvpn mirror
+ * constants rather than the xquic enum so this TU need not include xquic
+ * internal headers — the values are part of the xquic stats contract and
+ * are surfaced through the public control API. Every value is pinned to the
+ * real enum by tests/test_xquic_abi_pin.c, so an upstream renumber fails
+ * the build instead of silently mislabeling paths. */
 const char *
 mqvpn_path_state_label(int state)
 {
     switch (state) {
-    case 0: return "init";
-    case 1: return "validating";
-    case 2: return "active";
-    case 3: return "closing";
-    case 4: return "closed";
+    case MQVPN_XQC_PATH_STATE_INIT: return "init";
+    case MQVPN_XQC_PATH_STATE_VALIDATING: return "validating";
+    case MQVPN_XQC_PATH_STATE_ACTIVE: return "active";
+    case MQVPN_XQC_PATH_STATE_CLOSING: return "closing";
+    case MQVPN_XQC_PATH_STATE_CLOSED: return "closed";
     default: return "unknown";
     }
 }
@@ -2543,12 +2531,10 @@ mqvpn_path_state_label(int state)
 static const char *
 derive_mp_state_label(const xqc_conn_stats_t *st)
 {
-    /* Pin the xquic constants we depend on. XQC_PATH_STATE_ACTIVE = 2 lives
-     * in private xqc_multipath.h so we assert against the literal we use
-     * below; XQC_APP_PATH_STATUS_STANDBY is in the public xquic_typedef.h. */
-    _Static_assert(XQC_APP_PATH_STATUS_STANDBY == 1,
-                   "xquic XQC_APP_PATH_STATUS_STANDBY drifted from 1");
-
+    /* This function reads path_app_status via the public XQC_APP_PATH_STATUS_*
+     * symbols (below), so it does not depend on their numeric values. The
+     * path_state values it does depend on (via MQVPN_XQC_PATH_STATE_ACTIVE)
+     * are pinned in tests/test_xquic_abi_pin.c. */
     if (!st) return "unknown";
 
     int available = 0, standby = 0;
@@ -2556,10 +2542,10 @@ derive_mp_state_label(const xqc_conn_stats_t *st)
      * iterate by paths_info_count. paths_info may be NULL when count==0. */
     for (uint32_t i = 0; st->paths_info && i < st->paths_info_count; i++) {
         const xqc_path_metrics_t *p = &st->paths_info[i];
-        /* Only count paths in XQC_PATH_STATE_ACTIVE (=2); paths that are
-         * still validating, closing, or already closed should not influence
-         * the operator-facing label. */
-        if (p->path_state != 2) continue;
+        /* Only count ACTIVE paths; paths that are still validating,
+         * closing, or already closed should not influence the
+         * operator-facing label. */
+        if (p->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
         /* FROZEN means xquic flushed the send buffer and stopped forwarding
          * on that path (xqc_set_application_path_status, xqc_multipath.c).
          * It cannot contribute to operational redundancy — neither as

@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.11.1 (callback ABI version 2)
+ * Version: 0.12.0 (callback ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -38,8 +38,8 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 11
-#define MQVPN_VERSION_PATCH 1
+#define MQVPN_VERSION_MINOR 12
+#define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
 
@@ -436,7 +436,8 @@ typedef struct {
     mqvpn_mtu_updated_fn mtu_updated;
     mqvpn_log_fn log;
 
-    /* v5: reconnect control */
+    /* Reconnect control — appended under ABI 2 (additive struct_size
+     * growth; older callers with a shorter struct leave this NULL). */
     void (*reconnect_scheduled)(int delay_sec, void *user_ctx);
 } mqvpn_client_callbacks_t;
 
@@ -465,7 +466,8 @@ typedef struct {
     void (*on_client_disconnected)(uint32_t session_id, mqvpn_error_t reason,
                                    void *user_ctx);
 
-    /* v6: hybrid TCP lane egress fd interest (OPTIONAL — NULL disables
+    /* Hybrid TCP lane egress fd interest — appended under ABI 2 (additive
+     * struct_size growth; OPTIONAL — NULL disables
      * tcp_egress; connect-tcp-style requests get 503 if unset). The core
      * (src/hybrid/tcp_egress.c) owns every egress fd's socket()/connect()/
      * send()/recv()/close() syscalls directly — same "fd-path mode"

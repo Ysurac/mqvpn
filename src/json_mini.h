@@ -201,4 +201,77 @@ mqvpn_copy_str(char *dst, size_t dst_len, const char *src)
     dst[dst_len - 1] = '\0';
 }
 
+/* Parse a "users" JSON array shared by config.c (INI/JSON file config) and
+ * mqvpn_config.c (control-API JSON config). Accepts two element forms:
+ *   - "name:key" string form
+ *   - {"name":"..","key":"..","fixed_ip":".."} object form (fixed_ip optional)
+ * `arr` must point at the array's '[' character. Each parsed entry is handed
+ * to `add_user(ctx, name, key, fixed_ip)` — `fixed_ip` is NULL for the string
+ * form or when the object has no usable "fixed_ip"; a non-zero return aborts
+ * the parse. Returns 0 on success, -1 on parse or add failure. */
+static inline int
+mqvpn_json_parse_users(const char *arr, void *ctx,
+                       int (*add_user)(void *ctx, const char *name,
+                                       const char *key, const char *fixed_ip))
+{
+    if (!arr || *arr != '[' || !add_user) return -1;
+    const char *p = json_skip_ws(arr + 1);
+
+    while (*p && *p != ']') {
+        char name[64] = {0};
+        char key[256] = {0};
+        char fixed_ip[20] = {0};
+
+        if (*p == '"') {
+            char pair[360] = {0};
+            if (json_read_string(p, pair, sizeof(pair)) < 0) return -1;
+            char *sep = strchr(pair, ':');
+            if (!sep) return -1;
+            *sep = '\0';
+            mqvpn_copy_str(name, sizeof(name), pair);
+            mqvpn_copy_str(key, sizeof(key), sep + 1);
+
+            const char *e = p + 1;
+            while (*e && *e != '"') {
+                if (*e == '\\' && e[1]) e++;
+                e++;
+            }
+            if (*e != '"') return -1;
+            p = json_skip_ws(e + 1);
+        } else if (*p == '{') {
+            const char *end = json_object_end(p);
+            if (!end) return -1;
+
+            char obj[512];
+            size_t len = (size_t)(end - p + 1);
+            if (len >= sizeof(obj)) return -1;
+            memcpy(obj, p, len);
+            obj[len] = '\0';
+
+            const char *name_v = json_find_key(obj, "name");
+            const char *key_v = json_find_key(obj, "key");
+            if (!name_v || !key_v) return -1;
+            if (json_read_string(name_v, name, sizeof(name)) < 0) return -1;
+            if (json_read_string(key_v, key, sizeof(key)) < 0) return -1;
+
+            const char *fip_v = json_find_key(obj, "fixed_ip");
+            if (fip_v) json_read_string(fip_v, fixed_ip, sizeof(fixed_ip));
+
+            p = json_skip_ws(end + 1);
+        } else {
+            return -1;
+        }
+
+        if (add_user(ctx, name, key, fixed_ip[0] ? fixed_ip : NULL) != 0)
+            return -1;
+
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
+    }
+
+    return (*p == ']') ? 0 : -1;
+}
+
 #endif /* MQVPN_JSON_MINI_H */

@@ -278,74 +278,21 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
 }
 
 static int
+json_add_user_cb(void *ctx, const char *name, const char *key,
+                 const char *fixed_ip)
+{
+    /* add_user_entry() logs and skips invalid/duplicate/overflow entries
+     * rather than failing the whole parse; preserve that here. */
+    add_user_entry((mqvpn_file_config_t *)ctx, name, key, fixed_ip, 0, "json");
+    return 0;
+}
+
+static int
 json_read_users(mqvpn_file_config_t *cfg, const char *p)
 {
     if (!cfg || !p || *p != '[') return -1;
     cfg->n_users = 0;
-    p = json_skip_ws(p + 1);
-
-    while (*p && *p != ']') {
-        char name[64] = {0};
-        char key[256] = {0};
-
-        if (*p == '"') {
-            char pair[360] = {0};
-            if (json_read_string(p, pair, sizeof(pair)) < 0) return -1;
-            char *sep = strchr(pair, ':');
-            if (!sep) return -1;
-            *sep = '\0';
-            mqvpn_copy_str(name, sizeof(name), pair);
-            mqvpn_copy_str(key, sizeof(key), sep + 1);
-
-            const char *e = p + 1;
-            while (*e && *e != '"') {
-                if (*e == '\\' && e[1]) e++;
-                e++;
-            }
-            if (*e != '"') return -1;
-            p = json_skip_ws(e + 1);
-        } else if (*p == '{') {
-            const char *end = strchr(p, '}');
-            if (!end) return -1;
-
-            char obj[512];
-            size_t len = (size_t)(end - p + 1);
-            if (len >= sizeof(obj)) return -1;
-            memcpy(obj, p, len);
-            obj[len] = '\0';
-
-            const char *name_v = json_find_key(obj, "name");
-            const char *key_v = json_find_key(obj, "key");
-            if (!name_v || !key_v) return -1;
-            if (json_read_string(name_v, name, sizeof(name)) < 0) return -1;
-            if (json_read_string(key_v, key, sizeof(key)) < 0) return -1;
-
-            char fixed_ip[20] = {0};
-            const char *fip_v = json_find_key(obj, "fixed_ip");
-            if (fip_v) json_read_string(fip_v, fixed_ip, sizeof(fixed_ip));
-
-            p = json_skip_ws(end + 1);
-
-            add_user_entry(cfg, name, key, fixed_ip[0] ? fixed_ip : NULL, 0, "json");
-
-            if (*p == ',')
-                p = json_skip_ws(p + 1);
-            else if (*p != ']')
-                return -1;
-            continue;
-        } else {
-            return -1;
-        }
-
-        add_user_entry(cfg, name, key, NULL, 0, "json");
-
-        if (*p == ',')
-            p = json_skip_ws(p + 1);
-        else if (*p != ']')
-            return -1;
-    }
-
-    return (*p == ']') ? 0 : -1;
+    return mqvpn_json_parse_users(p, cfg, json_add_user_cb);
 }
 
 /* Parse the "reorder_rules" JSON array of {proto, port, profile} objects into
@@ -888,11 +835,11 @@ json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items, const
     while (*p && *p != ']') {
         if (*p != '"') return -1;
 
-        char s[32];
+        char s[INET6_ADDRSTRLEN + 8];
         if (json_read_string(p, s, sizeof(s)) < 0) return -1;
 
         mqvpn_cidr_entry_t entry;
-        if (mqvpn_parse_cidr_v4(s, &entry) < 0) {
+        if (mqvpn_parse_cidr(s, &entry) < 0) {
             LOG_WRN("JSON: invalid hybrid egress CIDR '%s'; ignoring", s);
         } else if (n < max_items) {
             out[n++] = entry;
@@ -1123,7 +1070,7 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
         if (!is_allow && !is_deny) break;
 
         mqvpn_cidr_entry_t entry;
-        if (mqvpn_parse_cidr_v4(val, &entry) < 0) {
+        if (mqvpn_parse_cidr(val, &entry) < 0) {
             LOG_WRN("%s:%d: invalid [Hybrid] %s '%s'", path, lineno, key, val);
             return;
         }

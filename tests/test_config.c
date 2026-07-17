@@ -7,6 +7,7 @@
  * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc
  */
 #include "config.h"
+#include "mqvpn_sched_names.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1279,6 +1280,52 @@ test_json_invalid_users_error(void)
     ASSERT_TRUE(rc != 0, "json invalid users returns error");
 }
 
+static void
+test_json_users_brace_in_string_value(void)
+{
+    /* A '}' inside a string value must not be mistaken for the object's
+     * closing brace (regression for the naive strchr(p, '}') scan). */
+    const char *json = "{"
+                       "\"listen\":\"0.0.0.0:443\","
+                       "\"users\":[{\"name\":\"a}b\",\"key\":\"k1\"},\"carol:c3\"]"
+                       "}";
+
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json users brace-in-string parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 2, "json users brace-in-string count");
+    ASSERT_EQ_STR(cfg.user_names[0], "a}b", "json users brace-in-string name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k1", "json users brace-in-string key");
+    ASSERT_EQ_STR(cfg.user_names[1], "carol", "json users string-form name after object");
+    ASSERT_EQ_STR(cfg.user_keys[1], "c3", "json users string-form key after object");
+}
+
+static void
+test_json_users_escaped_quote_in_value(void)
+{
+    /* \" inside an object-form value must not terminate the string scan
+     * early. */
+    const char *json = "{"
+                       "\"listen\":\"0.0.0.0:443\","
+                       "\"users\":[{\"name\":\"dave\",\"key\":\"k\\\"2\"}]"
+                       "}";
+
+    char *path = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "json users escaped-quote parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "json users escaped-quote count");
+    ASSERT_EQ_STR(cfg.user_names[0], "dave", "json users escaped-quote name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k\"2", "json users escaped-quote key");
+}
+
 /* ================================================================
  *  RouteViaServer config tests
  * ================================================================ */
@@ -1948,19 +1995,26 @@ test_hybrid_egress_acl_ini(void)
 
     ASSERT_EQ_INT(rc, 0, "egress acl ini load ok");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 2, "2 egress_allow entries parsed");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000, "allow[0] net");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].mask, (int)0xFF000000, "allow[0] mask");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[1].net, (int)0xC0A80100, "allow[1] net");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].family, 4, "allow[0] family");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].prefix_len, 8, "allow[0] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 10, "allow[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].prefix_len, 24, "allow[1] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].net[0], 192, "allow[1] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].net[1], 168, "allow[1] net[1]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[1].net[2], 1, "allow[1] net[2]");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_deny[0].net, (int)0xAC100500, "deny[0] net");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[0], 172, "deny[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[1], 16, "deny[0] net[1]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[2], 5, "deny[0] net[2]");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20, "tcp_connect_timeout_sec");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows, 8192, "tcp_max_global_flows");
 
     /* Host bits in the address part are deliberately masked off (route-table
      * convention): "10.0.0.5/8" stores net 10.0.0.0, not 10.0.0.5. */
     mqvpn_cidr_entry_t e;
-    ASSERT_EQ_INT(mqvpn_parse_cidr_v4("10.0.0.5/8", &e), 0, "host-bits cidr parses");
-    ASSERT_EQ_INT((int)e.net, (int)0x0A000000, "host bits normalized off the net");
+    ASSERT_EQ_INT(mqvpn_parse_cidr("10.0.0.5/8", &e), 0, "host-bits cidr parses");
+    ASSERT_EQ_INT(e.net[0], 10, "host bits normalized off the net");
+    ASSERT_EQ_INT(e.net[3], 0, "host bits normalized off the net (last byte)");
 }
 
 static void
@@ -1979,8 +2033,7 @@ test_hybrid_egress_acl_ini_invalid_ignored(void)
 
     ASSERT_EQ_INT(rc, 0, "malformed egress acl entries don't abort load");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "only the valid entry parsed");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000,
-                  "valid entry kept");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 10, "valid entry kept");
 }
 
 static void
@@ -1996,13 +2049,41 @@ test_hybrid_egress_acl_json(void)
                                                   "}}");
     ASSERT_EQ_INT(rc, 0, "egress acl json load ok");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "1 egress_allow entry parsed (json)");
-    ASSERT_EQ_INT((int)cfg.hybrid.egress_allow[0].net, (int)0x0A000000,
-                  "allow[0] net (json)");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 10, "allow[0] net[0] (json)");
     ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 egress_deny entry parsed (json)");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_connect_timeout_sec, 20,
                   "tcp_connect_timeout_sec (json)");
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_max_global_flows, 8192,
                   "tcp_max_global_flows (json)");
+}
+
+/* [Hybrid] EgressAllow/EgressDeny is a hand-coded repeated key (config.c's
+ * SEC_HYBRID case), NOT a cfg_keys[] scalar descriptor row — so this is the
+ * only place a v6 entry needs its own parse-path test; there is no
+ * scalar-parity row to add alongside it (see the table refactor, PR #185). */
+static void
+test_hybrid_egress_acl_ini_v6(void)
+{
+    const char *ini = "[Hybrid]\n"
+                      "EgressAllow = fd00::/8\n"
+                      "EgressDeny = 2001:db8::/32\n";
+
+    char *p = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "v6 egress acl ini load ok");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_allow, 1, "1 v6 egress_allow entry parsed");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].family, 6, "v6 allow[0] family");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].prefix_len, 8, "v6 allow[0] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_allow[0].net[0], 0xfd, "v6 allow[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.n_egress_deny, 1, "1 v6 egress_deny entry parsed");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].family, 6, "v6 deny[0] family");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].prefix_len, 32, "v6 deny[0] prefix_len");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[0], 0x20, "v6 deny[0] net[0]");
+    ASSERT_EQ_INT(cfg.hybrid.egress_deny[0].net[1], 0x01, "v6 deny[0] net[1]");
 }
 
 /* ── INI ↔ JSON scalar-key parity (pins the descriptor-table refactor) ──── */
@@ -2276,6 +2357,37 @@ test_ini_json_invalid_scalar_parity(void)
                   "invalid hybrid tcp json falls back to auto");
 }
 
+/* Table-driven round-trip test over MQVPN_SCHED_LIST / MQVPN_CC_LIST
+ * (src/mqvpn_sched_names.h): every row must survive from_name(name) ==
+ * enum and to_name(enum) == name. This is the mechanical parity check the
+ * X-macro table exists for — a future row addition/removal is exercised
+ * here automatically without editing this test. */
+static void
+test_sched_cc_name_roundtrip(void)
+{
+#define MQVPN_SCHED_ROUNDTRIP_CHECK(enum_val, str)                                     \
+    ASSERT_EQ_INT(mqvpn_sched_from_name(str), (int)(enum_val),                         \
+                  "sched from_name(" str ") == " #enum_val);                           \
+    ASSERT_EQ_STR(mqvpn_sched_to_name(enum_val), str, "sched to_name(" #enum_val ")"); \
+    ASSERT_TRUE(mqvpn_sched_is_valid(enum_val), "sched is_valid(" #enum_val ")");
+    MQVPN_SCHED_LIST(MQVPN_SCHED_ROUNDTRIP_CHECK)
+#undef MQVPN_SCHED_ROUNDTRIP_CHECK
+
+#define MQVPN_CC_ROUNDTRIP_CHECK(enum_val, str)                                  \
+    ASSERT_EQ_INT(mqvpn_cc_from_name(str), (int)(enum_val),                      \
+                  "cc from_name(" str ") == " #enum_val);                        \
+    ASSERT_EQ_STR(mqvpn_cc_to_name(enum_val), str, "cc to_name(" #enum_val ")"); \
+    ASSERT_TRUE(mqvpn_cc_is_valid(enum_val), "cc is_valid(" #enum_val ")");
+    MQVPN_CC_LIST(MQVPN_CC_ROUNDTRIP_CHECK)
+#undef MQVPN_CC_ROUNDTRIP_CHECK
+
+    /* Unrecognized strings must be rejected by both tables. */
+    ASSERT_EQ_INT(mqvpn_sched_from_name("bogus"), -1, "sched from_name(bogus)");
+    ASSERT_EQ_INT(mqvpn_sched_from_name(NULL), -1, "sched from_name(NULL)");
+    ASSERT_EQ_INT(mqvpn_cc_from_name("bogus"), -1, "cc from_name(bogus)");
+    ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
+}
+
 int
 main(void)
 {
@@ -2349,6 +2461,8 @@ main(void)
     test_parse_json_scheduler_wlb_udp_pin();
     test_json_duplicate_users_last_wins();
     test_json_invalid_users_error();
+    test_json_users_brace_in_string_value();
+    test_json_users_escaped_quote_in_value();
 
     /* route_via_server tests */
     test_route_via_server_default_off();
@@ -2403,11 +2517,15 @@ main(void)
     test_hybrid_section_parse();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
+    test_hybrid_egress_acl_ini_v6();
     test_hybrid_egress_acl_json();
 
     /* INI/JSON scalar-key parity */
     test_ini_json_scalar_parity();
     test_ini_json_invalid_scalar_parity();
+
+    /* mqvpn_sched_names.h table parity */
+    test_sched_cc_name_roundtrip();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
