@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.12.0 LANGUAGES C)
+project(mqvpn VERSION 0.12.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -858,6 +858,23 @@ if(BUILD_TESTING)
     target_include_directories(test_cc_config PRIVATE ${CMAKE_SOURCE_DIR}/src)
     set_target_properties(test_cc_config PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_cc_config COMMAND test_cc_config)
+
+    # Pre-accept type-confusion DoS regression: drives a raw xquic client with
+    # a bogus ALPN at the server to prove an unauthenticated pre-handshake
+    # crash cannot recur (xquic-dependent — needs XQUIC_INCLUDE_DIR).
+    add_executable(test_server_preaccept_dos tests/test_server_preaccept_dos.c)
+    target_link_libraries(test_server_preaccept_dos mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
+    target_include_directories(test_server_preaccept_dos PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    target_compile_definitions(test_server_preaccept_dos PRIVATE
+        TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
+        TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+    )
+    set_target_properties(test_server_preaccept_dos PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_server_preaccept_dos COMMAND test_server_preaccept_dos)
+    # Passing run finishes in <100ms; a reintroduced type confusion SEGVs and,
+    # under ASan's signal handler, can hang instead of exiting — cap it so a
+    # regression fails fast rather than stalling the suite for ctest's default.
+    set_tests_properties(test_server_preaccept_dos PROPERTIES TIMEOUT 60)
 
     # Scheduler dispatch test (xquic-dependent — needs XQUIC_INCLUDE_DIR)
     add_executable(test_scheduler tests/test_scheduler.c)

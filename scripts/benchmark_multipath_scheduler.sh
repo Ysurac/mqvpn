@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # benchmark_multipath_scheduler.sh — Multipath scheduler comprehensive benchmark
 #
 # Compares all schedulers (minrtt, wlb, backup, backup_fec, rap) across 8 network
