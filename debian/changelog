@@ -1,3 +1,24 @@
+mqvpn (0.12.0-1) unstable; urgency=medium
+
+  * feat(hybrid): IPv6 support for the hybrid TCP lane — dual-stack lwIP
+    listener, family-aware classifier/SYN parser, v6 egress connect with
+    family-aware ACL (fail closed if IPV6_V6ONLY cannot be set), v6 e2e
+    and fuzz coverage.
+  * feat(android): reorder profile defaults to port 443.
+  * fix(config): parse '}' inside user JSON strings; unify the duplicated
+    users parsers (fixed_ip support preserved).
+  * fix(status): print path state from the control-API state_label.
+  * refactor: single-source scheduler/CC name tables (X-macro) with
+    -Wswitch dispatch coverage; shared reorder TX gate + PTB rate limiter
+    between client and server.
+  * fix(sched): restore backup/rap scheduler dispatch (regressed to minrtt
+    in an earlier merge); register backup, rap, wrtt schedulers and
+    new_reno, copa, unlimited congestion controls in the shared tables.
+  * chore(deps): bump xquic to 2ef8155 (fixes i386/musl compilation).
+  * docs: website hybrid-mode guide and [Hybrid] config reference.
+
+ -- mqvpn maintainers <maintainers@example.com>  Fri, 17 Jul 2026 09:29:18 +0200
+
 mqvpn (0.11.1-1) unstable; urgency=medium
 
   * fix(windows): bridge [Reorder] INI config into the library (was
