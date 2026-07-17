@@ -1,3 +1,18 @@
+mqvpn (0.12.1-1) unstable; urgency=medium
+
+  * fix(server): bind the per-connection context at accept time, closing a
+    pre-handshake type confusion an unauthenticated no-ALPN/no-SNI probe
+    could turn into a remote crash; add a DoS regression test.
+  * fix(client): classify CONNECT-IP failures and signal tunnel_closed
+    exactly once (once-flag latch unit tests, wrong-PSK e2e hardening).
+  * feat(ios): sample iOS app (PoC) — server settings with off-thread host
+    resolution, NE tunnel provider wiring, reorder buffer settings and
+    live stats monitor with ABI-guarded snapshot decoding.
+  * core: add a reorder stats ABI layout fingerprint.
+  * chore: add SPDX license headers to shell scripts.
+
+ -- mqvpn maintainers <maintainers@example.com>  Fri, 17 Jul 2026 15:32:17 +0200
+
 mqvpn (0.12.0-1) unstable; urgency=medium
 
   * feat(hybrid): IPv6 support for the hybrid TCP lane — dual-stack lwIP
