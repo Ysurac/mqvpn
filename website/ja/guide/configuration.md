@@ -102,7 +102,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 
 ## マルチユーザー認証
 
-サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config の `users` 配列で設定するか、[Control API](#control-api) を使って実行中にユーザーを管理できます。`users` 配列の各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。
+サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config では `users` 配列で設定します。各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。INI config では `[Auth]` セクションに `User = NAME:KEY` 行を複数書きます。[Control API](#control-api) を使って実行中にユーザーを管理することもできます。
 
 `auth_key`（グローバルキー）と `users` を両方設定した場合、クライアントはどちらでも認証可能です。名前付きユーザーのみに制限するには、`auth_key` を設定から削除してください。
 
@@ -142,6 +142,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | VPN 外への通信を遮断（クライアントのみ） | `false` |
 | `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
 | `ReconnectInterval` | 再接続の間隔（秒） | `5` |
+| `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定 | `true` |
 | `MTU` | TUN MTU（1280–9000）。クライアント: 上限指定 — ネゴシエーション値のほうが小さい場合はそちらが使われる。サーバー: TUN MTU を直接設定。 | auto（クライアント ~1382 ネゴシエーション、サーバー 1382） |
 
 ### `[TLS]`（サーバーのみ）
@@ -159,6 +160,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `User` | ユーザー個別の PSK（`NAME:KEY` 形式、複数指定可） | — |
 | `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
 
+JSON ではクライアント・サーバーとも `auth_key` を使います（上の例のとおり）。
+
 ### `[Multipath]`
 
 | キー | 説明 | デフォルト |
@@ -166,6 +169,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, または `backup_fec`） | `wlb` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
+| `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
 
 スケジューラの詳細は[マルチパス](./multipath)を参照してください。
 
@@ -288,7 +292,7 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 |------|------|------|-----------|
 | `Enabled` | マスタースイッチ | client + server | `false` |
 | `Tcp` | フロー単位の TCP レーンポリシー: `stream`（常に使用）、`raw`（不使用 — hybrid 無効時とバイト同一）、`auto`（SYN 時点でアクティブパスが 2 本以上なら TCP レーン。判定はフローの生存期間中固定） | client | `auto` |
-| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。client: ローカルフローテーブル（超過 SYN は RAW にフォールバック）。server: クライアントセッション単位（超過 SYN は HTTP `503`） | client + server | `256` |
+| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。client: ローカルフローテーブル（超過 SYN は RAW にフォールバック）。server: クライアントセッション単位（超過 SYN は HTTP `503`）。client 側ではさらに lwIP TCP pcb プールの半分に clamp される — デフォルトビルドで `256`、[モバイル lwIP プロファイル](./hybrid-mode)で `64` — clamp 時はログに出力。プールの残り半分はフローテーブルが数えない TIME_WAIT / half-open の pcb 用で、この余裕がないと pcb 枯渇時に新規 SYN が明示的な reject（RST）ではなく無言でハングするため | client + server | `256` |
 | `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化 | client + server | `300` |
 | `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
 | `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
@@ -300,6 +304,14 @@ JSON では `"hybrid"` オブジェクトに snake_case キーで指定します
 > egress ACL は `EgressAllow`/`EgressDeny` を何も設定しなくても RFC1918・
 > ループバック・リンクローカル宛をデフォルト拒否します。侵害されたクライアントが
 > サーバを内部ネットワークへの踏み台に使うことへの安全側デフォルトです。
+
+### `[Advanced]`
+
+| キー | 説明 | デフォルト |
+|------|------|-----------|
+| `RecvRateLimit` | コネクションレベルの受信レート上限（バイト/秒）。QUIC の集約受信ウィンドウを `rate × RTT` に制限します。クライアント側のみ有効 — サーバは無視します（サーバ側で制限するとクライアントのアップロードを絞ってしまうため）。最大値は `10000000000`（10 GB/s）で、それを超える値は警告とともに拒否され `0` にフォールバックします。メモリ制約がある場合を除き `0` のままにしてください（モバイルクライアントは内部で設定します） | `0`（無効） |
+
+JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`）。
 
 ## MTU ガイドライン
 

@@ -69,7 +69,6 @@
 #define PACKET_BUF_SIZE   65536
 #define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
 #define MAX_CAPSULE_BUF   65536
-#define XQC_SNDQ_MAX_PKTS 16384
 
 /* ─── Forward declarations ─── */
 
@@ -1969,63 +1968,33 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
 
-    /* Connection settings */
-    xqc_conn_settings_t conn_settings;
-    memset(&conn_settings, 0, sizeof(conn_settings));
-    conn_settings.max_datagram_frame_size = 65535;
-    conn_settings.proto_version = XQC_VERSION_V1;
-    conn_settings.enable_multipath = 1;
-    conn_settings.mp_ping_on = 1;
-    conn_settings.mp_enable_reinjection = cfg->reinjection_enable ?
-                                          (XQC_REINJ_UNACK_AFTER_SCHED |
-                                           XQC_REINJ_UNACK_BEFORE_SCHED |
-                                           XQC_REINJ_UNACK_AFTER_SEND)
-                                          : 0;
-    conn_settings.pacing_on = 1;
-    conn_settings.max_pkt_out_size = 1400;
-    switch (cfg->cc) {
-    case MQVPN_CC_BBR:
-        conn_settings.cong_ctrl_callback = xqc_bbr_cb;
-        break;
-    case MQVPN_CC_CUBIC:
-        conn_settings.cong_ctrl_callback = xqc_cubic_cb;
-        break;
-    case MQVPN_CC_NEW_RENO:
-#ifdef XQC_ENABLE_RENO
-        conn_settings.cong_ctrl_callback = xqc_reno_cb;
-#else
-        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-#endif
-        break;
-    case MQVPN_CC_COPA:
-#ifdef XQC_ENABLE_COPA
-        conn_settings.cong_ctrl_callback = xqc_copa_cb;
-#else
-        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-#endif
-        break;
-    case MQVPN_CC_UNLIMITED:
-#ifdef XQC_ENABLE_UNLIMITED
-        conn_settings.cong_ctrl_callback = xqc_unlimited_cc_cb;
-#else
-        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-#endif
-        break;
-    default: /* MQVPN_CC_BBR2 */
-        conn_settings.cong_ctrl_callback = xqc_bbr2_cb;
-        conn_settings.cc_params.cc_optimization_flags =
-            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
-        break;
-    }
 #if !defined(XQC_ENABLE_FEC) || !defined(XQC_ENABLE_XOR)
     if (cfg->scheduler == MQVPN_SCHED_BACKUP_FEC) {
         LOG_W(s, "backup_fec scheduler requested but library built without FEC "
                  "support (XQC_ENABLE_FEC/XQC_ENABLE_XOR); downgrading to minrtt");
     }
 #endif
-    mqvpn_apply_scheduler(&conn_settings, cfg->scheduler);
-    if (cfg->init_max_path_id > 0)
-        conn_settings.init_max_path_id = cfg->init_max_path_id;
+    /* Connection settings */
+    xqc_conn_settings_t conn_settings;
+    mqvpn_conn_settings_input_t cs_input = {
+        .is_server = true,
+        .enable_multipath = true, /* server: always on, see mqvpn_conn_settings.c */
+        .scheduler = cfg->scheduler,
+        .cc = cfg->cc,
+        .init_max_path_id = cfg->init_max_path_id,
+        /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
+    };
+    mqvpn_build_conn_settings(&cs_input, &conn_settings);
+
+    /* mp_enable_reinjection / reinj_ctl / fec_enable: mqvpn-specific knobs not
+     * covered by the shared builder (multipath reinjection control + a
+     * configurable FEC that can run independently of the backup_fec
+     * scheduler) — layered on top, mirroring the client-side block below. */
+    conn_settings.mp_enable_reinjection = cfg->reinjection_enable ?
+                                          (XQC_REINJ_UNACK_AFTER_SCHED |
+                                           XQC_REINJ_UNACK_BEFORE_SCHED |
+                                           XQC_REINJ_UNACK_AFTER_SEND)
+                                          : 0;
 
     if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
         conn_settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
@@ -2072,10 +2041,6 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         LOG_W(s, "FEC enabled in config but unavailable in this xquic build");
 #endif
     }
-    conn_settings.sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
-    conn_settings.so_sndbuf = 8 * 1024 * 1024;
-    conn_settings.idle_time_out = 120000;
-    conn_settings.init_idle_time_out = 10000;
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     /* H3 callbacks */

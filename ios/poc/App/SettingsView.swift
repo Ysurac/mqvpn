@@ -16,8 +16,12 @@ struct SettingsView: View {
 
     @State private var hostText: String
     @State private var portText: String
+    @State private var serverNameText: String
     @State private var pskText: String
     @State private var insecure: Bool
+
+    @State private var hybridEnabled: Bool
+    @State private var hybridMode: Int
 
     init(controller: TunnelController) {
         self.controller = controller
@@ -29,8 +33,12 @@ struct SettingsView: View {
         let srv = controller.serverSettings ?? (try? ServerSettings.fromBundle()) ?? .emptyDraft
         _hostText = State(initialValue: srv.host)
         _portText = State(initialValue: String(srv.port))
+        _serverNameText = State(initialValue: srv.serverName)
         _pskText = State(initialValue: srv.authKey)
         _insecure = State(initialValue: srv.insecure)
+
+        _hybridEnabled = State(initialValue: controller.hybridSettings.enabled)
+        _hybridMode = State(initialValue: controller.hybridSettings.tcpMode)
     }
 
     private var draft: ReorderSettings {
@@ -43,7 +51,8 @@ struct SettingsView: View {
 
     private var parsedPort: Int? { Int(portText.trimmingCharacters(in: .whitespaces)) }
     private var serverDraft: ServerSettings {
-        ServerSettings(host: hostText, port: parsedPort ?? -1, authKey: pskText, insecure: insecure)
+        ServerSettings(host: hostText, port: parsedPort ?? -1, serverName: serverNameText,
+                       authKey: pskText, insecure: insecure)
     }
     private var serverValid: Bool { serverDraft.isValid }   // reuse the model's rule (host trimmed in init; port -1 when unparseable → false)
 
@@ -56,6 +65,9 @@ struct SettingsView: View {
                         .disabled(!controller.isEditable)
                     TextField("Port", text: $portText)
                         .keyboardType(.numberPad).disabled(!controller.isEditable)
+                    TextField("TLS Server Name (optional, default: host)", text: $serverNameText)
+                        .keyboardType(.URL).autocorrectionDisabled().textInputAutocapitalization(.never)
+                        .disabled(!controller.isEditable)
                     SecureField("PSK (Auth Key)", text: $pskText).disabled(!controller.isEditable)
                     Toggle("Insecure (skip TLS verify)", isOn: $insecure).disabled(!controller.isEditable)
                     if !serverValid {
@@ -81,6 +93,18 @@ struct SettingsView: View {
                         }
                     }
                 }
+                Section {
+                    Toggle("Enabled", isOn: $hybridEnabled).disabled(!controller.isEditable)
+                    if hybridEnabled {
+                        Picker("TCP Mode", selection: $hybridMode) {
+                            Text("Auto").tag(HybridSettings.modeAuto)
+                            Text("Stream").tag(HybridSettings.modeStream)
+                            Text("Raw").tag(HybridSettings.modeRaw)
+                        }.disabled(!controller.isEditable)
+                    }
+                } header: { Text("Hybrid Mode") } footer: {
+                    Text("Requires hybrid support on the server; TCP connections fail otherwise.")
+                }
                 if let errorText { Section { Text(errorText).foregroundColor(.red) } }
                 if !controller.isEditable {
                     Section { Text("Disconnect to edit settings.")
@@ -102,7 +126,8 @@ struct SettingsView: View {
     }
 
     private func save() async {
-        do { try await controller.saveSettings(server: serverDraft, reorder: draft); dismiss() }
+        let hybrid = HybridSettings(enabled: hybridEnabled, tcpMode: hybridMode)
+        do { try await controller.saveSettings(server: serverDraft, reorder: draft, hybrid: hybrid); dismiss() }
         catch { errorText = "Save failed: \(error)" }
     }
 }

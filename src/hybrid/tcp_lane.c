@@ -40,8 +40,8 @@
  * eviction), so counting them against tcp_max_flows would let a tcp=auto
  * client on a single path permanently exhaust the TCP lane with markers —
  * exactly the scenario tcp=auto exists for. This cap only bounds memory: a
- * marker entry is one mqvpn_tcp_flow_t (~120 B, key 38 B) so 4096 markers
- * ≈ 0.5 MB worst case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit
+ * marker entry is one mqvpn_tcp_flow_t (200 B, key 38 B) so 4096 markers
+ * ≈ 0.82 MB worst case; the keys alone are 38 B × 4096 ≈ 156 KB. On cap hit
  * the flow just stays unsticky and re-evaluates per SYN (harmless).
  * #ifndef so tests can override it small to exercise the cap
  * branch. */
@@ -53,7 +53,7 @@
  * rationale as TCP_LANE_RAW_MARKER_CAP above: a CLOSING entry is one
  * mqvpn_tcp_flow_t with a NULL pcb/h3_request AND a freed downlink_stash
  * (tcp_lane_mark_closing releases it at the transition — see that
- * function's comment), so 4096 of them cost roughly the same ~0.5 MB
+ * function's comment), so 4096 of them cost roughly the same ~0.82 MB
  * worst case. Overflow evicts the OLDEST CLOSING
  * entry immediately (mqvpn_tcp_lane_tick's cap check) rather than refusing
  * the transition — the cost of evicting early is only that one flow's
@@ -150,6 +150,22 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
         return NULL;
     }
     lane->cfg = *cfg;
+    /* Pool-coupling clamp: the lane's cap check below (on_syn) is the
+     * documented enforcement point — reject → tcp_abort (RST), never a
+     * silent hang — but it is only reachable while lwIP can still allocate
+     * pcbs. MEMP_NUM_TCP_PCB backs tracked flows PLUS TIME_WAIT/half-open
+     * pcbs the table no longer (or does not yet) count, so a cap above
+     * pool/2 lets tcp_alloc() start failing inbound SYNs (no callback, no
+     * RST — the inner connection just hangs) before the cap ever fires.
+     * Matters on the mobile profile, where the pool (128) sits BELOW the
+     * library's default tcp_max_flows (256); on the default profile the
+     * bound (512/2 = 256) equals the DEFAULT value, so only explicitly
+     * configured values above it are (deliberately) clamped — the caller
+     * can compare mqvpn_tcp_lane_effective_max_flows() against its
+     * configured value to surface that. */
+    if (lane->cfg.tcp_max_flows > MEMP_NUM_TCP_PCB / 2) {
+        lane->cfg.tcp_max_flows = MEMP_NUM_TCP_PCB / 2;
+    }
     lane->hash_seed = hash_seed;
     lane->client_ctx = client_ctx;
     lane->clock_fn = clock_fn;
@@ -157,8 +173,13 @@ mqvpn_tcp_lane_new(const mqvpn_hybrid_config_t *cfg, uint64_t hash_seed, void *c
     /* Size for BOTH populations sharing the table: up to tcp_max_flows
      * TCP-lane flows plus up to TCP_LANE_RAW_MARKER_CAP sticky-RAW markers
      * (which are exactly what accumulates in the tcp=auto single-path hot
-     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers. */
-    lane->n_buckets = pick_buckets(cfg->tcp_max_flows + TCP_LANE_RAW_MARKER_CAP);
+     * case). Defaults: 256 + 4096 → 8192 buckets = 64 KB of pointers.
+     * MUST read the CLAMPED lane->cfg value, not the caller's cfg: sizing
+     * from the raw input would let a huge configured value allocate the
+     * 2^20-bucket cap (8 MB of pointers — a real dent in the NE memory
+     * ceiling) for a table whose admission cap is 64, and a value near
+     * UINT32_MAX would wrap the sum to a tiny bucket count. */
+    lane->n_buckets = pick_buckets(lane->cfg.tcp_max_flows + TCP_LANE_RAW_MARKER_CAP);
     lane->buckets = calloc(lane->n_buckets, sizeof(*lane->buckets));
     if (!lane->buckets) {
         free(lane);
@@ -514,6 +535,18 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
      * and can never leave the stats snapshot out of sync. */
     out->flows_active = lane->n_tcp_flows;
     out->raw_markers_active = lane->n_raw_markers;
+}
+
+uint32_t
+mqvpn_tcp_lane_effective_max_flows(const mqvpn_tcp_lane_t *lane)
+{
+    return lane ? lane->cfg.tcp_max_flows : 0;
+}
+
+uint32_t
+mqvpn_tcp_lane_pool_flow_bound(void)
+{
+    return MEMP_NUM_TCP_PCB / 2;
 }
 
 /* ─── Downlink relay: H3 recv_body → lwIP tcp_write ─── */
@@ -1028,8 +1061,8 @@ tcp_lane_evict_oldest_closing(mqvpn_tcp_lane_t *lane)
  * tcp_lane_remove_flow: a CLOSING marker can reside for up to 2*TCP_MSL
  * (TCP_LANE_CLOSING_GRACE_US) before the grace sweep frees it, and holding
  * a live flow's ~TCP_MSS stash for that whole window would blow the
- * ~0.5 MB "CLOSING entries are cheap" bound this table's cap comment
- * relies on (tcp_lane.h:51-53). Safe to free now: the only caller is
+ * ~0.82 MB "CLOSING entries are cheap" bound this table's cap comment
+ * relies on (TCP_LANE_CLOSING_CAP above). Safe to free now: the only caller is
  * tcp_lane_finish_clean_close, reached from whichever direction observes
  * the SECOND FIN of a clean bidi close — either the downlink side
  * (tcp_lane_downlink_maybe_shutdown, here in this TU) or the uplink side

@@ -119,19 +119,24 @@ check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq:
                          snapTimestamp: 99, lastSeq: 5, lastTimestamp: 0), "legacy rejected once modern seen")
 
 // ── ServerSettings ──
-let ss = ServerSettings(host: "1.2.3.4", port: 443, authKey: "k", insecure: true)
+let ss = ServerSettings(host: "1.2.3.4", port: 443, serverName: "vpn.example.com", authKey: "k", insecure: true)
 check(ServerSettings(providerConfiguration: ss.toProviderConfiguration()) == ss, "server round-trip")
-check(ServerSettings(host: " 1.2.3.4 ", port: 443, authKey: " k ", insecure: false).host == "1.2.3.4", "host trimmed")
-check(ServerSettings(host: " 1.2.3.4 ", port: 443, authKey: " k ", insecure: false).authKey == "k", "authKey trimmed")
+check(ServerSettings(host: " 1.2.3.4 ", port: 443, serverName: "", authKey: " k ", insecure: false).host == "1.2.3.4", "host trimmed")
+check(ServerSettings(host: " 1.2.3.4 ", port: 443, serverName: "", authKey: " k ", insecure: false).authKey == "k", "authKey trimmed")
+check(ServerSettings(host: "h", port: 443, serverName: " vpn.example.com ", authKey: "", insecure: false).serverName == "vpn.example.com", "serverName trimmed")
 check(ss.isValid, "valid savable")
-check(ServerSettings(host: "  ", port: 443, authKey: "", insecure: true).isValid == false, "empty host invalid")
-check(ServerSettings(host: "h", port: 0, authKey: "", insecure: true).isValid == false, "port 0 invalid")
-check(ServerSettings(host: "h", port: 70000, authKey: "", insecure: true).isValid == false, "port hi invalid")
-check(ServerSettings(host: "h", port: 443, authKey: "", insecure: true).isValid, "empty authKey ok")
+check(ServerSettings(host: "  ", port: 443, serverName: "", authKey: "", insecure: true).isValid == false, "empty host invalid")
+check(ServerSettings(host: "h", port: 0, serverName: "", authKey: "", insecure: true).isValid == false, "port 0 invalid")
+check(ServerSettings(host: "h", port: 70000, serverName: "", authKey: "", insecure: true).isValid == false, "port hi invalid")
+check(ServerSettings(host: "h", port: 443, serverName: "", authKey: "", insecure: true).isValid, "empty authKey ok")
 // read validation
 check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "authKey": "k"]) == nil, "missing tlsInsecure → nil")
 check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: true), "authKey": "k", "tlsInsecure": NSNumber(value: false)]) == nil, "bool port → nil")
 check(ServerSettings(providerConfiguration: ["serverHost": "", "serverPort": NSNumber(value: 443), "authKey": "k", "tlsInsecure": NSNumber(value: false)]) == nil, "empty host → nil")
+// serverName: pre-key configs (absent) stay valid and read as ""; wrong type is corrupt
+let preKey = ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "authKey": "k", "tlsInsecure": NSNumber(value: false)])
+check(preKey?.serverName == "", "absent serverName → \"\"")
+check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "serverName": NSNumber(value: 1), "authKey": "k", "tlsInsecure": NSNumber(value: false)]) == nil, "non-string serverName → nil")
 // existence (Rigor E): wrong-type key still counts as present → corrupt, not absent
 check(ServerSettings.serverKeysPresent(in: ["serverPort": "not-a-number"]) == true, "wrong-type key present")
 check(ServerSettings.serverKeysPresent(in: ["reorderEnabled": NSNumber(value: true)]) == false, "only reorder keys → absent")
@@ -159,5 +164,17 @@ check(resolveServer("   ", 443) == nil, "whitespace host → nil")
 // resolve to their dotted-decimal form, not pass through unresolved.
 check(resolveServer("127.0.0.1", 443)?.ipString == "127.0.0.1", "ipString IP literal")
 check(resolveServer("localhost", 8080)?.ipString == "127.0.0.1", "ipString from hostname")
+
+// HybridSettings
+let hy = HybridSettings(enabled: true, tcpMode: 0)
+check(HybridSettings(providerConfiguration: hy.toProviderConfiguration()) == hy, "hybrid round-trip")
+check(HybridSettings.disabled == HybridSettings(enabled: false, tcpMode: 2), "hybrid disabled default auto")
+check(HybridSettings(providerConfiguration: nil) == nil, "hybrid nil dict -> nil")
+let hyBad: [String: Any] = ["hybridEnabled": NSNumber(value: true), "hybridTcpMode": NSNumber(value: 9)]
+check(HybridSettings(providerConfiguration: hyBad)!.tcpMode == 2, "out-of-range mode clamps to auto")
+let hyBool: [String: Any] = ["hybridEnabled": NSNumber(value: 1), "hybridTcpMode": NSNumber(value: true)]
+let hyParsed = HybridSettings(providerConfiguration: hyBool)!
+check(hyParsed.enabled == false, "int-backed enabled rejected (isBool strict)")
+check(hyParsed.tcpMode == 2, "bool-backed mode clamps to auto")
 
 if failures == 0 { print("host tests: ALL PASS") } else { print("host tests: \(failures) FAILURES"); exit(1) }

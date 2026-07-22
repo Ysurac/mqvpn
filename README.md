@@ -12,6 +12,7 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
   - [Client (deb package)](#client-deb-package)
   - [Windows client](#windows-client)
   - [macOS client](#macos-client)
+  - [Verifying downloads](#verifying-downloads)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
   - [INI config](#ini-config)
@@ -117,6 +118,18 @@ Pre-built binaries are shipped for Windows amd64 and arm64. Download `mqvpn_<VER
 ### macOS client
 
 Pre-built binaries are shipped for Apple silicon (arm64). Download `mqvpn_<VERSION>_darwin_arm64.tar.gz` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), extract, and follow the bundled `README.txt` (sudo required).
+
+### Verifying downloads
+
+Release artifacts carry [build provenance attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+signed via Sigstore. To verify a download was built by this repository's
+release workflow:
+
+```bash
+gh attestation verify mqvpn_<VERSION>_<ARCH>.deb --owner mp0rta
+```
+
+A `SHA256SUMS` file is also attached to each release.
 
 ## Quick Start
 
@@ -801,6 +814,9 @@ You can also contact via Zulip.
 Apache-2.0
 
 Copyright (c) 2026 mp0rta
+
+The "mqvpn" name and logo are not covered by the license — see
+[TRADEMARK.md](TRADEMARK.md).
 
 ## Acknowledgments
 

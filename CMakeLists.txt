@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.12.1 LANGUAGES C)
+project(mqvpn VERSION 0.13.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -99,6 +99,16 @@ option(MQVPN_ENABLE_HYBRID_TCP_LANE
 set(MQVPN_HYBRID_TCP_LANE_BUILD OFF)
 if(MQVPN_ENABLE_HYBRID_TCP_LANE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
+endif()
+
+# Mobile lwIP profile (iOS NE memory ceiling). Directory-global on purpose:
+# the profile constants are consumed by lwip_core AND tcp_lane.h includers
+# (mqvpn_lib, tests, fuzz, microbench) — per-target defs would silently
+# split the profile across TUs. Must precede every lane target definition.
+option(MQVPN_LWIP_MOBILE_PROFILE
+       "Shrink lwIP TCP-lane buffers for mobile (iOS NE) builds" OFF)
+if(MQVPN_LWIP_MOBILE_PROFILE)
+    add_compile_definitions(MQVPN_LWIP_MOBILE_PROFILE)
 endif()
 
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
@@ -551,6 +561,8 @@ endif()
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
     enable_testing()
+    add_test(NAME check_lwip_profile_invariance
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
     add_executable(test_route_parse_darwin
         tests/test_route_parse_darwin.c src/platform/darwin/routing.c
         src/platform/posix/dns_common.c src/log.c)
@@ -604,6 +616,24 @@ if(BUILD_TESTING)
         )
         add_test(NAME test_tcp_lane COMMAND test_tcp_lane)
     endif()
+
+    # test_config / test_conn_settings — copied from the Linux definitions
+    # below (:681 / :866); kept in sync so Tasks 6-8's red/green loops are
+    # not vacuous on darwin. Link diff vs Linux: dl/m are folded into
+    # libSystem here, and stdc++ becomes c++ (libc++).
+    add_executable(test_config tests/test_config.c src/config.c src/log.c)
+    target_include_directories(test_config PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME test_config COMMAND test_config)
+
+    add_executable(test_conn_settings tests/test_conn_settings.c)
+    target_link_libraries(test_conn_settings mqvpn_lib ${XQUIC_LIB} ${SSL_LIB}
+                          ${CRYPTO_LIB} c++)
+    target_include_directories(test_conn_settings PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR})
+    set_target_properties(test_conn_settings PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_conn_settings COMMAND test_conn_settings)
 endif()
 
 else() # NOT WIN32, NOT APPLE — Linux
@@ -676,6 +706,8 @@ target_link_libraries(mqvpn
 option(BUILD_TESTING "Build unit tests" ON)
 if(BUILD_TESTING)
     enable_testing()
+    add_test(NAME check_lwip_profile_invariance
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)
@@ -817,6 +849,11 @@ if(BUILD_TESTING)
     add_executable(test_api tests/test_api.c)
     target_link_libraries(test_api mqvpn_lib ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB} dl m stdc++)
     target_include_directories(test_api PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        # Lets test_api compile the hybrid-only tests (tcp_max_flows
+        # pool-bound warn); without it those #ifdef blocks are vacuous.
+        target_compile_definitions(test_api PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+    endif()
     set_target_properties(test_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
 

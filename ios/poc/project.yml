@@ -41,6 +41,7 @@ targets:
         UILaunchScreen: {}
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
+        MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
         MqvpnBulkURL: $(MQVPN_POC_BULK_URL)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
@@ -56,7 +57,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mp0rta.mqvpnpoc.PacketTunnel
         SWIFT_OBJC_BRIDGING_HEADER: PacketTunnel/BridgingHeader.h
-        OTHER_LDFLAGS: "-lmqvpn -lxquic-static -lssl -lcrypto -lc++"
+        OTHER_LDFLAGS: "-lmqvpn -llwip_core -lxquic-static -lssl -lcrypto -lc++"
     entitlements:
       path: PacketTunnel.entitlements
       properties:
@@ -66,6 +67,7 @@ targets:
       properties:
         MqvpnServerHost: $(MQVPN_POC_SERVER_HOST)
         MqvpnServerPort: $(MQVPN_POC_SERVER_PORT)
+        MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
         NSExtension:
