@@ -1,7 +1,5 @@
-<div align="center">
-  <img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
-  <p><b>All your connections. One stronger connection.</b></p>
-</div>
+
+This is a fork of official mqvpn with path weight support.
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
