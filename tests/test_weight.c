@@ -68,6 +68,42 @@ test_wrtt_no_precondition_warn(void)
     return 0;
 }
 
+static int
+test_wrr_dispatch(void)
+{
+    xqc_conn_settings_t cs;
+    memset(&cs, 0, sizeof(cs));
+    mqvpn_apply_scheduler(&cs, MQVPN_SCHED_WRR);
+    ASSERT_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+              xqc_wrr_scheduler_cb.xqc_scheduler_get_path);
+    return 0;
+}
+
+static int
+test_wrr_stateful(void)
+{
+    /* Unlike WRTT, WRR tracks smooth-WRR rotation state per path — size must
+       be nonzero. */
+    ASSERT_EQ(xqc_wrr_scheduler_cb.xqc_scheduler_size() > 0, true);
+    return 0;
+}
+
+static int
+test_wrr_qos_level(void)
+{
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_WRR), XQC_DATA_QOS_HIGH);
+    return 0;
+}
+
+static int
+test_wrr_no_precondition_warn(void)
+{
+    /* Single-path WRR is fine — unlike backup_fec it does not need 2 paths */
+    ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_WRR, 1), false);
+    ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_WRR, 2), false);
+    return 0;
+}
+
 /* --- path descriptor weight field --- */
 
 static int
@@ -142,6 +178,38 @@ test_wrtt_enum_value(void)
     return 0;
 }
 
+static int
+test_wrr_config_string(void)
+{
+    const char *ini = "[Server]\n"
+                      "Address = vpn.example.com:443\n"
+                      "\n"
+                      "[Auth]\n"
+                      "Key = testkey\n"
+                      "\n"
+                      "[Multipath]\n"
+                      "Scheduler = wrr\n"
+                      "Path = eth0\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_STR_EQ(cfg.scheduler, "wrr");
+    return 0;
+}
+
+static int
+test_wrr_enum_value(void)
+{
+    /* WRR must have a distinct value so scheduler dispatch switch is unambiguous */
+    ASSERT_EQ((int)MQVPN_SCHED_WRR, 7);
+    return 0;
+}
+
 int
 main(void)
 {
@@ -150,10 +218,16 @@ main(void)
     failed += test_wrtt_stateless();
     failed += test_wrtt_qos_level();
     failed += test_wrtt_no_precondition_warn();
+    failed += test_wrr_dispatch();
+    failed += test_wrr_stateful();
+    failed += test_wrr_qos_level();
+    failed += test_wrr_no_precondition_warn();
     failed += test_path_desc_weight_zero_by_default();
     failed += test_path_desc_weight_round_trip();
     failed += test_wrtt_config_string();
     failed += test_wrtt_enum_value();
+    failed += test_wrr_config_string();
+    failed += test_wrr_enum_value();
     if (failed) {
         fprintf(stderr, "test_weight: %d FAILED\n", failed);
         return 1;

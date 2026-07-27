@@ -582,6 +582,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     case MQVPN_SCHED_RAP: sched = MQVPN_SCHED_RAP; break;
     case MQVPN_SCHED_WLB_UDP_PIN: sched = MQVPN_SCHED_WLB_UDP_PIN; break;
     case MQVPN_SCHED_WRTT: sched = MQVPN_SCHED_WRTT; break;
+    case MQVPN_SCHED_WRR: sched = MQVPN_SCHED_WRR; break;
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);

@@ -515,7 +515,7 @@ main(int argc, char *argv[])
     int sched_lookup = mqvpn_sched_from_name(eff_scheduler);
     if (sched_lookup < 0) {
         fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', "
-                        "'wlb_udp_pin', 'backup_fec', 'rap' or 'wrtt'\n");
+                        "'wlb_udp_pin', 'backup_fec', 'rap', 'wrtt' or 'wrr'\n");
         return 1;
     }
     int scheduler = sched_lookup;

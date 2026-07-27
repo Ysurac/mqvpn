@@ -116,6 +116,10 @@ typedef enum {
                                    * broken by min RTT. Overflow to lower-weight paths
                                    * when cwnd-full. Set via mqvpn_path_desc_t.weight
                                    * (like ip route nexthop weight N). Default: 1. */
+    MQVPN_SCHED_WRR         = 7, /* Weighted Round Robin: interleaves packets across
+                                   * all usable paths in proportion to weight (smooth
+                                   * WRR), unlike WRTT's single-path-until-cwnd-blocked
+                                   * bias. Set via mqvpn_path_desc_t.weight. Default: 1. */
 } mqvpn_scheduler_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).

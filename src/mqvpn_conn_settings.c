@@ -42,6 +42,7 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     case MQVPN_SCHED_BACKUP: cs->scheduler_callback = xqc_backup_scheduler_cb; break;
     case MQVPN_SCHED_RAP: cs->scheduler_callback = xqc_rap_scheduler_cb; break;
     case MQVPN_SCHED_WRTT: cs->scheduler_callback = xqc_wrtt_scheduler_cb; break;
+    case MQVPN_SCHED_WRR: cs->scheduler_callback = xqc_wrr_scheduler_cb; break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
