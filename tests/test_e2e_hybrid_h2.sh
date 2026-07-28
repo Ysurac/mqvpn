@@ -124,6 +124,15 @@
 #     (both paths must carry real load, lighter path >=20% of the heavier —
 #     the direct proof against a scheduler that pinned traffic on one path;
 #     the absolute byte floor differs from Test 3's, see the check below).
+#     Like Test 3 this phase runs under netem, and for a reason that is a
+#     property of the scheduler rather than a convenience: TCP-lane traffic
+#     rides QUIC STREAM packets, which carry po_flow_hash == 0, so the WLB
+#     scheduler routes them through its MinRTT fallback rather than the
+#     WRR/flow-pinning path used for datagrams. That fallback only ever
+#     reaches for a second path when the lowest-SRTT one is cwnd-blocked, so
+#     on an UNSHAPED pair — where one veth absorbs the whole offered load —
+#     a 100%-on-one-path result is correct behaviour, not a regression. See
+#     the netem call in the Test 8 body for the measurements that settled it.
 #     A separate long-lived v6 TCP-lane flow then proves failover: path 0's
 #     client-side link is dropped mid-flow and the flow must keep making
 #     progress on the surviving path, the same technique
@@ -311,6 +320,38 @@ trap 'cleanup_bg_procs; cleanup_http_server; bench_cleanup; rm -rf "$HTTP_DOCROO
     "$V6_BYTES_FILE"' EXIT
 
 fail=0
+
+# ─── Phase filter ─────────────────────────────────────────────────────────
+# "all" (default) runs everything; "perf" runs ONLY Test 2's throughput
+# comparison. CI uses both: a DEBUG build for the functional phases (asserts
+# must stay live — see the NDEBUG note in AGENTS.md) and a RELEASE build for
+# the throughput gate.
+#
+# The split is not cosmetic. Test 2 gates the RATIO of two code paths, and RAW
+# barely touches this project's own code (classifier + datagram, then the
+# already-optimised vendored xquic) while the stream lane runs lwIP's TCP state
+# machine per segment. At -O0 the ratio is therefore dominated by whatever the
+# compiler emits for OUR sources. Measured on one tree, one host, single path,
+# ~1 Gbit/s RAW:
+#
+#   Debug   clang  19.5 / 19.9 / 22.0 / 22.0 / 24.4 %   <- straddles the gate
+#   Debug   gcc    14.6 / 15.1 %
+#   Release clang   9.0 /  9.1 %
+#   Release gcc    -1.1 /  3.8 %
+#
+# A Debug-built gate thus measures the compiler more than the code, and sits
+# close enough to the 20 % threshold to flip on run-to-run noise. The number is
+# still printed in "all" mode (it is useful diagnostics), but only the perf
+# phase treats it as a hard failure.
+HYBRID_H2_PHASES="${HYBRID_H2_PHASES:-all}"
+case "$HYBRID_H2_PHASES" in
+    all | perf) ;;
+    *)
+        echo "error: HYBRID_H2_PHASES must be 'all' or 'perf' (got '$HYBRID_H2_PHASES')" >&2
+        exit 2
+        ;;
+esac
+echo "[hybrid-h2] phases=${HYBRID_H2_PHASES}"
 
 echo "[hybrid-h2] N=$N_PATHS binary=$MQVPN inner-tcp-port=$INNER_TCP_PORT http-target=${HTTP_TARGET_IP}:${HTTP_TARGET_PORT}"
 bench_check_test_deps nc curl python3 jq iperf3 ss
@@ -745,6 +786,13 @@ time.sleep(${hold})
     echo $!
 }
 
+# ─── Functional phases, part 1 of 2 (Tests 1-1c, 7A, 7B) ──────────────────
+# Skipped under HYBRID_H2_PHASES=perf. The guarded body is deliberately NOT
+# re-indented: it contains python/awk heredocs whose bodies are
+# indentation-sensitive, so re-indenting ~800 lines would risk changing what
+# those scripts do while burying the actual change. The closing `fi` is marked.
+if [ "$HYBRID_H2_PHASES" = all ]; then
+
 # ─── Test 1: curl body correctness, Enabled=true / Tcp=stream ─────────────
 echo ""
 echo "=== Test 1: curl through the tunnel's TCP lane (body byte-for-byte) ==="
@@ -977,7 +1025,11 @@ fi
 
 bench_stop_vpn
 
+fi # ← end of functional phases, part 1 (opened before Test 1)
+
 # ─── Test 2: single-path throughput, stream lane within 20% of RAW ───────
+# Runs in BOTH phase modes: as diagnostics under "all" (Debug), as the hard
+# gate under "perf" (Release). See the HYBRID_H2_PHASES block near the top.
 echo ""
 echo "=== Test 2: single-path throughput (stream lane vs RAW) ==="
 IPERF_DURATION_T2=6
@@ -1007,14 +1059,24 @@ if awk -v r="$RAW_MBPS" 'BEGIN{exit !(r>0)}'; then
     echo "  degradation: ${DEGRADATION_PCT}% (threshold <=20.0%)"
     if awk -v d="$DEGRADATION_PCT" 'BEGIN{exit !(d<=20.0)}'; then
         echo "PASS: stream lane within 20% of RAW (degradation=${DEGRADATION_PCT}%)"
-    else
+    elif [ "$HYBRID_H2_PHASES" = perf ]; then
         echo "FAIL: stream lane degraded ${DEGRADATION_PCT}% vs RAW (threshold 20.0%)"
         fail=1
+    else
+        # Advisory in the Debug phase — the ratio there tracks -O0 codegen, not
+        # shipped performance (see the HYBRID_H2_PHASES block). The perf phase
+        # is where this becomes a gate.
+        echo "ADVISORY: stream lane degraded ${DEGRADATION_PCT}% vs RAW on this"
+        echo "          DEBUG build — not gated here; the RELEASE perf phase gates it"
     fi
 else
     echo "FAIL: RAW_MBPS=0 — iperf3 RAW baseline measurement failed, cannot compute degradation"
     fail=1
 fi
+
+# ─── Functional phases, part 2 of 2 (Tests 3-6, 8) ────────────────────────
+# Same guard and same non-re-indentation rationale as part 1.
+if [ "$HYBRID_H2_PHASES" = all ]; then
 
 # ─── Test 3: multipath aggregation, stream lane >= 1.5x best single path ──
 echo ""
@@ -1583,6 +1645,29 @@ ip netns exec "$NS_CLIENT" sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
 # addressing note above).
 ip netns exec "$NS_SERVER" ip -6 addr add "${V6_EGRESS_IP}/128" dev lo
 
+# Shape both legs before the tunnel comes up. WITHOUT this the load-share
+# assertion below is not a scheduler check but a coin flip: stream-lane
+# packets take WLB's MinRTT fallback (po_flow_hash == 0), which spills onto a
+# second path only while the lowest-SRTT one is cwnd-blocked, and an unshaped
+# veth pair is fast enough that one path never blocks. Measured on the same
+# binary, 2 runs each: unshaped gave minshare 0.00 / 0.00 (and 0.05 / 0.39 on
+# a build with a larger lwIP window — i.e. the outcome tracked an unrelated
+# buffer size, which is precisely what a load-share gate must NOT do), while
+# this shaped topology gave 0.72 / 0.78 / 0.81 / 0.86 across both builds —
+# a 3.6x margin over the >=0.2 threshold with no window sensitivity left.
+# Shaping also caps the burst at 40+100 mbit, so a slow CI runner measures
+# the same region a fast one does.
+#
+# Ordering: bench_setup_netns_n recreates the namespaces (and with them the
+# qdiscs), so netem MUST be applied after the topology, before the tunnel.
+# The profile is re-derived here rather than reusing Test 3's NETEM_A/NETEM_B
+# for the same reason this phase keeps its own copy of the load-share check:
+# Test 8 must not break silently if Test 3 is reordered or dropped.
+NETEM_PROFILE_T8="lte_starlink"
+NETEM_SPEC_T8="${BENCH_ENV_NETEM[$NETEM_PROFILE_T8]}"
+echo "  profile=${NETEM_PROFILE_T8} pathA='${NETEM_SPEC_T8%%|*}' pathB='${NETEM_SPEC_T8#*|}'"
+bench_apply_netem "${NETEM_SPEC_T8%%|*}" "${NETEM_SPEC_T8#*|}"
+
 N_PATHS=2
 hybrid_run "$INI_T8" "$SERVER_LOG_T8" "$CLIENT_LOG_T8"
 
@@ -1644,6 +1729,10 @@ import sys, json
 # not Test 3's repeated run_iperf3_repeated series, so fewer per-path bytes
 # accumulate before the get_status snapshot — while still being far above
 # handshake/probe noise (an idle path can't reach 50 KB on control frames).
+# Measured under the netem profile applied above: the LIGHTER path carried
+# 31.9-33.5 MB across 4 runs, so the floor sits ~640x below the observed
+# value and is doing what it is meant to do (catch a dead path), not
+# gatekeeping throughput.
 FLOOR = 50000
 try:
     d = json.load(sys.stdin)
@@ -1752,6 +1841,8 @@ done
 V6_SOURCE_PID=""; V6_SINK_PID=""
 
 bench_stop_vpn
+
+fi # ← end of functional phases, part 2 (opened before Test 3)
 
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""

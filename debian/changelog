@@ -1,3 +1,36 @@
+mqvpn (0.14.0-1) unstable; urgency=medium
+
+  * feat: Weighted Round Robin (WRR) path scheduler.
+  * chore(deps): bump the xquic fork to 6e7163f.
+  * feat(hybrid): raise the desktop/router TCP-lane flow ceiling to 4096;
+    cut the non-iOS lwIP receive window to 512 KiB (no measured throughput
+    cost); derive PBUF_POOL_SIZE and watermarks from TCP_WND per profile.
+  * feat(config): [Advanced] RecvRateLimit key (INI+JSON parity), with an
+    overflow-safe max and srtt-based safety bound.
+  * refactor(hybrid): rename the mobile lwIP profile to the iOS profile;
+    reject the legacy profile option at configure time.
+  * build: track BoringSSL as a submodule of the xquic fork, pinned to an
+    exact commit; always build it with CMAKE_BUILD_TYPE=Release (an
+    unset build type was compiling it at -O0 with asserts live, costing
+    ~21% VPN throughput and ~7x on X25519); guard build dirs against a
+    stale BoringSSL pin.
+  * feat(android): settings page, event log, and bandwidth chart redesign;
+    stable release signing; remove the embedded demo server address and
+    auth key from the release APK.
+  * feat(ios): hybrid TCP lane settings UI and engine wiring; TLS
+    ServerName configurable separately from the server address.
+  * feat(install): add an install banner; fix VERSION/MQVPN_VERSION
+    variable collision.
+  * fix(mqvpn-server-nat): support JSON config format.
+  * fix(client): classify a CONNECT-IP stream RST before headers as a
+    PROTOCOL connect failure instead of leaving iOS stuck after a 403,
+    while still treating our own local-shutdown teardown as a normal
+    close.
+  * docs: website hybrid-mode guide sync, supported-platforms table,
+    trademark policy.
+
+ -- mqvpn maintainers <maintainers@example.com>  Tue, 28 Jul 2026 12:00:00 +0200
+
 mqvpn (0.12.1-1) unstable; urgency=medium
 
   * fix(server): bind the per-connection context at accept time, closing a

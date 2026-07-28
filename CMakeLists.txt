@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.13.2 LANGUAGES C)
+project(mqvpn VERSION 0.14.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -101,15 +101,48 @@ if(MQVPN_ENABLE_HYBRID_TCP_LANE)
     set(MQVPN_HYBRID_TCP_LANE_BUILD ON)
 endif()
 
-# Mobile lwIP profile (iOS NE memory ceiling). Directory-global on purpose:
+# iOS lwIP profile (Network Extension memory ceiling). Directory-global on purpose:
 # the profile constants are consumed by lwip_core AND tcp_lane.h includers
 # (mqvpn_lib, tests, fuzz, microbench) — per-target defs would silently
 # split the profile across TUs. Must precede every lane target definition.
-option(MQVPN_LWIP_MOBILE_PROFILE
-       "Shrink lwIP TCP-lane buffers for mobile (iOS NE) builds" OFF)
-if(MQVPN_LWIP_MOBILE_PROFILE)
-    add_compile_definitions(MQVPN_LWIP_MOBILE_PROFILE)
+# The pre-rename spelling was a CMake option, so -DMQVPN_LWIP_MOBILE_PROFILE=ON
+# arrives as a cache variable, never as a preprocessor define — the #error in
+# mqvpn_lwip_profile.h cannot see it. Without this check an out-of-tree iOS
+# script still passing the old flag would configure cleanly and silently build
+# the desktop/router profile (512 KiB windows, 8192-pcb pool) into a Network
+# Extension. Reject at configure time; the header guard covers the separate
+# CMAKE_C_FLAGS path.
+if(DEFINED MQVPN_LWIP_MOBILE_PROFILE OR DEFINED MQVPN_LWIP_MOBILE_RCV_SCALE)
+    message(FATAL_ERROR
+            "MQVPN_LWIP_MOBILE_PROFILE/MQVPN_LWIP_MOBILE_RCV_SCALE were renamed to "
+            "MQVPN_LWIP_IOS_PROFILE/MQVPN_LWIP_IOS_RCV_SCALE")
 endif()
+
+option(MQVPN_LWIP_IOS_PROFILE
+       "Shrink lwIP TCP-lane buffers for iOS Network Extension builds" OFF)
+if(MQVPN_LWIP_IOS_PROFILE)
+    add_compile_definitions(MQVPN_LWIP_IOS_PROFILE)
+endif()
+
+# Window-scale overrides. Both are #ifndef-guarded in mqvpn_lwip_profile.h, so
+# they were always reachable via -DCMAKE_C_FLAGS="-DMQVPN_LWIP_RCV_SCALE=5" —
+# but NOT as plain -DMQVPN_LWIP_RCV_SCALE=5, which lands in the CMake cache and
+# reaches no compiler. That asymmetry was a trap: the rename tripwire above
+# rejects -DMQVPN_LWIP_MOBILE_RCV_SCALE at configure time and points at
+# MQVPN_LWIP_IOS_RCV_SCALE, which was then silently ignored in exactly the
+# spelling the message invites — the build would quietly keep the default
+# window while the operator believed they had changed it. Forward them
+# explicitly (directory-global, same reason as the profile option above).
+foreach(_scale_var MQVPN_LWIP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE)
+    if(DEFINED ${_scale_var})
+        if(NOT "${${_scale_var}}" MATCHES "^[0-9]+$")
+            message(FATAL_ERROR
+                    "${_scale_var} must be an integer shift count, got "
+                    "'${${_scale_var}}'")
+        endif()
+        add_compile_definitions(${_scale_var}=${${_scale_var}})
+    endif()
+endforeach()
 
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
 # Server-side connect-tcp egress (src/hybrid/tcp_egress.c): POSIX sockets +
@@ -563,6 +596,11 @@ if(BUILD_TESTING)
     enable_testing()
     add_test(NAME check_lwip_profile_invariance
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
+    # Build-script test, not a library one: it needs no target, no submodule
+    # and no network (throwaway git repos in a temp dir), so it is registered
+    # unconditionally alongside the profile check rather than behind the lane.
+    add_test(NAME check_bssl_build_guard
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_bssl_build_guard.sh)
     add_executable(test_route_parse_darwin
         tests/test_route_parse_darwin.c src/platform/darwin/routing.c
         src/platform/posix/dns_common.c src/log.c)
@@ -708,6 +746,11 @@ if(BUILD_TESTING)
     enable_testing()
     add_test(NAME check_lwip_profile_invariance
              COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_lwip_profile_invariance.sh)
+    # Build-script test, not a library one: it needs no target, no submodule
+    # and no network (throwaway git repos in a temp dir), so it is registered
+    # unconditionally alongside the profile check rather than behind the lane.
+    add_test(NAME check_bssl_build_guard
+             COMMAND bash ${CMAKE_SOURCE_DIR}/tests/check_bssl_build_guard.sh)
 
     # Each test links only the source files it needs (no xquic dependency)
     add_executable(test_config  tests/test_config.c  src/config.c  src/log.c)

@@ -1,11 +1,30 @@
-
 This is a fork of official mqvpn with path weight support.
+
+<div align="center">
+  <h1>
+    <picture>
+      <source
+        media="(prefers-color-scheme: dark)"
+        srcset="website/public/img/mqvpn-lockup-violet-dark.svg">
+      <img
+        src="website/public/img/mqvpn-lockup-violet-light.svg"
+        alt="mqvpn"
+        width="400">
+    </picture>
+  </h1>
+  <p><b>All your connections. One stronger connection.</b></p>
+  <p>
+    <a href="https://docs.mqvpn.org/">Documentation</a> |
+    <a href="https://discord.gg/rjEqtBNtF">Discord community</a>
+  </p>
+</div>
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
 ## Table of Contents
 
 <!--toc:start-->
+- [Supported Platforms](#supported-platforms)
 - [Features](#features)
 - [Installation](#installation)
   - [Server](#server)
@@ -37,10 +56,33 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
 - [Acknowledgments](#acknowledgments)
 <!--toc:end-->
 
+## Supported Platforms
+
+**Server**
+
+| Platform | Minimum version | Status | Notes |
+|---|---|---:|---|
+| [Ubuntu/Debian (amd64/arm64)](#server) | Ubuntu 22.04 / Debian 12 | ✅ | amd64 Recommended |
+| Windows | — | — | Not supported |
+| macOS | — | — | Not supported |
+
+**Client**
+
+| Platform | Minimum version | CLI | GUI/App | Distribution |
+|---|---|---:|---:|---:|
+| [Ubuntu/Debian (amd64/arm64)](#client-deb-package) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
+| [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
+| [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
+| [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
+| iOS | iOS 15 | — | 🚧 | App Store planned |
+| [Android](https://github.com/mp0rta/mqvpn/releases) | Android 8.0 (API 26) | — | 🧪 | APK / F-Droid pending / Play Store planned |
+
+> ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
+
 ## Features
 
 - **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB or WRTT scheduler.
-- **Standards-based** — MASQUE CONNECT-IP (RFC 9484), no proprietary tunnel format.
+- **Standards-based** — the tunnel is MASQUE CONNECT-IP (RFC 9484) over Multipath QUIC. Optional extensions (hybrid TCP lane, reorder) are negotiated in-band; the wire stays standard when they are off.
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
 - **Multi-Platform** — Available on Linux (server/client), Windows (client only), macOS (client only) and Android (client only) support.
 - **PSK auth** — Pre-shared key over TLS 1.3.
@@ -395,7 +437,7 @@ classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
 [Hybrid]
 Enabled = true
 Tcp = auto              # stream | raw | auto (per-flow: TCP lane once >=2 paths are active)
-TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client) / per-session cap (server)
+TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client, up to 4096) / per-session cap (server)
 EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egress ACL
 ```
 
@@ -682,9 +724,12 @@ cd mqvpn
 
 ```bash
 # 1. Build BoringSSL
+# CMAKE_BUILD_TYPE is required — BoringSSL has no default build type, and
+# omitting it produces an unoptimized library (~21% less VPN throughput).
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 
@@ -794,7 +839,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 
 ## Community
 
-Join the [mqvpn community on Zulip](https://mqvpn.zulipchat.com/) to ask questions, discuss use cases, share feedback, and contribute to the project.
+Welcome to join the [mqvpn community on Discord](https://discord.gg/rjEqtBNtF) to ask questions, discuss use cases, share feedback, and contribute to the project.
 
 ## Disclaimer
 
@@ -806,7 +851,7 @@ Use of mqvpn is at your own risk. Users are solely responsible for validating it
 
 If you need commercial support, integration consulting, managed deployments, or SLA inquiries, contact contact@mp0rta.dev.
 
-You can also contact via Zulip.
+You can also contact me via Discord.
 
 
 ## License

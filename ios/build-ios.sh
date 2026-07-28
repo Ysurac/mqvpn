@@ -24,11 +24,13 @@ IOS_CMAKE_FLAGS=(
 
 BSSL_DIR="$SCRIPT_DIR/third_party/xquic/third_party/boringssl"
 BSSL_BUILD="$BSSL_DIR/build-ios"
+source "$SCRIPT_DIR/scripts/bssl_build_guard.sh"
 
 if [ "$PHASE" = "boringssl" ] || [ "$PHASE" = "all" ]; then
     if [ ! -f "$BSSL_DIR/CMakeLists.txt" ]; then
-        echo "=== Cloning BoringSSL ==="
-        git clone https://github.com/google/boringssl.git "$BSSL_DIR"
+        echo "ERROR: BoringSSL not found at $BSSL_DIR."
+        echo "Run: git submodule update --init --recursive"
+        exit 1
     fi
     echo "=== BoringSSL commit: $(git -C "$BSSL_DIR" rev-parse HEAD) ==="
     echo "=== Building BoringSSL (iOS) ==="
@@ -37,15 +39,25 @@ if [ "$PHASE" = "boringssl" ] || [ "$PHASE" = "all" ]; then
     # target's install() rule (configure-time error, unrelated to which
     # targets we actually build). We only need the static libs, so disable
     # bundling instead of patching upstream BoringSSL's CMakeLists.
+    # Provenance guard: a build dir left over from a different pin can hold
+    # the previous revision's archives in the other layout, which
+    # resolve_bssl_libs below would prefer (bssl_build_guard.sh).
+    bssl_guard_build_dir "$BSSL_DIR" "$BSSL_BUILD"
     cmake -S "$BSSL_DIR" -B "$BSSL_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DCMAKE_MACOSX_BUNDLE=OFF
     cmake --build "$BSSL_BUILD" --target ssl crypto
+    bssl_stamp_build_dir "$BSSL_DIR" "$BSSL_BUILD"
 fi
 
 # Newer BoringSSL layouts place archives at the build root instead of
 # ssl/ + crypto/ subdirs (the repo's own root CMake handles both) — probe
 # once, use the resolved paths everywhere below.
 resolve_bssl_libs() {
+    # The xquic/mqvpn phases can run without the boringssl phase (CI restores
+    # the build dir from a pin-keyed cache and skips it) — so consumption is
+    # where a stale dir must be caught. Cannot silently rebuild here: this
+    # phase may not have the flags the boringssl phase used.
+    bssl_verify_build_dir "$BSSL_DIR" "$BSSL_BUILD" || exit 1
     if [ -f "$BSSL_BUILD/ssl/libssl.a" ]; then
         SSL_A="$BSSL_BUILD/ssl/libssl.a"; CRYPTO_A="$BSSL_BUILD/crypto/libcrypto.a"
     else
@@ -100,20 +112,20 @@ if [ "$PHASE" = "mqvpn" ] || [ "$PHASE" = "all" ]; then
     # it builds exactly the sans-I/O static core (mqvpn_lib) and nothing else.
     # BORINGSSL_BUILD_DIR must point at the iOS build — the root CMake default
     # is the host build dir and would resolve wrong/absent SSL libs.
-    # Hybrid lane ON with the mobile lwIP profile (NE memory ceiling).
+    # Hybrid lane ON with the iOS lwIP profile (NE memory ceiling).
     # CMAKE_EXPORT_COMPILE_COMMANDS feeds check_profile_propagation.py below —
     # the _Static_assert in each TU cannot catch an UNpropagated TU (it just
     # takes the default branch and passes), so the compile database is the
     # only place a split-profile build is visible.
     cmake -S "$SCRIPT_DIR" -B "$MQVPN_BUILD" "${IOS_CMAKE_FLAGS[@]}" \
         -DANDROID_CROSS_COMPILE=ON \
-        -DMQVPN_LWIP_MOBILE_PROFILE=ON \
+        -DMQVPN_LWIP_IOS_PROFILE=ON \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DXQUIC_BUILD_DIR="$XQUIC_BUILD" \
         -DBORINGSSL_BUILD_DIR="$BSSL_BUILD"
     cmake --build "$MQVPN_BUILD" --target mqvpn_lib
 
-    echo "=== Checking mobile-profile propagation ==="
+    echo "=== Checking iOS-profile propagation ==="
     python3 "$SCRIPT_DIR/tests/check_profile_propagation.py" "$MQVPN_BUILD"
 
     echo "=== Staging artifacts to $OUT_DIR ==="

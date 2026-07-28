@@ -183,7 +183,7 @@ See [Multipath](./multipath) for scheduler details.
 
 A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged.
 
-> **Scope:** the reorder buffer currently applies to **inner UDP flows only. Inner TCP is not yet handled by the reorder buffer (TODO).** Inner TCP instead relies on the scheduler's flow-pinning (`wlb` / `wlb_udp_pin`), which keeps a TCP flow on a single path, plus TCP's own reordering tolerance (RACK/SACK).
+> **Scope:** the reorder buffer applies to **inner UDP flows only. Inner TCP is not handled by the reorder buffer.** For inner TCP, enable hybrid mode ([`[Hybrid]`](#hybrid) below) instead — the QUIC stream layer restores ordering.
 
 | Key | Description | Default |
 |-----|-------------|---------|
@@ -220,7 +220,7 @@ Port = 53
 Profile = default_udp
 ```
 
-…or from the JSON equivalent. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects (each rule may also carry optional `max_wait_ms` / `cap_packets` overrides):
+The same works in JSON. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects (each rule may also carry optional `max_wait_ms` / `cap_packets` overrides):
 
 ```json
 {
@@ -292,12 +292,37 @@ Terminates inner TCP locally and relays it over an HTTP/3 request stream so a si
 |-----|-------------|------------|---------|
 | `Enabled` | Master switch | client + server | `false` |
 | `Tcp` | Per-flow TCP lane policy: `stream` (always), `raw` (never — byte-identical to hybrid disabled), or `auto` (TCP lane once ≥2 paths are active at SYN time; latched for the flow's lifetime) | client | `auto` |
-| `TcpMaxFlows` | Concurrent TCP-lane flow cap. Client: local flow table (over-cap SYNs fall back to RAW). Server: per client session (over-cap SYNs get HTTP `503`). On the client the value is additionally clamped to half the lwIP TCP pcb pool — `256` on default builds, `64` with the [mobile lwIP profile](./hybrid-mode#mobile-builds-ios) — and the clamp is logged. The other pool half backs TIME_WAIT and half-open pcbs the flow table doesn't count; without that headroom, pcb exhaustion would silently hang new SYNs instead of the explicit reject (RST) firing | client + server | `256` |
+| `TcpMaxFlows` | Concurrent TCP-lane flow cap. **The client and the server enforce it on different machinery and fail differently** — see **Notes on `TcpMaxFlows`** right below this table | client + server | `256` |
 | `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
 | `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
 | `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
 | `EgressAllow` | CIDR allowed through the default-deny egress ACL for private ranges (repeatable, up to 32) | server | — |
 | `EgressDeny` | Additional CIDR to block, evaluated after `EgressAllow` (repeatable, up to 32) | server | — |
+
+#### Notes on `TcpMaxFlows`
+
+`TcpMaxFlows` behaves differently on the client and the server.
+The two sides share the key name and nothing else: what is counted, and what happens when
+the cap is hit, both differ.
+
+| | client | server |
+|---|---|---|
+| Counted in | the lane's own flow table | per client session |
+| Checked | **before lwIP ever sees the SYN** | when the CONNECT-TCP request arrives |
+| Inner TCP terminated | yes, by lwIP inside the lane | no — relayed over ordinary kernel sockets |
+| **Over the cap** | **degraded to the RAW lane** — the connection still works | **HTTP `503`**, and the client then **resets** that inner connection; no RAW fallback at that point |
+| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~8 KiB** (two lazily-allocated 4 KiB relay chunks) plus one fd |
+| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first |
+| Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
+
+**Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —
+`4096` on desktop/router builds (Linux, Windows, macOS), `256` on Android, `64`
+with the [iOS lwIP profile](./hybrid-mode#ios-builds).
+
+**It does not halve your quota.** You may run the full honored number of flows at once.
+The other pool half is reserved as headroom for pcbs the flow table has stopped
+counting — TIME_WAIT, LAST_ACK and CLOSING outlive the flow itself.
+
 
 In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`).
 
@@ -315,7 +340,7 @@ In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_
 
 ## MTU Guidelines
 
-### Default (auto) — most deployments
+### Default (auto)
 
 For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on standard Ethernet (1500), PPPoE (1492), and mobile networks.
 

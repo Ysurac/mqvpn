@@ -68,37 +68,51 @@
 /* Per opt.h: "when using TCP_RCV_SCALE, TCP_WND is the total size WITH
  * scaling applied" — i.e. TCP_WND is the effective receive window in bytes
  * (post-scaling total) and the 16-bit header field advertises
- * TCP_WND >> TCP_RCV_SCALE (tcp_out.c). The effective ~2 MB window must
+ * TCP_WND >> TCP_RCV_SCALE (tcp_out.c). The effective window must
  * therefore be encoded in TCP_WND itself; the scale factor only widens the
- * wire encoding. 65535 << 5 = 2,097,120 (~2 MB effective; header advertises
- * 65535, the 16-bit max). tcpwnd_size_t is u32_t when LWIP_WND_SCALE==1
- * (tcpbase.h), so this fits. */
-#ifdef MQVPN_LWIP_MOBILE_PROFILE
-/* Mobile (iOS NE) profile — the on-device lwIP hop only needs a small
+ * wire encoding. At the shipped non-iOS scale 3 that is 65535 << 3 = 524,280
+ * (512 KiB effective; the header advertises 65535, the 16-bit max).
+ * tcpwnd_size_t is u32_t when LWIP_WND_SCALE==1 (tcpbase.h), so this fits. */
+#ifdef MQVPN_LWIP_IOS_PROFILE
+/* iOS NE profile — the on-device lwIP hop only needs a small
  * window; WAN in-flight lives in the QUIC layer. Derives from the scale. */
-#  define TCP_RCV_SCALE    MQVPN_LWIP_MOBILE_RCV_SCALE
-#  define TCP_SND_BUF      (65536 << MQVPN_LWIP_MOBILE_RCV_SCALE)
-#  define MEMP_NUM_TCP_PCB 128 /* tcp_max_flows=64 + headroom */
-#  define MEMP_NUM_TCP_SEG 512 /* shared send+OOSEQ pool, ~4.4 MiB cap */
-/* init.c check: TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - headers).
- * ceil(TCP_WND/8900)+1 rounded UP to a power of two (spec-pinned values:
- * scale=2 -> 32, scale=3 -> 64). */
-#  define MQVPN_LWIP_PBUF_NEED ((((65535 << MQVPN_LWIP_MOBILE_RCV_SCALE)) / 8900) + 1)
-#  if MQVPN_LWIP_PBUF_NEED <= 32
-#    define PBUF_POOL_SIZE 32
-#  elif MQVPN_LWIP_PBUF_NEED <= 64
-#    define PBUF_POOL_SIZE 64
-#  else
-#    define PBUF_POOL_SIZE 128
-#  endif
+#  define TCP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE
+#  define TCP_SND_BUF   (65536 << MQVPN_LWIP_IOS_RCV_SCALE)
 #else
-#  define TCP_RCV_SCALE    5 /* shift count for the wire encoding, range [0..14] */
-#  define TCP_SND_BUF      (2 * 1024 * 1024)
-#  define MEMP_NUM_TCP_PCB 512
-#  define MEMP_NUM_TCP_SEG 2048
-#  define PBUF_POOL_SIZE   256
+#  define TCP_RCV_SCALE MQVPN_LWIP_RCV_SCALE /* shift count, range [0..14] */
+#  define TCP_SND_BUF   (2 * 1024 * 1024)
 #endif
-#define TCP_WND (65535 << TCP_RCV_SCALE) /* shared derivation, both profiles */
+/* init.c check: TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - headers).
+ * ceil(TCP_WND/8900)+1 rounded UP to a power of two. ONE ladder for every
+ * profile, keyed off whichever TCP_RCV_SCALE was selected above, rather than
+ * a per-profile ladder plus a hardcoded non-iOS constant: the constant was
+ * pinned to the shipped scale, so benchmarks/bench_router_window.sh — whose
+ * whole job is sweeping MQVPN_LWIP_RCV_SCALE, and whose DEFAULT sweep starts
+ * at the 2 MiB reference — could no longer build its own reference point once
+ * the shipped window dropped to 512 KiB (lwIP's sanity #error, init.c).
+ * Shipped values are unchanged: iOS scale 2 -> 32, non-iOS scale 3 -> 64.
+ * The sweep's other rungs now resolve too: scale 4 -> 128, scale 5 -> 256.
+ * A scale above 6 overflows the ladder and is caught by that same lwIP
+ * #error at compile time, which is the intended failure for a window nobody
+ * has sized the rest of the budget for. */
+#define MQVPN_LWIP_PBUF_NEED (((65535 << TCP_RCV_SCALE) / 8900) + 1)
+#if MQVPN_LWIP_PBUF_NEED <= 32
+#  define PBUF_POOL_SIZE 32
+#elif MQVPN_LWIP_PBUF_NEED <= 64
+#  define PBUF_POOL_SIZE 64
+#elif MQVPN_LWIP_PBUF_NEED <= 128
+#  define PBUF_POOL_SIZE 128
+#elif MQVPN_LWIP_PBUF_NEED <= 256
+#  define PBUF_POOL_SIZE 256
+#else
+#  define PBUF_POOL_SIZE 512
+#endif
+/* Pool sizing is a THREE-way split (iOS / Android / desktop-router) and lives
+ * in the profile header — unlike the window sizing above it keys on the
+ * toolchain's __ANDROID__ predefine, not on the CMake option. */
+#define MEMP_NUM_TCP_PCB MQVPN_LWIP_TCP_PCB_POOL
+#define MEMP_NUM_TCP_SEG MQVPN_LWIP_TCP_SEG_POOL
+#define TCP_WND          (65535 << TCP_RCV_SCALE) /* shared derivation, all profiles */
 /* TCP_SNDLOWAT: only consumed by the netconn/sockets layer (api_msg.c),
  * which is compiled out here (LWIP_NETCONN=0, LWIP_SOCKET=0) — but opt.h's
  * default formula (TCP_SND_BUF/2 = 1 MB) trips init.c's unconditional
@@ -113,29 +127,40 @@
 
 /* mqvpn's tcp_max_flows default is 256; this pool is the hard lwIP-side
  * cap — the hybrid.tcp_max_flows check in tcp_lane.c is the real
- * enforcement point (spec: on reject → tcp_abort, do NOT silently fall to
- * RAW). To keep that check reachable, mqvpn_tcp_lane_new clamps
- * tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs
- * TIME_WAIT/half-open pcbs the flow table doesn't count): default profile
- * 512/2 = 256 == the config default; mobile profile 128/2 = 64 == the iOS
- * NE value. A cap above the clamp would let tcp_alloc() start failing
- * SYNs (silent hang, no RST) before the cap check ever ran. */
+ * enforcement point. That check runs BEFORE lwIP sees the SYN, and a hit
+ * falls back to the RAW CONNECT-IP lane (mqvpn_client.c); it is the
+ * POST-accept rejection inside the lane that must tcp_abort instead, since
+ * by then lwIP has already answered the SYN. To keep that check reachable,
+ * mqvpn_tcp_lane_new clamps tcp_max_flows to MEMP_NUM_TCP_PCB / 2 (the other half backs
+ * the TIME_WAIT/LAST_ACK/CLOSING pcbs the flow table has stopped counting — see the clamp
+ * comment in tcp_lane.c), so the pool is what sets each profile's honored ceiling:
+ * desktop/router 8192/2 = 4096, Android 512/2 = 256 == the config default, iOS 128/2
+ * = 64. A cap above the clamp would let tcp_alloc() start failing SYNs (silent hang, no
+ * RST) before the cap check ever ran. Raising the ceiling raises only what an operator
+ * MAY configure — the config default stays 256 on every profile. */
 /* MEMP_NUM_TCP_SEG is a GLOBAL pool shared by all flows, sized per profile
- * (default 2048 / mobile 512). Either way it covers only a few flows at
- * full TCP_SND_BUF (TCP_SND_QUEUELEN caps one pcb at 4*TCP_SND_BUF/MSS
- * segments: default 937 of 2048 ~ 2 flows, mobile scale=2 118 of 512 ~ 4
- * flows). tcp_write() returns ERR_MEM on pool exhaustion — the TCP-lane
- * relay (tcp_lane.c) MUST handle that as backpressure (retry on
- * sent-callback), it is not optional. */
+ * (desktop/router 8192 / Android 2048 / iOS 512). Either way it covers
+ * only a few flows at full TCP_SND_BUF (TCP_SND_QUEUELEN caps one pcb at
+ * 4*TCP_SND_BUF/MSS segments: 937 with the 2 MiB send buffer, iOS
+ * scale=2 118 of 512 ~ 4 flows). tcp_write() returns ERR_MEM on pool
+ * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
+ * backpressure (retry on sent-callback), it is not optional. The pool is
+ * therefore a throughput knob, not a correctness one; it tracks the pcb
+ * pool so that a fully-occupied flow table still has segments per flow. */
 /* PBUF_POOL_SIZE: sized to satisfy init.c's compile-time sanity check
  * (TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - protocol headers)),
  * which lwIP enforces unconditionally whenever MEMP_MEM_MALLOC == 0 and
  * PBUF_POOL_SIZE > 0 (init.c) — REGARDLESS of whether this project's own
  * code actually allocates PBUF_POOL pbufs (see the RESOLVED note below).
- * Default profile: with TCP_WND ~2 MB and ~8946 usable bytes per pool pbuf
- * (9000 - 54 header bytes), 128 pbufs (~1.1 MB) is too small; 256 gives
- * ~2.29 MB >= 2,097,120. The mobile profile derives its (smaller) size from
- * TCP_WND via the power-of-two ladder above.
+ * Desktop/router and Android profiles: with TCP_WND 524,280 and ~8946 usable
+ * bytes per pool pbuf (9000 - 54 header bytes), the check needs
+ * ceil(524280/8946) = 59 pbufs; the ladder above rounds that to 64, giving
+ * ~572 KB >= 524,280. It was a hardcoded 256 while TCP_WND was 2 MiB — the
+ * window cut (mqvpn_lwip_profile.h) made three quarters of that reservation
+ * dead weight, ~1.6 MiB of .bss that every non-iOS lane, Android included,
+ * was paying for a pool the data path does not even draw from. Every profile
+ * now derives its size from TCP_WND through the one ladder, so a window
+ * change carries the pool with it instead of stranding it.
  *
  * RESOLVED (I1, cross-flow PBUF_POOL exhaustion DoS): mqvpn_lwip_input
  * (lwip_glue.c) allocates every ingress packet as PBUF_RAM (exact-size,
@@ -148,8 +173,8 @@
  * OTHER flow. PBUF_RAM's pbuf_take copy cost is unchanged; the real
  * per-flow bound is now TCP_WND (the pcb's own receive window), which the
  * TCP-lane relay (tcp_lane.c) already backpressures against via recved
- * withholding. PBUF_POOL_SIZE stays 256 purely to satisfy the compile-time
- * check above — it no longer bounds ingress throughput. */
+ * withholding. PBUF_POOL_SIZE stays nonzero purely to satisfy the
+ * compile-time check above — it no longer bounds ingress throughput. */
 #define PBUF_POOL_BUFSIZE LWIP_MEM_ALIGN_SIZE(TCP_MSS + 40 + PBUF_LINK_ENCAPSULATION_HLEN)
 
 /* Checksums: keep ON in v1 (fuzz safety per spec Notes) — this is a known

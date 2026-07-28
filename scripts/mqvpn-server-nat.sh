@@ -27,17 +27,31 @@ if [ ! -f "$CONFIG" ]; then
     exit 1
 fi
 
+# Detect config format once (matches mqvpn_config_load() in src/config.c).
+# JSON if first non-whitespace character is '{', INI otherwise.
+config_is_json=0
+[ "$(tr -d '[:space:]' < "$CONFIG" | head -c 1)" = "{" ] && config_is_json=1
+
+# Read a value from the config, supporting both INI and JSON formats.
+read_config_value() {
+    local json_key="$1" ini_key="$2" default="$3"
+    local value=""
+
+    if [ "$config_is_json" -eq 1 ]; then
+        value=$(sed -n 's/.*"'"${json_key}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | tail -1 || true)
+    else
+        value=$(sed -n 's/^[[:space:]]*'"$ini_key"'[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    fi
+
+    echo "${value:-$default}"
+}
+
 # Read Subnet from config (fallback: 10.0.0.0/24)
-SUBNET=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
-SUBNET="${SUBNET:-10.0.0.0/24}"
-
+SUBNET=$(read_config_value "subnet"   "Subnet"   "10.0.0.0/24")
 # Read Subnet6 from config (optional, empty if not set)
-SUBNET6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
-SUBNET6="${SUBNET6:-}"
-
+SUBNET6=$(read_config_value "subnet6"  "Subnet6"  "")
 # Read TunName from config (fallback: mqvpn0)
-TUN_NAME=$(sed -n 's/^[[:space:]]*TunName[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
-TUN_NAME="${TUN_NAME:-mqvpn0}"
+TUN_NAME=$(read_config_value "tun_name" "TunName"  "mqvpn0")
 
 COMMENT="mqvpn-server-nat"
 STATE_DIR="/run/mqvpn"

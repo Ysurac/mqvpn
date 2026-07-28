@@ -7,12 +7,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  # Single source of truth for the BoringSSL pin in this workflow. MUST stay
-  # in lockstep with release.yml's BORINGSSL_COMMIT: CI must test the exact
-  # dependency revision the release builds ship.
-  BORINGSSL_COMMIT: "9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c"
-
 jobs:
   format-check:
     runs-on: ubuntu-latest
@@ -62,27 +56,34 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (gcc fPIC)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-linux-gcc-fpic-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-gcc-fpic-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+          # CMAKE_BUILD_TYPE is mandatory: BoringSSL sets no default, so
+          # omitting it builds at -O0 and enables BORINGSSL_DISPATCH_TEST
+          # instrumentation (~21% VPN throughput, ~7x on X25519). The cache
+          # key is bumped with it — the cached path holds the build dir.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
+
+      # Deliberately not gated on the cache miss: a cache restored from before
+      # the CMAKE_BUILD_TYPE fix is exactly what this is meant to catch.
+      - name: Verify BoringSSL is an optimized build
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Cache xquic (Release)
         id: xquic-cache
@@ -97,7 +98,10 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-9c95ec7-v4
+          # v5: libxquic.so statically absorbs BoringSSL (hidden-visibility
+          # symbols), so a cached xquic build outlives a BoringSSL flag change
+          # unless this key moves with it.
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-gcc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v5
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -155,25 +159,25 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (clang fPIC)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-linux-clang-fpic-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-clang-fpic-v1
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — the clang Debug arms want
+          # BoringSSL unoptimized with its asserts live. Release belongs on the
+          # shipping builds only (see the `build` job).
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
@@ -185,7 +189,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -412,25 +416,23 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX=/tmp/libevent-msan ..
           make -j$(nproc) && make install
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (clang MSan)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-linux-clang-msan-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-clang-msan-v1
 
       - name: Build BoringSSL (clang + MSan)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — see the sanitizer job.
           CC=clang CXX=clang++ cmake \
             -DBUILD_SHARED_LIBS=0 \
             -DBUILD_TESTING=OFF \
@@ -446,7 +448,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-9c95ec7-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-msan-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
 
       - name: Build xquic (clang + MSan)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -612,26 +614,24 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (darwin arm64 clang)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-darwin-arm64-clang-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-darwin-arm64-clang-v2
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 ..
+          # See the linux-build job re: why CMAKE_BUILD_TYPE is mandatory.
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release ..
           make -j"$(sysctl -n hw.ncpu)" ssl crypto
 
       - name: Cache xquic (darwin Release)
@@ -642,7 +642,8 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-9c95ec7-v1
+          # v2: bumped with the BoringSSL cache — see the linux-build job.
+          key: xquic-${{ steps.xqsha.outputs.sha }}-darwin-arm64-clang-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -686,42 +687,42 @@ jobs:
       - name: Run Darwin unit tests
         run: ctest --test-dir build-darwin --output-on-failure
 
-      # Mobile lwIP profile coverage: the only other consumer of
-      # MQVPN_LWIP_MOBILE_PROFILE is ios/build-ios.sh (not run in CI), so
-      # without this step every mobile-only #if branch, _Static_assert, and
+      # iOS lwIP profile coverage: the only other consumer of
+      # MQVPN_LWIP_IOS_PROFILE is ios/build-ios.sh (not run in CI), so
+      # without this step every iOS-only #if branch, _Static_assert, and
       # lwIP init.c compile-time bound is unexercised by automation — a
-      # default-profile-valid change that breaks a mobile constraint would
+      # default-profile-valid change that breaks an iOS constraint would
       # merge green and only surface at the next local iOS build.
       # CMAKE_EXPORT_COMPILE_COMMANDS feeds check_profile_propagation.py
       # (an unpropagated TU takes the default branch and passes its own
       # _Static_assert — only the compile database shows a split profile).
-      - name: Build mqvpn (mobile lwIP profile) + propagation check
+      - name: Build mqvpn (iOS lwIP profile) + propagation check
         run: |
-          cmake -B build-darwin-mobile -DCMAKE_BUILD_TYPE=Debug \
+          cmake -B build-darwin-ios -DCMAKE_BUILD_TYPE=Debug \
             -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build" \
             -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
             -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
-            -DMQVPN_LWIP_MOBILE_PROFILE=ON \
+            -DMQVPN_LWIP_IOS_PROFILE=ON \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
-          cmake --build build-darwin-mobile --target mqvpn_lib test_tcp_lane \
+          cmake --build build-darwin-ios --target mqvpn_lib test_tcp_lane \
             -j "$(sysctl -n hw.ncpu)"
-          python3 tests/check_profile_propagation.py build-darwin-mobile
+          python3 tests/check_profile_propagation.py build-darwin-ios
 
       # Only test_tcp_lane: check_lwip_profile_invariance preprocesses BOTH
       # profiles from source itself (build-dir-independent), so the default
       # tree's unfiltered ctest above already covers it — re-running it here
       # would imply extra coverage this tree does not add.
-      - name: Run mobile-profile TCP-lane tests
+      - name: Run iOS-profile TCP-lane tests
         run: |
-          ctest --test-dir build-darwin-mobile -R "test_tcp_lane" --output-on-failure
+          ctest --test-dir build-darwin-ios -R "test_tcp_lane" --output-on-failure
 
   # iOS: the real cross-build chain (BoringSSL -> xquic -> libmqvpn, all
-  # iphoneos/arm64 static, mobile lwIP profile) plus the Swift host tests and
+  # iphoneos/arm64 static, iOS lwIP profile) plus the Swift host tests and
   # an UNSIGNED xcodebuild of the app + PacketTunnel extension against the
   # staged archives. This is the only job that compiles the Swift sources and
   # links the extension the way a device build does — the darwin job's
-  # mobile-profile step covers the C core only. Device/simulator execution
+  # iOS-profile step covers the C core only. Device/simulator execution
   # stays a manual gate (needs signing + hardware).
   ios:
     # macos-15, not macos-14: current xcodegen emits the Xcode 16+ project
@@ -752,19 +753,22 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The cached tree carries the provenance stamp that build-ios.sh's later
+      # phases verify (scripts/bssl_build_guard.sh), so a change to how that
+      # digest is computed invalidates every existing entry: on a hit the
+      # BoringSSL step below is skipped, nothing re-stamps, and the mqvpn phase
+      # fails. Bump the suffix whenever the digest definition changes — v5 is
+      # the exclusion of in-tree build dirs.
       - name: Cache BoringSSL (iOS arm64)
         id: bssl-ios-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-ios-arm64-v2
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-ios-arm64-v5
 
       - name: Build BoringSSL (iOS)
         if: steps.bssl-ios-cache.outputs.cache-hit != 'true'
@@ -778,15 +782,15 @@ jobs:
           path: |
             third_party/xquic/build-ios
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-ios-arm64-release-bssl-9c95ec7-v2
+          key: xquic-${{ steps.xqsha.outputs.sha }}-ios-arm64-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v2
 
       - name: Build xquic (iOS)
         if: steps.xquic-ios-cache.outputs.cache-hit != 'true'
         run: ./ios/build-ios.sh xquic
 
       # Always from scratch (the script rm -rf's its build dir for ABI
-      # consistency); also runs the mobile-profile propagation check against
-      # the REAL iphoneos build — the darwin-mobile step above checks the
+      # consistency); also runs the iOS-profile propagation check against
+      # the REAL iphoneos build — the darwin iOS-profile step above checks the
       # same property on a host build.
       - name: Build libmqvpn (iOS) + stage archives
         run: ./ios/build-ios.sh mqvpn
@@ -838,20 +842,16 @@ jobs:
         shell: bash
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (MSVC)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-windows-msvc-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git `
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl
-          git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-windows-msvc-v1
 
       - name: Build BoringSSL
         if: steps.bssl-cache.outputs.cache-hit != 'true'
@@ -871,7 +871,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-9c95ec7-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-windows-msvc-release-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -939,7 +939,8 @@ jobs:
           XQUIC_SHA=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+')
           # An lwIP fork bump must not serve stale prebuilts.
           LWIP_SHA=$(git submodule status third_party/lwip | awk '{print $1}' | tr -d '+')
-          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-9c95ec7-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
+          BSSL_SHA=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)
+          echo "key=ndk-android-arm64-v8a-${{ hashFiles('scripts/build_android.sh', 'CMakeLists.txt', 'src/**/*.c', 'src/**/*.h', 'include/**/*.h') }}-${XQUIC_SHA}-bssl-${BSSL_SHA}-lwip-${LWIP_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Cache NDK prebuilt libraries
         id: ndk-cache
@@ -947,15 +948,6 @@ jobs:
         with:
           path: android/sdk-native/prebuilt
           key: ${{ steps.ndk-cache-key.outputs.key }}
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.ndk-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl
-          git fetch --depth 1 origin ${{ env.BORINGSSL_COMMIT }}
-          git checkout ${{ env.BORINGSSL_COMMIT }}
 
       - name: NDK cross-compile (arm64-v8a)
         if: steps.ndk-cache.outputs.cache-hit != 'true'
@@ -1039,25 +1031,25 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (clang fPIC)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-linux-clang-fpic-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-clang-fpic-v1
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — the clang Debug arms want
+          # BoringSSL unoptimized with its asserts live. Release belongs on the
+          # shipping builds only (see the `build` job).
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
@@ -1068,7 +1060,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
@@ -1091,11 +1083,30 @@ jobs:
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc)
 
+      # Release build for the throughput phase ONLY. The functional suite must
+      # stay Debug (Release defines NDEBUG and silently no-ops assert()), but
+      # Test 2 gates the RATIO of two code paths and that ratio is dominated by
+      # -O0 codegen: on one tree it reads 19.5-24.4 % under clang -O0 and
+      # 9.0-9.1 % under clang -O3 (gcc: 14.6-15.1 % vs -1.1-3.8 %). Gating the
+      # Debug build measured the compiler, and sat close enough to the 20 %
+      # threshold to flip on noise. Only mqvpn+lwIP are rebuilt here — xquic
+      # stays the cached Debug build, so these are ratio numbers, not shipping
+      # throughput.
+      - name: Build mqvpn (clang, Release — throughput phase)
+        run: |
+          CC=clang cmake -B build-release -DCMAKE_BUILD_TYPE=Release \
+                -DMQVPN_ENABLE_HYBRID_TCP_LANE=ON \
+                -DXQUIC_BUILD_DIR="$GITHUB_WORKSPACE/third_party/xquic/build"
+          cmake --build build-release --target mqvpn -j"$(nproc)"
+
       - name: E2E hybrid H1 classifier/counters (netns)
         run: sudo -E tests/test_e2e_hybrid_h1.sh build/mqvpn
 
-      - name: E2E hybrid H2 TCP-lane suite (netns)
+      - name: E2E hybrid H2 TCP-lane suite (netns, functional phases)
         run: sudo -E tests/test_e2e_hybrid_h2.sh build/mqvpn
+
+      - name: E2E hybrid H2 throughput gate (netns, Release build)
+        run: HYBRID_H2_PHASES=perf sudo -E tests/test_e2e_hybrid_h2.sh build-release/mqvpn
 
   hybrid-egress-off:
     # Pins the LANE=ON / EGRESS=OFF build shape (client TCP lane compiled
@@ -1120,25 +1131,25 @@ jobs:
         id: xqsha
         run: echo "sha=$(git submodule status third_party/xquic | awk '{print $1}' | tr -d '+-')" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve BoringSSL pin
+        id: bssl-pin
+        run: echo "sha=$(git -C third_party/xquic/third_party/boringssl rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Cache BoringSSL (clang fPIC)
         id: bssl-cache
         uses: actions/cache@v6
         with:
           path: third_party/xquic/third_party/boringssl
-          key: bssl-9c95ec7-linux-clang-fpic-v1
-
-      - name: Clone BoringSSL (pinned)
-        if: steps.bssl-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl && git checkout ${{ env.BORINGSSL_COMMIT }}
+          key: bssl-${{ steps.bssl-pin.outputs.sha }}-linux-clang-fpic-v1
 
       - name: Build BoringSSL (clang)
         if: steps.bssl-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic/third_party/boringssl
           mkdir -p build && cd build
+          # No CMAKE_BUILD_TYPE here on purpose — the clang Debug arms want
+          # BoringSSL unoptimized with its asserts live. Release belongs on the
+          # shipping builds only (see the `build` job).
           CC=clang CXX=clang++ cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
@@ -1149,7 +1160,7 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-9c95ec7-v4
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-v4
 
       - name: Build xquic (clang)
         if: steps.xquic-cache.outputs.cache-hit != 'true'
