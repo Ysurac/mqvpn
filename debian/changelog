@@ -1,3 +1,20 @@
+mqvpn (0.14.1-1) unstable; urgency=medium
+
+  * feat(sched): add the redundant (broadcast) multipath scheduler --
+    duplicates traffic onto every path and keeps throughput steady
+    through a total loss of one path; new CLI/config option, dispatch
+    and QoS unit tests, and a ci_bench_redundant_verify.sh integration
+    check.
+  * chore(deps): bump the xquic fork to fix a livelock in the redundant
+    scheduler's origin/replica cleanup; repoint the submodule at the
+    fork's pushable mqvpn-omr-main branch.
+  * bench(hybrid): add asymmetric (300/80) netem hybrid TCP-lane
+    results with CSV-driven plotting; sync README and website docs.
+  * ci: fix the test-pending-regression workflow; add MTU-max and
+    openvpn-over-mqvpn CI benchmark scripts; update example configs.
+
+ -- mqvpn maintainers <maintainers@example.com>  Thu, 30 Jul 2026 14:00:00 +0200
+
 mqvpn (0.14.0-1) unstable; urgency=medium
 
   * feat: Weighted Round Robin (WRR) path scheduler.
