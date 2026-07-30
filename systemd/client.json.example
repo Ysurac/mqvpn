@@ -1,6 +1,7 @@
 {
   "mode": "client",
   "server_addr": "your-server.example.com:443",
+  "tls_server_name": "",
   "auth_key": "<YOUR_PSK_HERE>",
   "auth_username": "",
   "cipher": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
@@ -22,8 +23,12 @@
   "fec_scheme": "xor",
   "paths": ["eth0", "wlan0"],
   "backup_paths": [],
+  "init_max_path_id": 0,
   "control_port": 0,
   "control_addr": "127.0.0.1",
+  "advanced": {
+    "recv_rate_limit": 0
+  },
   "reorder": {
     "enabled": "off",
     "max_wait_ms": 30,

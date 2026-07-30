@@ -30,14 +30,16 @@ MaxClients = 64
 # Addr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
 
 [Multipath]
-# Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|backup_fec|rap
+# Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|wrr|backup|backup_fec|rap
 # wrtt = weighted RTT aggregation; adjust per-path weights at runtime via set_path_weight control API
+# wrr  = weighted round robin; interleaves packets across paths in proportion to weight
 Scheduler = wlb
-# CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited (default bbr2)
+# CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited|none (default bbr2)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
+# InitMaxPathId = 8     # draft-21 initial_max_path_id TP; lower it (e.g. 2) to force PATHS_BLOCKED for testing
 
 # [Hybrid]
 # Hybrid TCP lane: relay inbound TCP from clients through the server's egress
@@ -60,7 +62,7 @@ Scheduler = wlb
 # [ReorderRule]              # bulk inner QUIC: reorder on
 # Proto = udp
 # Port = 443
-# Profile = fiber_lte        # cellular_bond|fiber_lte|quic_bulk|default_udp (pass-through)
+# Profile = fiber_lte        # cellular_bond|fiber_lte|quic_bulk|low_latency|default_udp (pass-through)
 
 # [ReorderRule]              # DNS: never delay
 # Proto = udp

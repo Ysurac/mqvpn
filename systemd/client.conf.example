@@ -4,6 +4,7 @@
 
 [Server]
 Address = your-server.example.com:443
+# ServerName = your-server.example.com   # TLS SNI/verification name, if different from Address host
 # Insecure = false
 
 [TLS]
@@ -29,10 +30,11 @@ LogLevel = info
 # Addr = 127.0.0.1     # bind address (default: 127.0.0.1, loopback only)
 
 [Multipath]
-# Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|backup_fec|rap (default: wlb)
+# Scheduler: minrtt|wlb|wlb_udp_pin|wrtt|wrr|backup|backup_fec|rap (default: wlb)
 # wrtt = weighted RTT aggregation; adjust per-path weights at runtime via set_path_weight control API
+# wrr  = weighted round robin; interleaves packets across paths in proportion to weight
 Scheduler = wlb
-# CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited (default bbr2)
+# CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited|none (default bbr2)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
@@ -40,6 +42,7 @@ Scheduler = wlb
 # Path = eth0
 # Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
+# InitMaxPathId = 8   # draft-21 initial_max_path_id TP; lower it (e.g. 2) to force PATHS_BLOCKED for testing
 
 # [Reorder]
 # Enabled = off              # on|off — reorder buffer for inner UDP (off by default)
@@ -49,9 +52,12 @@ Scheduler = wlb
 # [ReorderRule]              # bulk inner QUIC: reorder on
 # Proto = udp
 # Port = 443
-# Profile = fiber_lte        # cellular_bond|fiber_lte|quic_bulk|default_udp (pass-through)
+# Profile = fiber_lte        # cellular_bond|fiber_lte|quic_bulk|low_latency|default_udp (pass-through)
 
 # [ReorderRule]              # DNS: never delay
 # Proto = udp
 # Port = 53
 # Profile = default_udp
+
+# [Advanced]
+# RecvRateLimit = 0    # client-only: cap QUIC receive window to N bytes/sec (0 = no cap)
