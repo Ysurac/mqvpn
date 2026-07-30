@@ -144,6 +144,41 @@ test_backup_fec_two_paths_no_warn(void)
 }
 
 static int
+test_redundant_dispatch(void)
+{
+    xqc_conn_settings_t cs;
+    memset(&cs, 0, sizeof(cs));
+    mqvpn_apply_scheduler(&cs, MQVPN_SCHED_REDUNDANT);
+    ASSERT_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+              xqc_redundant_scheduler_cb.xqc_scheduler_get_path);
+    return 0;
+}
+
+static int
+test_redundant_single_path_no_warn(void)
+{
+    /* Single-path redundant is fine — with no other path to duplicate onto
+       it just behaves like minrtt. */
+    ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_REDUNDANT, 1), false);
+    return 0;
+}
+
+static int
+test_dgram_qos_for_redundant(void)
+{
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_REDUNDANT), XQC_DATA_QOS_HIGH);
+    return 0;
+}
+
+static int
+test_redundant_enum_value(void)
+{
+    /* REDUNDANT must have a distinct value so scheduler dispatch switch is unambiguous */
+    ASSERT_EQ((int)MQVPN_SCHED_REDUNDANT, 8);
+    return 0;
+}
+
+static int
 test_wlb_single_path_no_warn(void)
 {
     ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_WLB, 1), false);
@@ -198,6 +233,10 @@ main(void)
     failed += test_dgram_qos_for_other_schedulers();
     failed += test_wlb_single_path_no_warn();
     failed += test_minrtt_zero_paths_no_warn();
+    failed += test_redundant_dispatch();
+    failed += test_redundant_single_path_no_warn();
+    failed += test_dgram_qos_for_redundant();
+    failed += test_redundant_enum_value();
     if (failed) {
         fprintf(stderr, "test_scheduler: %d FAILED\n", failed);
         return 1;

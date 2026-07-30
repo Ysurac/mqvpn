@@ -25,7 +25,7 @@ typedef struct mqvpn_server_cfg_s {
     const char *key_file;           /* TLS private key path */
     const char *tls_ciphers;        /* TLS cipher suites list */
     int log_level;                  /* mqvpn_log_level_t */
-    int scheduler;                  /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin, 6=wrtt, 7=wrr */
+    int scheduler;                  /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin, 6=wrtt, 7=wrr, 8=redundant */
     int reinjection_control;        /* 1=enable reinjection control */
     int reinjection_mode;           /* 0=default, 1=deadline, 2=dgram */
     int fec_enable;                 /* 1=enable FEC */

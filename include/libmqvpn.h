@@ -120,6 +120,10 @@ typedef enum {
                                    * all usable paths in proportion to weight (smooth
                                    * WRR), unlike WRTT's single-path-until-cwnd-blocked
                                    * bias. Set via mqvpn_path_desc_t.weight. Default: 1. */
+    MQVPN_SCHED_REDUNDANT   = 8, /* Broadcast every packet on every usable path
+                                   * (AVAILABLE and STANDBY alike). Maximizes loss
+                                   * resilience at the cost of bandwidth; intended for
+                                   * low-bitrate, loss/latency-critical traffic. */
 } mqvpn_scheduler_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).

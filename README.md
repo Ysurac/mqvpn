@@ -222,6 +222,7 @@ User = carol:carol-secret:10.0.0.50   # fixed IP — always assigned this addres
 [Multipath]
 Scheduler = wlb
 # Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
+# Scheduler = redundant         # broadcast every packet on every usable path (loss-critical, low-bitrate)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
@@ -255,6 +256,7 @@ DNS = 1.1.1.1, 8.8.8.8
 [Multipath]
 Scheduler = wlb
 # Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
+# Scheduler = redundant         # broadcast every packet on every usable path (loss-critical, low-bitrate)
 # ReinjectionControl = true
 # ReinjectionMode = deadline  # default|deadline|dgram
 # FecEnable = true
@@ -360,7 +362,9 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 | `wlb` (default) | flow pin         | unpinned         | general use; UDP packets distributed per-packet           |
 | `wlb_udp_pin`   | flow pin         | flow pin         | each UDP connection kept on a single path                 |
 | `wrtt`          | weight × RTT     | weight × RTT     | weighted aggregation; RTT as tiebreaker when weights equal |
+| `wrr`           | weighted RR      | weighted RR      | smooth weighted round robin, interleaved across paths      |
 | `backup_fec`    | redundant        | redundant        | resilience-first (requires XQC_ENABLE_FEC)                |
+| `redundant`     | broadcast        | broadcast        | every packet duplicated on every usable path; loss-critical, low-bitrate traffic |
 
 **Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
 paths per-packet, which gives better aggregate throughput when the inner
@@ -387,6 +391,15 @@ paths automatically (cwnd-block fallback). Path weights are set at runtime via
 when you need fine-grained per-link preference in addition to aggregation — for
 example, to prioritise a high-bandwidth fibre link over a metered LTE backup
 while still drawing on both under load.
+
+**`redundant` — broadcast scheduler:** every packet is duplicated onto every
+currently usable path (both AVAILABLE and STANDBY, unlike the other
+schedulers' preference for AVAILABLE paths) instead of being split across
+them, trading bandwidth for maximum loss resilience — as long as one copy
+arrives, the data is delivered. There is no aggregation benefit and effective
+throughput is capped at the slowest usable path's share of bandwidth. Intended
+for low-bitrate, loss/latency-critical traffic (control channels, keepalives,
+VoIP) rather than bulk transfer.
 
 ## Reorder buffer (datagram lane)
 
@@ -798,7 +811,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt Multipath scheduler (default: wlb)
+    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|redundant Multipath scheduler (default: wlb)
     --cc bbr2|bbr|cubic|new_reno|copa|unlimited Congestion control (default: bbr2)
     --reinjection-control  Enable multipath reinjection control
     --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)

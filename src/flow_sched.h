@@ -24,6 +24,7 @@
 #define MQVPN_SCHED_WLB_UDP_PIN 5
 #define MQVPN_SCHED_WRTT        6
 #define MQVPN_SCHED_WRR         7
+#define MQVPN_SCHED_REDUNDANT   8
 
 /* Sentinel: WRR without flow pinning (for UDP/QUIC — no reordering concern) */
 #define MQVPN_FLOW_HASH_UNPINNED 0xFFFFFFFFU
