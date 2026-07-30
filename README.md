@@ -702,6 +702,16 @@ Symmetric 2×100 Mbit / 25 ms, TCP uplink, `iperf3 -P {1,2,4,8,16}`, 3 reps. The
 
 Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_wlb_1783350878.png) — bench: [`benchmarks/bench_hybrid_scheduler.sh`](benchmarks/bench_hybrid_scheduler.sh) · data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
 
+**Asymmetric paths** — same bench on the asymmetric pair (A = 300 Mbit / 10 ms + B = 80 Mbit / 30 ms, 380 Mbps aggregate). Hybrid ON saturates the aggregate (**350–356 Mbps** ≈ 93 % at `-P ≥ 2`) here too, while raw multipath never fully recovers: the cross-path reorder penalty (20 ms vs 60 ms RTT legs) caps it at 330 Mbps even at 16 streams — so unlike the symmetric case, raw multipath needs many parallel streams to close the gap:
+
+| WLB, streams (`-P`) | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| hybrid OFF (raw) | 261 | 271 | 314 | 317 | 330 |
+| hybrid ON (lane) | **327** | 350 | 354 | 356 | 354 |
+| gain | **+26 %** | +29 % | +13 % | +12 % | +7 % |
+
+Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_asym_minrtt_1785306660.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_asym_wlb_1785306660.png) — data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
+
 ## Architecture
 
 ```

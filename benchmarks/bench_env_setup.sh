@@ -265,10 +265,10 @@ bench_apply_netem() {
     ip netns exec "$NS_SERVER" tc qdisc del dev "$VETH_B1" root 2>/dev/null || true
 
     # Apply on both ends for realistic behavior
-    ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem ${netem_a}
-    ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem ${netem_a}
-    ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem ${netem_b}
-    ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem ${netem_b}
+    ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_A0" root netem ${netem_a} || return 1
+    ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_A1" root netem ${netem_a} || return 1
+    ip netns exec "$NS_CLIENT" tc qdisc add dev "$VETH_B0" root netem ${netem_b} || return 1
+    ip netns exec "$NS_SERVER" tc qdisc add dev "$VETH_B1" root netem ${netem_b} || return 1
 
     echo "OK: tc netem applied"
 }
@@ -374,6 +374,10 @@ bench_stop_vpn() {
         _BENCH_SERVER_PID=""
         sleep 1
     fi
+    if [ -n "${_BENCH_WORK_DIR:-}" ] && [ -d "$_BENCH_WORK_DIR" ]; then
+        rm -rf "$_BENCH_WORK_DIR"
+        _BENCH_WORK_DIR=""
+    fi
 }
 
 bench_cleanup() {
@@ -406,6 +410,12 @@ bench_cleanup() {
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
 
-    # Remove temp dir
-    [ -n "$_BENCH_WORK_DIR" ] && rm -rf "$_BENCH_WORK_DIR"
+    # Remove temp dir. Keep the if-form: a trailing `[ -n ] && rm` returns 1
+    # when the dir was already reaped by bench_stop_vpn, and that status
+    # aborts the callers' set -e EXIT traps, turning a passing suite into
+    # exit 1.
+    if [ -n "$_BENCH_WORK_DIR" ]; then
+        rm -rf "$_BENCH_WORK_DIR"
+        _BENCH_WORK_DIR=""
+    fi
 }
