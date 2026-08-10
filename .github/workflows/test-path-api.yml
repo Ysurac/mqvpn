@@ -63,11 +63,14 @@ jobs:
 
       - name: Build BoringSSL
         run: |
-          if [ ! -f third_party/xquic/third_party/boringssl/CMakeLists.txt ]; then
-            rm -rf third_party/xquic/third_party/boringssl
-            git clone https://github.com/google/boringssl.git \
-              third_party/xquic/third_party/boringssl
-          fi
+          # xquic vendors its own boringssl submodule now (pinned to a
+          # different, shallow-fetched commit), so it may already occupy
+          # this path. Always wipe and re-clone full history at our pin
+          # instead of conditionally skipping — a shallow submodule copy
+          # would fail the checkout below anyway.
+          rm -rf third_party/xquic/third_party/boringssl
+          git clone https://github.com/google/boringssl.git \
+            third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
           git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
           mkdir -p build && cd build
@@ -108,6 +111,10 @@ jobs:
 
       - name: Build BoringSSL
         run: |
+          # xquic vendors its own boringssl submodule now, so the recursive
+          # checkout above already populated this path; wipe it first so we
+          # always get a full, unshallow clone pinned at the commit below.
+          rm -rf third_party/xquic/third_party/boringssl
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
@@ -167,6 +174,10 @@ jobs:
 
       - name: Build BoringSSL
         run: |
+          # xquic vendors its own boringssl submodule now, so the recursive
+          # checkout above already populated this path; wipe it first so we
+          # always get a full, unshallow clone pinned at the commit below.
+          rm -rf third_party/xquic/third_party/boringssl
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
