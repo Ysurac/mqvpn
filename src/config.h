@@ -77,6 +77,12 @@ typedef struct mqvpn_file_config_s {
     char fec_scheme[32]; /* galois_calculation|packet_mask|reed_solomon|xor */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
+    /* Server-only: auto-adopt the client's self-announced PATH_LABEL
+     * weight/dscp_mask for the server's own downlink scheduling (see
+     * mqvpn_path_label.h); 1 (default) = historical always-on behavior,
+     * 0 = client and server weight/dscp_mask are configured independently. */
+    int sync_path_labels;
+
     char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
     int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */
     int reinjection_hard_deadline_ms;        /* deadline mode only; [1,60000] */

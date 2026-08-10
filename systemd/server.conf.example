@@ -41,6 +41,10 @@ Scheduler = wlb
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
 # InitMaxPathId = 8     # draft-21 initial_max_path_id TP; lower it (e.g. 2) to force PATHS_BLOCKED for testing
+# SyncPathLabels = false   # default true: auto-adopt the client's own weight/dscp_mask
+                           # (set via set_path_weight/set_path_dscp_mask) for this server's
+                           # downlink scheduling. Set false to configure client and server
+                           # weight/dscp_mask completely independently.
 
 # [Hybrid]
 # Hybrid TCP lane: relay inbound TCP from clients through the server's egress

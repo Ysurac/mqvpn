@@ -48,6 +48,10 @@ typedef struct mqvpn_server_cfg_s {
     mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int sync_path_labels;         /* [Multipath] SyncPathLabels; default 1 — auto-adopt
+                                    * client-announced weight/dscp_mask (mqvpn_path_label.h);
+                                    * 0 = client/server weight/dscp_mask configured
+                                    * independently */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

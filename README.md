@@ -243,6 +243,10 @@ Scheduler = wlb
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
 # CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited (default: bbr2)
+# SyncPathLabels = false      # default true. On the server: false = don't auto-adopt the
+                               # client's own weight/dscp_mask. Configure client and server
+                               # independently (see wrtt/dscp scheduler docs above); the
+                               # client has its own SyncPathLabels for the other half.
 
 [Control]
 # Port = 9090          # enable JSON control API on this TCP port
@@ -278,6 +282,9 @@ Scheduler = wlb
 # FecEnable = true
 # FecScheme = xor             # galois_calculation|packet_mask|reed_solomon|xor
 # CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited (default: bbr2)
+# SyncPathLabels = false      # default true. false = don't announce this client's own
+                               # weight/dscp_mask to the server at all — the server then
+                               # can't adopt it regardless of its own SyncPathLabels setting
 Path = eth0
 Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
@@ -313,6 +320,7 @@ Server example:
     "cc": "bbr2",
     "fec_enable": true,
     "fec_scheme": "reed_solomon",
+    "sync_path_labels": true,
     "mtu": 1280,
     "control_port": 9090,
     "control_addr": "127.0.0.1"
@@ -345,6 +353,7 @@ Client example:
     "reinjection_mode": "deadline",
     "fec_enable": true,
     "fec_scheme": "xor",
+    "sync_path_labels": true,
     "control_port": 0,
     "control_addr": "127.0.0.1"
 }
@@ -357,6 +366,7 @@ Notes:
 - `auth_username` is client-side only: the name sent to the server for identification in logs and status output. It does not affect authentication.
 - `mode` is optional if it can be inferred (`listen` implies server).
 - `manage_routes` defaults to `true`; set it to `false` on router/embedded integrations where an external orchestrator owns the host routing table and mqvpn should only bring up the TUN.
+- `sync_path_labels` defaults to `true` and is meaningful on **both** client and server configs, each gating its own half of the sync (server: adopt; client: announce); see "Disabling weight/DSCP sync entirely" under [Schedulers](#schedulers) above.
 - **[mqvpn-prometheus-exporter](https://github.com/mp0rta/mqvpn-prometheus-exporter) requires per-user keys.** Using mqvpn-prometheus-exporter, you can correct and visualize mqvpn metrics. If you use it, sharing a single `auth_key` across
   multiple clients works for the VPN data plane, but the control API
   surfaces those sessions as `user="(global)"` and the Prometheus exporter
@@ -446,6 +456,25 @@ so e.g. for a file download (where the bulk of the data flows
 server→client) the client-side mask alone *does* now determine which path
 it arrives on. Use the server-mode form of `set_path_dscp_mask` only to
 pin the server to a different mask than the client (asymmetric control).
+
+**Disabling weight/DSCP sync entirely:** the client→server auto-adoption
+described above (for both `wrtt` weights and `dscp` masks) can be turned off
+with `--no-sync-path-labels` (or `[Multipath] SyncPathLabels = false` in INI /
+`"sync_path_labels": false` in JSON config) — set on **either or both**
+sides, since each endpoint only reads its own half of the flag:
+
+- On the **server**: it stops auto-adopting the client's announced value —
+  the server's downlink weight/dscp_mask must then be set independently via
+  the server-mode form of `set_path_weight`/`set_path_dscp_mask` (or is left
+  at scheduler default).
+- On the **client**: it stops announcing its own value to the server at all
+  (no PATH_LABEL capsule is sent), so `set_path_weight`/`set_path_dscp_mask`
+  only ever affects the client's own uplink — a kill switch that's effective
+  even if you don't control the server's setting.
+
+Either side alone is enough to fully decouple that client's weight/dscp_mask
+from the server's downlink. Use this when client and server are operated
+independently and should never inherit each other's per-path tuning.
 
 ## Reorder buffer (datagram lane)
 
@@ -1012,6 +1041,7 @@ mqvpn [--config PATH] --mode client|server [options]
     --fec-enable          Enable FEC
     --no-fec              Disable FEC
     --fec-scheme galois_calculation|packet_mask|reed_solomon|xor FEC scheme (default: reed_solomon)
+    --no-sync-path-labels  Don't sync per-path weight/dscp_mask between client/server (client and/or server, default: sync enabled)
   --route-via-server     Add host route to server IP before setting default route (client)
   --no-routes            Skip all automatic route setup; manage routes manually (client)
   --control-port PORT    TCP port for JSON control API (server)

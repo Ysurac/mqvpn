@@ -2127,6 +2127,26 @@ test_advanced_udp_gro(void)
     ASSERT_EQ_INT(cfg.udp_gro, 0, "json udp_gro=false");
 }
 
+static void
+test_multipath_sync_path_labels(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.sync_path_labels, 1, "sync_path_labels default 1 (absent)");
+
+    char *p = write_tmp("[Multipath]\nSyncPathLabels = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "multipath ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.sync_path_labels, 0, "ini SyncPathLabels=false");
+
+    p = write_tmp("{\"sync_path_labels\": false}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "multipath json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.sync_path_labels, 0, "json sync_path_labels=false");
+}
+
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
@@ -2276,6 +2296,7 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionSrttFactorPct = 150\n"
                       "ReinjectionHardDeadlineMs = 300\n"
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
+                      "SyncPathLabels = false\n"
                       "[Reorder]\n"
                       "Enabled = on\n"
                       "MaxWaitMs = 55\n"
@@ -2331,6 +2352,7 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_srtt_factor_pct\":150,"
                        "\"reinjection_hard_deadline_ms\":300,"
                        "\"reinjection_deadline_lower_bound_ms\":10,"
+                       "\"sync_path_labels\":false,"
                        "\"reorder\":{"
                        "\"enabled\":\"on\","
                        "\"max_wait_ms\":55,"
@@ -2391,6 +2413,7 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms,
                   b.reinjection_deadline_lower_bound_ms,
                   "parity reinjection_deadline_lower_bound_ms");
+    ASSERT_EQ_INT(a.sync_path_labels, b.sync_path_labels, "parity sync_path_labels");
     ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
     ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
     ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
@@ -2429,6 +2452,7 @@ test_ini_json_scalar_parity(void)
                   "parity reinjection_hard_deadline_ms is non-default");
     ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms, 10,
                   "parity reinjection_deadline_lower_bound_ms is non-default");
+    ASSERT_EQ_INT(a.sync_path_labels, 0, "parity sync_path_labels is non-default");
     ASSERT_EQ_INT((int)a.reorder.max_flows, 77,
                   "parity reorder max_flows is non-default");
     ASSERT_EQ_INT((int)a.reorder.classify_window, 33,
@@ -2722,6 +2746,7 @@ main(void)
     test_advanced_recv_rate_limit();
     test_advanced_udp_gso();
     test_advanced_udp_gro();
+    test_multipath_sync_path_labels();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
     test_hybrid_egress_acl_ini_v6();

@@ -44,6 +44,19 @@
  * control) — an explicit call always takes precedence over the client's
  * announcement from then on; see mqvpn_server.c's dispatch handler.
  *
+ * The default-adoption part of problem 2's fix is itself optional, and
+ * gateable from EITHER end via mqvpn_config_set_sync_path_labels(cfg, 0)
+ * (see libmqvpn.h) — an operator who wants client and server tuned
+ * completely independently can turn it off on whichever side(s) they
+ * control: on the SERVER config, sync off means the server never adopts
+ * the client's report — only an explicit _by_iface() call (or nothing,
+ * i.e. the scheduler's own default) determines the server's downlink
+ * weight/dscp_mask. On the CLIENT config, sync off means the client never
+ * even sends the PATH_LABEL capsule, so nothing reaches the server to
+ * adopt regardless of that server's own setting. Either side is
+ * sufficient on its own; path_id tracking (problem 1) is unaffected
+ * either way — only the value-adoption/announcement step is gated.
+ *
  * This header is deliberately xquic-free (mirrors flow_sched.h) so it can
  * be unit tested without linking xquic; mqvpn_client.c/mqvpn_server.c wrap
  * it with the actual xqc_h3_ext_capsule_encode/decode +

@@ -147,6 +147,25 @@ struct mqvpn_config_s {
     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
 
     int udp_gso; /* TX GSO/batch enable; default 1 */
+
+    /* PATH_LABEL weight/dscp_mask sync (mqvpn_path_label.h); default 1
+     * (matches the historical always-on behavior). Meaning is per-side —
+     * each endpoint reads only its own half of this flag:
+     *   - SERVER: auto-adopt the client's self-announced weight/dscp_mask
+     *     for the server's own downlink scheduling. 0 = never adopt — the
+     *     server's per-path weight/dscp_mask then comes ONLY from an
+     *     explicit mqvpn_server_set_path_weight_by_iface() /
+     *     _dscp_mask_by_iface() call (or stays unset). See
+     *     svr_path_label_t's doc comment in mqvpn_server.c.
+     *   - CLIENT: whether to announce its own weight/dscp_mask to the
+     *     server at all via the PATH_LABEL capsule. 0 = never send one —
+     *     a kill switch independent of the server's own setting, for when
+     *     only the client is under your control. See
+     *     client_announce_path_label() in mqvpn_client.c.
+     * The two are independent: either side setting it to 0 is enough to
+     * stop that client's weight/dscp_mask from reaching the server's
+     * downlink; both sides default on for the historical behavior. */
+    int sync_path_labels;
 };
 
 /* ─── State transition validation (M0-5) ─── */

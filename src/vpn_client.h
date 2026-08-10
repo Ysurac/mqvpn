@@ -54,6 +54,10 @@ typedef struct mqvpn_client_cfg_s {
     uint64_t recv_rate_limit;     /* [Advanced] RecvRateLimit, bytes/sec; 0 = off */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int sync_path_labels;         /* [Multipath] SyncPathLabels; default 1 — announce this
+                                    * client's own weight/dscp_mask (mqvpn_path_label.h) to
+                                    * the server; 0 = never announce (client/server
+                                    * weight/dscp_mask configured independently) */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

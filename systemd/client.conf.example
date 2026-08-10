@@ -40,6 +40,11 @@ Scheduler = wlb
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
+# SyncPathLabels = false   # default true: announce this client's own weight/dscp_mask
+                           # (set via set_path_weight/set_path_dscp_mask) to the server so
+                           # it adopts it for downlink scheduling too. Set false to stop
+                           # announcing entirely — the server then can't adopt it regardless
+                           # of its own SyncPathLabels setting.
 # Path = eth0
 # Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down

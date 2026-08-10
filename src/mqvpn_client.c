@@ -13,6 +13,7 @@
 #include "path_error_policy.h"
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
+#include "mqvpn_xquic_err_names.h" /* annotate |err:NNN| in cb_xqc_log_write */
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
 #include <stdlib.h>
@@ -1091,8 +1092,15 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     /* Early filter: skip snprintf for messages below configured level */
     if (ml < c->log_level) return;
 
-    char msg[512];
-    snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
+    /* 600, not 512: xquic's own report lines (xqc_conn_destroy &c) already
+     * run ~500 bytes before the "[xquic] " prefix, and annotating an
+     * |err:NNN| field below adds another ~20-30 bytes — keep headroom so
+     * that doesn't silently truncate path_info/... at the tail. */
+    char msg[600];
+    static const char prefix[] = "[xquic] ";
+    memcpy(msg, prefix, sizeof(prefix) - 1);
+    mqvpn_xquic_annotate_err_codes((const char *)buf, size, msg + sizeof(prefix) - 1,
+                                    sizeof(msg) - (sizeof(prefix) - 1));
     c->cbs.log(ml, msg, c->user_ctx);
 }
 
@@ -2449,11 +2457,20 @@ activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
  * behavior for this path; never worth failing path activation over. Not
  * called for the primary path (path_id 0), which is bootstrapped by the
  * handshake itself and never gets a new path_id — see mqvpn_path_label.h,
- * only secondary paths can churn path_id at all. */
+ * only secondary paths can churn path_id at all.
+ *
+ * c->config.sync_path_labels (mqvpn_config_set_sync_path_labels(), default
+ * on) is a client-side kill switch for this announcement: off means the
+ * client never sends a PATH_LABEL capsule at all, so no weight/dscp_mask
+ * ever reaches the server regardless of that server's own sync setting —
+ * useful when only the client side is under your control and you want to
+ * guarantee independence without relying on the server having sync
+ * disabled too. */
 static void
 client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *iface,
                            uint32_t weight, uint64_t dscp_mask)
 {
+    if (!c->config.sync_path_labels) return;
     if (!c->conn || !c->conn->masque_request) return;
 
     uint8_t label_payload[MQVPN_PATH_LABEL_PAYLOAD_MAX];

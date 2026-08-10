@@ -159,6 +159,7 @@ mqvpn_config_new(void)
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
     cfg->tun_mtu = 0; /* 0 = auto */
     cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
+    cfg->sync_path_labels = 1; /* server: adopt / client: announce weight+dscp, both by default */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
@@ -895,6 +896,14 @@ mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->udp_gso = enabled ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_sync_path_labels(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->sync_path_labels = enabled ? 1 : 0;
     return MQVPN_OK;
 }
 

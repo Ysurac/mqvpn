@@ -1,3 +1,80 @@
+mqvpn (0.16.0-1) UNRELEASED; urgency=medium
+
+  * feat(sched): add the dscp policy-routing scheduler -- routes each
+    packet by the inner IP header's DSCP class to whichever assigned path
+    currently has the best RTT (min-RTT tie-break; falls back to plain
+    MinRTT across every path for untagged traffic or a class with no
+    usable assigned path); new set_path_dscp_mask client/control-API
+    command.
+  * feat(multipath): automatically sync per-path weight and DSCP mask
+    from client to server -- set_path_weight/set_path_dscp_mask on the
+    client alone now biases both directions, via a PATH_LABEL capsule
+    that survives path_id churn across reconnects; an operator's
+    explicit server-side call still wins (asymmetric control).
+  * feat(config): add a SyncPathLabels key ([Multipath] INI /
+    sync_path_labels JSON) and a --no-sync-path-labels CLI flag to turn
+    the above sync off; gates each side's own half independently
+    (server: stop auto-adopting the client's report; client: stop
+    announcing it at all), so either side alone is enough to decouple
+    them; new mqvpn_config_set_sync_path_labels() library API.
+  * feat(offload): add UDP GSO (capability probe, run formation, TX batch
+    send with sendmmsg fallback, sticky-fallback logging) and UDP GRO
+    (sockopt helper, segmented receive with cmsg parsing) on client and
+    server path sockets; new UdpGso/UdpGro config keys (INI+JSON parity)
+    and A/B netem benchmark scripts.
+  * feat(stats): expose the new UDP offload counters via get_stats;
+    assert them in the control API e2e.
+  * feat(server): defer the datagram flush when a batched send is
+    registered, flushing before close/destroy and on every egress path;
+    fix svr_flush_deferred_sends being defined only inside the
+    egress-only block.
+  * fix: harden udp_offload result codes and the batch cap; preserve UDP
+    GRO across a netlink path re-add; pin the exact cmsg length and
+    hard-error errno preservation.
+  * build: bump the shared library SOVERSION to 3 (single definition,
+    shared with the batched-send condition check).
+  * chore(deps): bump the xquic fork seven times in total, for the DSCP
+    scheduler, the GRO/GSO wiring, and the server defer-flush fix; bump the
+    com.google.devtools.ksp Android dependency.
+  * test: dscp scheduler, PATH_LABEL capsule, and control-socket unit
+    tests; ci_bench_dscp_verify.sh integration check; SyncPathLabels
+    config (INI+JSON parity) and control-API unit tests.
+  * docs: document the dscp scheduler, the client->server weight/DSCP
+    auto-sync, and the SyncPathLabels opt-out (README).
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 10 Aug 2026 19:00:00 +0200
+
+mqvpn (0.15.1-1) unstable; urgency=medium
+
+  * bench(srt): add an SRT single-path vs multipath benchmark suite --
+    tier 1 netem matrix (P1/P2/C3/C3h/C4/C5, 64 x 60s runs) plus tier 2
+    real-footage VMAF/decoder-error/freeze runs with side-by-side
+    comparison videos -- quantifying that an SRT stream which breaks up
+    on any single link stays clean over the mqvpn-bonded tunnel; document
+    the recommended receiver lossmaxttl.
+  * chore: fix a benchmark-conditions inaccuracy in the README and
+    website benchmark pages.
+  * chore(submodule): bump the xquic fork twice, for the 2026-08 upstream
+    merge and a BoringSSL update.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 03 Aug 2026 20:00:00 +0200
+
+mqvpn (0.15.0-1) unstable; urgency=medium
+
+  * feat(multipath): add [Multipath] Reinjection modes (off/deadline/
+    idle/dgram) -- INI/JSON config keys, xquic wiring, and a clamped
+    deadline-lower-bound safety check that logs the effective value when
+    clamped; expose per-path reinject_tx_bytes in get_status.
+  * chore(deps): bump the xquic fork twice, for a WLB reinjection routing
+    fix and for reinjection stats.
+  * test(e2e): add reinjection deadline/dgram netns coverage; harden the
+    e2e suite (sanitizer check, teardown traps, retry) and de-drift CI
+    dependency pins.
+  * docs: document the Reinjection config keys (README + website en/ja).
+  * build(deps): bump the GitHub Actions dependency group.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sat, 01 Aug 2026 16:00:00 +0200
+
 mqvpn (0.14.1-1) unstable; urgency=medium
 
   * feat(sched): add the redundant (broadcast) multipath scheduler --

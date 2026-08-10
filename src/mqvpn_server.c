@@ -15,6 +15,7 @@
 #include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h"
+#include "mqvpn_xquic_err_names.h" /* annotate |err:NNN| in cb_xqc_log_write */
 #include "mqvpn_server_internal.h"
 
 #include <stdlib.h>
@@ -100,6 +101,11 @@ typedef struct svr_stream_s svr_stream_t;
  * and must not be silently clobbered by the client's next reconnect
  * re-announcing its own (unchanged) value. Either source's value is
  * reapplied automatically whenever path_id changes.
+ *
+ * The "client's own default" half above is itself gated by
+ * s->config.sync_path_labels (mqvpn_config_set_sync_path_labels(), default
+ * on) — when off, only an operator's explicit call ever populates
+ * has_weight/has_dscp_mask, so client and server tune independently.
  *
  * Scoped to one connection's lifetime, same as everything else in
  * svr_conn_s — mirrors the client side's path_entry_t, which is also only
@@ -536,8 +542,15 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
     if (ml < s->log_level) return;
 
-    char msg[512];
-    snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
+    /* 600, not 512: xquic's own report lines (xqc_conn_destroy &c) already
+     * run ~500 bytes before the "[xquic] " prefix, and annotating an
+     * |err:NNN| field below adds another ~20-30 bytes — keep headroom so
+     * that doesn't silently truncate path_info/... at the tail. */
+    char msg[600];
+    static const char prefix[] = "[xquic] ";
+    memcpy(msg, prefix, sizeof(prefix) - 1);
+    mqvpn_xquic_annotate_err_codes((const char *)buf, size, msg + sizeof(prefix) - 1,
+                                    sizeof(msg) - (sizeof(prefix) - 1));
     s->cbs.log(ml, msg, s->user_ctx);
 }
 
@@ -1698,14 +1711,21 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                          * action. An operator's explicit
                          * set_path_weight_by_iface() / _dscp_mask_by_iface()
                          * call always wins instead, and stays sticky across
-                         * further client re-announcements (weight_from_operator). */
-                        if (!label->weight_from_operator && client_weight != 0) {
-                            label->weight = client_weight;
-                            label->has_weight = 1;
-                        }
-                        if (!label->dscp_mask_from_operator && client_dscp_mask != 0) {
-                            label->dscp_mask = client_dscp_mask;
-                            label->has_dscp_mask = 1;
+                         * further client re-announcements (weight_from_operator).
+                         * sync_path_labels=0 (mqvpn_config_set_sync_path_labels())
+                         * disables this adoption step entirely, regardless of
+                         * weight_from_operator — path_id tracking above still
+                         * happens either way, so an operator's _by_iface() call
+                         * still gets reapplied across path teardown/recreate. */
+                        if (s->config.sync_path_labels) {
+                            if (!label->weight_from_operator && client_weight != 0) {
+                                label->weight = client_weight;
+                                label->has_weight = 1;
+                            }
+                            if (!label->dscp_mask_from_operator && client_dscp_mask != 0) {
+                                label->dscp_mask = client_dscp_mask;
+                                label->has_dscp_mask = 1;
+                            }
                         }
 
                         if (label->has_weight) {
@@ -3088,7 +3108,11 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
  * capsule (see mqvpn_path_label.h and svr_path_label_t's doc comment), and
  * the server ADOPTS that report for its own downlink scheduling by
  * default — so calling the client-side setter alone is normally enough
- * for both directions to agree, no server-side call required.
+ * for both directions to agree, no server-side call required. That
+ * adoption can be disabled server-wide with
+ * mqvpn_config_set_sync_path_labels(cfg, 0), for operators who want the
+ * client and server tuned fully independently; the functions below are
+ * then the only way to set a server-side value.
  *
  * The functions below are for PINNING the server to a value different
  * from what the client reports (asymmetric control) — an explicit call

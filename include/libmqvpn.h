@@ -705,6 +705,30 @@ MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
  * value is stored as 1. */
 MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 
+/* Controls PATH_LABEL weight/dscp_mask sync (see mqvpn_path_label.h). 1
+ * (default) preserves the historical always-on behavior. Meaning depends
+ * on which side's config you call this on:
+ *
+ *   - Called on a SERVER config: whether the server auto-adopts a client's
+ *     self-announced weight/dscp_mask for its own downlink scheduling.
+ *     Setting a weight/dscp_mask once on the client is normally enough for
+ *     both directions to agree, no server-side call needed (see
+ *     mqvpn_server_set_path_weight_by_iface()'s doc comment). 0 disables
+ *     that adoption: the server's per-path weight/dscp_mask then comes
+ *     ONLY from an explicit mqvpn_server_set_path_weight_by_iface() /
+ *     _dscp_mask_by_iface() call (or stays unset/default).
+ *
+ *   - Called on a CLIENT config: whether the client announces its own
+ *     weight/dscp_mask to the server at all. 0 stops the client from ever
+ *     sending a PATH_LABEL capsule — a client-side kill switch that works
+ *     regardless of the server's own setting, for deployments where only
+ *     the client is under your control.
+ *
+ * Either side alone setting this to 0 is enough to make that client's
+ * weight/dscp_mask never reach the server's downlink; set it on both for
+ * defense in depth. */
+MQVPN_API int mqvpn_config_set_sync_path_labels(mqvpn_config_t *cfg, int enabled);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
@@ -1056,6 +1080,13 @@ MQVPN_API int mqvpn_server_set_path_dscp_mask(mqvpn_server_t *server, const char
  * path_id but not the iface name. You can call these before the iface's
  * path has even come up; the value is stored and applied the moment it
  * does.
+ *
+ * The "adopt the client's report by default" behavior above can be turned
+ * off entirely with mqvpn_config_set_sync_path_labels(cfg, 0) at server
+ * startup — with sync disabled, the client and server weight/dscp_mask are
+ * fully independent, and these _by_iface functions become the only way to
+ * set a server-side value (a bare client-side set_path_weight/dscp_mask
+ * then affects only the client's own uplink).
  *
  * Same return values as the plain path_id form above. Scoped to one
  * connection's lifetime, like everything else about a live session — a

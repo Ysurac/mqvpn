@@ -632,6 +632,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_BOOL(SEC_MULTIPATH, "Fec", "fec", fec_enable),
     CFG_BOOL(SEC_MULTIPATH, "FecEnable", "fec_enable", fec_enable),
     CFG_STR(SEC_MULTIPATH, "FecScheme", "fec_scheme", fec_scheme),
+    CFG_BOOL(SEC_MULTIPATH, "SyncPathLabels", "sync_path_labels", sync_path_labels),
     /* [Reorder] — JSON side lives inside the bounded "reorder" object */
     {SEC_REORDER, "Enabled", "enabled", CFGK_REORDER_MODE, CFGK_OFF(reorder.mode), 0, 0,
      NULL, 0, 0, NULL},
@@ -1346,6 +1347,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->manage_routes = 1;
     cfg->udp_gso = 1;
     cfg->udp_gro = 1;
+    cfg->sync_path_labels = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }

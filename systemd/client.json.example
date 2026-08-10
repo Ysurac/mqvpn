@@ -21,6 +21,7 @@
   "reinjection_mode": "deadline",
   "fec_enable": true,
   "fec_scheme": "xor",
+  "sync_path_labels": true,
   "paths": ["eth0", "wlan0"],
   "backup_paths": [],
   "init_max_path_id": 0,

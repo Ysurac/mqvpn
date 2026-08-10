@@ -96,6 +96,12 @@ usage(const char *prog)
         "  --mtu N                   TUN MTU, 1280-9000 (client: cap on negotiated;\n"
         "                            server: sets TUN MTU; default: auto = ~1382)\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
+        "  --no-sync-path-labels     Don't sync per-path weight/dscp_mask between\n"
+        "                            client and server; configure them independently.\n"
+        "                            Server: don't auto-adopt the client's own value\n"
+        "                            for downlink scheduling. Client: don't announce\n"
+        "                            its own value to the server. (default: sync\n"
+        "                            enabled; either side alone is enough to disable it)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
         "  --help                    Show this help\n"
@@ -187,6 +193,7 @@ main(int argc, char *argv[])
         {"no-routes", no_argument, NULL, 'W'},
         {"noroutes", no_argument, NULL, 'W'},
         {"tls-server-name", required_argument, NULL, 0x104},
+        {"no-sync-path-labels", no_argument, NULL, 0x105},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -231,6 +238,7 @@ main(int argc, char *argv[])
     int kill_switch = -1;        /* -1 = not set by CLI */
     int route_via_server = -1;   /* -1 = not set by CLI */
     int no_routes = -1;          /* -1 = not set by CLI */
+    int sync_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
     int control_port = 0;
     int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
@@ -350,6 +358,7 @@ main(int argc, char *argv[])
         case 'w': route_via_server = 1; break;
         case 'W': no_routes = 1; break;
         case 0x104: tls_server_name = optarg; break;
+        case 0x105: sync_path_labels = 0; break;
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -431,6 +440,8 @@ main(int argc, char *argv[])
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
+    int eff_sync_path_labels =
+        sync_path_labels >= 0 ? sync_path_labels : file_cfg.sync_path_labels;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -679,6 +690,10 @@ main(int argc, char *argv[])
             .udp_gso = file_cfg.udp_gso,
             /* [Advanced] UdpGro; default 1. Applies to client and server. */
             .udp_gro = file_cfg.udp_gro,
+            /* [Multipath] SyncPathLabels; default 1. On the client this
+             * gates whether it announces its own weight/dscp_mask to the
+             * server at all (mqvpn_client.c's client_announce_path_label). */
+            .sync_path_labels = eff_sync_path_labels,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -746,6 +761,8 @@ main(int argc, char *argv[])
             .udp_gso = file_cfg.udp_gso,
             /* [Advanced] UdpGro; default 1. Applies to client and server. */
             .udp_gro = file_cfg.udp_gro,
+            /* [Multipath] SyncPathLabels; default 1. Server-only. */
+            .sync_path_labels = eff_sync_path_labels,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
