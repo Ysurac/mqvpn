@@ -616,6 +616,26 @@ platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight)
     return mqvpn_client_set_path_weight(p->client, h, weight);
 }
 
+int
+platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_mask)
+{
+    if (!p || !iface || iface[0] == '\0') return -1;
+
+    int idx = -1;
+    for (int i = 0; i < p->path_mgr.n_paths; i++) {
+        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) return -1;
+
+    mqvpn_path_handle_t h = p->lib_path_handles[idx];
+    if (h < 0) return -1;
+
+    return mqvpn_client_set_path_dscp_mask(p->client, h, dscp_mask);
+}
+
 /* ================================================================
  *  Main entry point: linux_platform_run_client
  * ================================================================ */
@@ -700,6 +720,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     case MQVPN_SCHED_WRTT: sched = MQVPN_SCHED_WRTT; break;
     case MQVPN_SCHED_WRR: sched = MQVPN_SCHED_WRR; break;
     case MQVPN_SCHED_REDUNDANT: sched = MQVPN_SCHED_REDUNDANT; break;
+    case MQVPN_SCHED_DSCP: sched = MQVPN_SCHED_DSCP; break;
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);
@@ -1328,6 +1349,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     case MQVPN_SCHED_WRTT: sched = MQVPN_SCHED_WRTT; break;
     case MQVPN_SCHED_WRR: sched = MQVPN_SCHED_WRR; break;
     case MQVPN_SCHED_REDUNDANT: sched = MQVPN_SCHED_REDUNDANT; break;
+    case MQVPN_SCHED_DSCP: sched = MQVPN_SCHED_DSCP; break;
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);

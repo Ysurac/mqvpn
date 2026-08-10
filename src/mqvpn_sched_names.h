@@ -40,7 +40,8 @@
     X(MQVPN_SCHED_WLB_UDP_PIN, "wlb_udp_pin") \
     X(MQVPN_SCHED_WRTT, "wrtt")             \
     X(MQVPN_SCHED_WRR, "wrr")               \
-    X(MQVPN_SCHED_REDUNDANT, "redundant")
+    X(MQVPN_SCHED_REDUNDANT, "redundant")   \
+    X(MQVPN_SCHED_DSCP, "dscp")
 
 #define MQVPN_CC_LIST(X)               \
     X(MQVPN_CC_BBR2, "bbr2")           \

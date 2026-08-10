@@ -179,6 +179,41 @@ test_redundant_enum_value(void)
 }
 
 static int
+test_dscp_dispatch(void)
+{
+    xqc_conn_settings_t cs;
+    memset(&cs, 0, sizeof(cs));
+    mqvpn_apply_scheduler(&cs, MQVPN_SCHED_DSCP);
+    ASSERT_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
+              xqc_dscp_scheduler_cb.xqc_scheduler_get_path);
+    return 0;
+}
+
+static int
+test_dscp_single_path_no_warn(void)
+{
+    /* Single-path dscp is fine — untagged/unassigned traffic just falls
+       back to plain MinRTT, same as every other non-backup_fec scheduler. */
+    ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_DSCP, 1), false);
+    return 0;
+}
+
+static int
+test_dgram_qos_for_dscp(void)
+{
+    ASSERT_EQ(mqvpn_dgram_qos_level(MQVPN_SCHED_DSCP), XQC_DATA_QOS_HIGH);
+    return 0;
+}
+
+static int
+test_dscp_enum_value(void)
+{
+    /* DSCP must have a distinct value so scheduler dispatch switch is unambiguous */
+    ASSERT_EQ((int)MQVPN_SCHED_DSCP, 9);
+    return 0;
+}
+
+static int
 test_wlb_single_path_no_warn(void)
 {
     ASSERT_EQ(mqvpn_check_scheduler_preconditions(MQVPN_SCHED_WLB, 1), false);
@@ -237,6 +272,10 @@ main(void)
     failed += test_redundant_single_path_no_warn();
     failed += test_dgram_qos_for_redundant();
     failed += test_redundant_enum_value();
+    failed += test_dscp_dispatch();
+    failed += test_dscp_single_path_no_warn();
+    failed += test_dgram_qos_for_dscp();
+    failed += test_dscp_enum_value();
     if (failed) {
         fprintf(stderr, "test_scheduler: %d FAILED\n", failed);
         return 1;

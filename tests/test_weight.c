@@ -127,6 +127,39 @@ test_path_desc_weight_round_trip(void)
     return 0;
 }
 
+/* --- path descriptor dscp_mask field --- */
+
+static int
+test_path_desc_dscp_mask_zero_by_default(void)
+{
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    ASSERT_EQ(desc.dscp_mask, (uint64_t)0);
+    return 0;
+}
+
+static int
+test_path_desc_dscp_mask_round_trip(void)
+{
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    /* EF (46) + AF41 (34), analogous to a path carrying two DSCP classes. */
+    desc.dscp_mask = MQVPN_DSCP_BIT(46) | MQVPN_DSCP_BIT(34);
+    ASSERT_EQ(desc.dscp_mask, (1ULL << 46) | (1ULL << 34));
+    return 0;
+}
+
+static int
+test_dscp_bit_masks_low_bits(void)
+{
+    /* MQVPN_DSCP_BIT masks the input to 6 bits (0-63), same as xquic's
+       XQC_DSCP_BIT — a caller passing an out-of-range value should not
+       silently overflow into an unrelated bit position. */
+    ASSERT_EQ(MQVPN_DSCP_BIT(64), MQVPN_DSCP_BIT(0));
+    ASSERT_EQ(MQVPN_DSCP_BIT(70), MQVPN_DSCP_BIT(6));
+    return 0;
+}
+
 /* --- config file parsing --- */
 
 static char *
@@ -210,6 +243,30 @@ test_wrr_enum_value(void)
     return 0;
 }
 
+static int
+test_dscp_config_string(void)
+{
+    const char *ini = "[Server]\n"
+                      "Address = vpn.example.com:443\n"
+                      "\n"
+                      "[Auth]\n"
+                      "Key = testkey\n"
+                      "\n"
+                      "[Multipath]\n"
+                      "Scheduler = dscp\n"
+                      "Path = eth0\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_STR_EQ(cfg.scheduler, "dscp");
+    return 0;
+}
+
 int
 main(void)
 {
@@ -224,10 +281,14 @@ main(void)
     failed += test_wrr_no_precondition_warn();
     failed += test_path_desc_weight_zero_by_default();
     failed += test_path_desc_weight_round_trip();
+    failed += test_path_desc_dscp_mask_zero_by_default();
+    failed += test_path_desc_dscp_mask_round_trip();
+    failed += test_dscp_bit_masks_low_bits();
     failed += test_wrtt_config_string();
     failed += test_wrtt_enum_value();
     failed += test_wrr_config_string();
     failed += test_wrr_enum_value();
+    failed += test_dscp_config_string();
     if (failed) {
         fprintf(stderr, "test_weight: %d FAILED\n", failed);
         return 1;

@@ -48,6 +48,7 @@
 #include <xquic/xqc_http3.h>
 
 #include "flow_sched.h"
+#include "mqvpn_path_label.h"
 #include "hybrid/classifier.h"
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
 #  include "hybrid/lwip_glue.h"
@@ -2338,6 +2339,76 @@ activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
  * (path_status=1) so that xquic's backup_fec scheduler routes only FEC repair
  * symbols to it, while the primary path stays AVAILABLE. Per xquic's public
  * API: 1 = STANDBY, anything else = AVAILABLE (xquic.h L2210). */
+/* Tell the server "path_id N is my iface I, with this weight/dscp_mask"
+ * via a PATH_LABEL capsule (RFC 9297) on the CONNECT-IP request stream —
+ * see mqvpn_path_label.h for why. Carrying weight/dscp_mask (not just the
+ * iface↔path_id mapping) is what lets a value set once on the client also
+ * take effect server-side, with no separate server-side action required —
+ * the server adopts these by default, unless an operator has explicitly
+ * pinned a different value for this iface (see mqvpn_server.c's dispatch
+ * handler). Best-effort: an encode/send failure just means the server
+ * falls back to the existing non-persistent, path_id-only, uplink-only
+ * behavior for this path; never worth failing path activation over. Not
+ * called for the primary path (path_id 0), which is bootstrapped by the
+ * handshake itself and never gets a new path_id — see mqvpn_path_label.h,
+ * only secondary paths can churn path_id at all. */
+static void
+client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *iface,
+                           uint32_t weight, uint64_t dscp_mask)
+{
+    if (!c->conn || !c->conn->masque_request) return;
+
+    uint8_t label_payload[MQVPN_PATH_LABEL_PAYLOAD_MAX];
+    int n = mqvpn_path_label_encode(label_payload, sizeof(label_payload), path_id, iface,
+                                    weight, dscp_mask);
+    if (n <= 0) return;
+
+    uint8_t cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
+    size_t cap_written = 0;
+    xqc_int_t xret = xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
+                                               MQVPN_CAPSULE_PATH_LABEL, label_payload,
+                                               (size_t)n);
+    if (xret != XQC_OK) {
+        LOG_W(c, "path_label capsule encode failed: %d", xret);
+        return;
+    }
+
+    xqc_int_t sret = xqc_h3_request_send_body(c->conn->masque_request, cap_buf,
+                                              cap_written, 0);
+    if (sret < 0) {
+        LOG_W(c, "path_label capsule send failed: path_id=%" PRIu64 " iface=%s ret=%d",
+              path_id, iface, sret);
+    } else {
+        LOG_D(c, "announced path_label: path_id=%" PRIu64 " iface=%s", path_id, iface);
+    }
+}
+
+/* Apply this slot's saved weight/dscp_mask to a newly-(re)activated
+ * path_id and announce its label, once activation succeeds. Shared
+ * between client_activate_path() (first activation attempt) and
+ * tick_drive_retry_timer() (retry after a failed/timed-out validation) —
+ * a retry gets its OWN new path_id from xquic, just like the first
+ * attempt, so it needs the exact same treatment. Missing this on the
+ * retry path was a real bug: a path that fails validation once and
+ * succeeds on retry would silently lose its weight/dscp_mask/label
+ * announcement for the id it actually ends up live on. */
+static void
+client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p, activate_result_t r,
+                              uint64_t new_id)
+{
+    if (r != ACTIVATE_OK || !c->conn) return;
+
+    if (p->weight > 0) {
+        xqc_conn_set_path_weight(c->engine, &c->conn->cid, new_id, p->weight);
+    }
+    if (p->dscp_mask != 0) {
+        xqc_conn_set_path_dscp_mask(c->engine, &c->conn->cid, new_id, p->dscp_mask);
+    }
+    if (p->name[0]) {
+        client_announce_path_label(c, new_id, p->name, p->weight, p->dscp_mask);
+    }
+}
+
 static void
 client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
@@ -2351,16 +2422,33 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
                                          : "TRANSIENT",
           (unsigned long long)new_id);
 
-    if (r == ACTIVATE_OK && p->weight > 0 && c->conn) {
-        xqc_conn_set_path_weight(c->engine, &c->conn->cid, new_id, p->weight);
-    }
-
+    /* path_on_event() FIRST, client_apply_path_assignments() SECOND — this
+     * order is load-bearing, not cosmetic. xqc_conn_create_path() (just
+     * above) can synchronously flush the new path's first PATH_CHALLENGE
+     * before returning, when called from a top-level entry point (e.g.
+     * the control-socket add_path handler) rather than from inside an
+     * xquic callback (e.g. the multipath-ready notification, where xquic
+     * defers the send to its next processing pass). cb_write_socket_ex()
+     * resolves the fd for that send via find_path_by_xqc_id(), which
+     * requires p->xqc_path_id/xquic_path_live to already be set —
+     * path_on_event(PATH_EVENT_ACTIVATE_REQUESTED) is what sets them. Any
+     * later call that can re-enter xquic (client_apply_path_assignments
+     * calls xqc_conn_set_path_weight/dscp_mask and sends the PATH_LABEL
+     * capsule) must come after, or a send triggered from a top-level
+     * entry point falls back to the primary path's fd (get_fd_for_path()'s
+     * no-match fallback) — the new path's first packet goes out the wrong
+     * physical interface with the wrong source address, and the peer
+     * legitimately (from what it sees) rejects it as a duplicate-IP path.
+     * Reproduced live via ci_bench netns: add_path after remove_path on
+     * the same iface never stabilized until this was fixed. */
     path_event_ctx_t ctx = {
         .result = r,
         .new_xqc_path_id = new_id,
         .now_us = client_now_us(c),
     };
     path_on_event(c, p, PATH_EVENT_ACTIVATE_REQUESTED, &ctx);
+
+    client_apply_path_assignments(c, p, r, new_id);
 }
 
 /* Activate every path currently in PATH_LC_PENDING.
@@ -3244,6 +3332,7 @@ mqvpn_client_add_path_fd_with_outcome(mqvpn_client_t *c, int fd,
         p->platform_net_id = desc->platform_net_id;
         p->flags = desc->flags;
         p->weight = desc->weight;
+        p->dscp_mask = desc->dscp_mask;
     }
 
     /* CLOSED_FREE -> PENDING via EVENT_ADD_FD. path_on_add_fd handler sets
@@ -3297,6 +3386,37 @@ mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint
 
     if (p->xquic_path_live && c->engine && c->conn) {
         xqc_conn_set_path_weight(c->engine, &c->conn->cid, p->xqc_path_id, weight);
+        /* Re-announce so the server's auto-mirrored downlink weight
+         * (see mqvpn_path_label.h) picks up the change too — the
+         * activation-time announcement in client_apply_path_assignments()
+         * only fires once, at (re)activation, so a weight change on an
+         * already-live path needs its own fresh capsule or the server
+         * keeps applying the stale value it saw at activation. */
+        if (p->name[0]) {
+            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight, p->dscp_mask);
+        }
+    }
+    return MQVPN_OK;
+}
+
+int
+mqvpn_client_set_path_dscp_mask(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                                 uint64_t dscp_mask)
+{
+    if (!c) return MQVPN_ERR_INVALID_ARG;
+    ASSERT_TICK_THREAD(c);
+
+    path_entry_t *p = find_path_by_handle(c, handle);
+    if (!p) return MQVPN_ERR_INVALID_ARG;
+
+    p->dscp_mask = dscp_mask;
+
+    if (p->xquic_path_live && c->engine && c->conn) {
+        xqc_conn_set_path_dscp_mask(c->engine, &c->conn->cid, p->xqc_path_id, dscp_mask);
+        /* Re-announce — same reasoning as mqvpn_client_set_path_weight() above. */
+        if (p->name[0]) {
+            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight, p->dscp_mask);
+        }
     }
     return MQVPN_OK;
 }
@@ -3761,9 +3881,11 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
     }
 
     uint64_t dgram_id;
+    xqc_connection_t *xqc_conn = xqc_h3_conn_get_xqc_conn(conn->h3_conn);
     uint32_t fh =
         flow_hash_pkt(pkt, (int)len, c->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
-    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
+    xqc_conn_set_dgram_flow_hash(xqc_conn, fh);
+    xqc_conn_set_dscp(xqc_conn, dscp_from_pkt(pkt, (int)len));
     xret = xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
                                     mqvpn_dgram_qos_level(c->config.scheduler));
 
@@ -3864,6 +3986,8 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
                                          : "TRANSIENT",
           p->recreate_retries, PATH_RECREATE_MAX_RETRIES);
 
+    /* path_on_event() before client_apply_path_assignments() — same
+     * load-bearing ordering as client_activate_path(), see its comment. */
     path_event_ctx_t ctx = {
         .result = r,
         .new_xqc_path_id = new_id,
@@ -3874,6 +3998,8 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
      * here, but that violated the VALIDATING invariant (path_stable_since_us
      * must be 0 in VALIDATING). The stability-timer anchor is now set on
      * VALIDATION_OK in path_on_validation_ok. */
+
+    client_apply_path_assignments(c, p, r, new_id);
 }
 
 /* Detect xquic-side path validation completion. xquic does not expose a

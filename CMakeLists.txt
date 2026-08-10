@@ -219,6 +219,7 @@ set(MQVPN_LIB_SOURCES
     src/path_error_policy.c
     src/path_state_machine.c
     src/flow_sched.c
+    src/mqvpn_path_label.c
     src/addr_pool.c
     src/auth.c
     src/log.c
@@ -759,6 +760,7 @@ if(BUILD_TESTING)
     add_executable(test_dns     tests/test_dns.c     src/platform/linux/dns.c     src/platform/posix/dns_common.c     src/log.c)
     add_executable(test_route_check tests/test_route_check.c src/platform/linux/route_check.c src/log.c)
     add_executable(test_flow_sched tests/test_flow_sched.c src/flow_sched.c src/log.c)
+    add_executable(test_path_label tests/test_path_label.c src/mqvpn_path_label.c src/log.c)
     add_executable(test_status tests/test_status.c)
     add_executable(test_path_rotation tests/test_path_rotation.c src/path_rotation.c)
     add_executable(test_fec_reinj tests/test_fec_reinj.c src/config.c src/log.c)
@@ -782,7 +784,7 @@ if(BUILD_TESTING)
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_path_label test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_classifier test_icmp test_reorder_gate)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of

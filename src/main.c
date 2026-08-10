@@ -82,7 +82,8 @@ usage(const char *prog)
         "  --status                  Query server status via control API and exit\n"
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
-        "  --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap  Multipath scheduler (default wlb)\n"
+        "  --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|\n"
+        "              redundant|dscp   Multipath scheduler (default wlb)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
         "                            TP (default = xquic default 8; set lower, "
@@ -515,7 +516,8 @@ main(int argc, char *argv[])
     int sched_lookup = mqvpn_sched_from_name(eff_scheduler);
     if (sched_lookup < 0) {
         fprintf(stderr, "error: --scheduler must be 'minrtt', 'wlb', 'backup', "
-                        "'wlb_udp_pin', 'backup_fec', 'rap', 'wrtt', 'wrr' or 'redundant'\n");
+                        "'wlb_udp_pin', 'backup_fec', 'rap', 'wrtt', 'wrr', "
+                        "'redundant' or 'dscp'\n");
         return 1;
     }
     int scheduler = sched_lookup;

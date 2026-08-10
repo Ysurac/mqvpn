@@ -4,8 +4,10 @@
  * Drives dispatch() end to end with the server-facing API mocked: command
  * routing, argument validation, error codes and response JSON shape for the
  * server commands (user management, stats/status/build info, FEC and reorder
- * stats) and the client-mode path commands (add_path/remove_path/list_paths/
- * set_path_weight), including the get_all_fec_stats branch which had a
+ * stats), the client-mode path commands (add_path/remove_path/list_paths/
+ * set_path_weight/set_path_dscp_mask, keyed by iface), and the dual-mode
+ * set_path_weight/set_path_dscp_mask server-mode form (keyed by user +
+ * path_id instead) — including the get_all_fec_stats branch which had a
  * missing return value when truncated == 0.
  *
  * Includes control_socket.c directly (same technique as test_status.c) and
@@ -144,6 +146,76 @@ int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_
     return g_reorder_rc;
 }
 
+/* Configurable return + captured-args for server-mode set_path_weight /
+ * set_path_dscp_mask (keyed by user + path_id, not iface — see
+ * control_socket.c's doc comment). */
+static int g_srv_set_weight_rc = MQVPN_OK;
+static char g_srv_set_weight_user[64];
+static uint64_t g_srv_set_weight_path_id;
+static uint32_t g_srv_set_weight_weight;
+
+int mqvpn_server_set_path_weight(mqvpn_server_t *s, const char *user, uint64_t path_id,
+                                 uint32_t weight)
+{
+    (void)s;
+    snprintf(g_srv_set_weight_user, sizeof(g_srv_set_weight_user), "%s", user ? user : "");
+    g_srv_set_weight_path_id = path_id;
+    g_srv_set_weight_weight = weight;
+    return g_srv_set_weight_rc;
+}
+
+static int g_srv_set_dscp_mask_rc = MQVPN_OK;
+static char g_srv_set_dscp_mask_user[64];
+static uint64_t g_srv_set_dscp_mask_path_id;
+static uint64_t g_srv_set_dscp_mask_mask;
+
+int mqvpn_server_set_path_dscp_mask(mqvpn_server_t *s, const char *user, uint64_t path_id,
+                                    uint64_t dscp_mask)
+{
+    (void)s;
+    snprintf(g_srv_set_dscp_mask_user, sizeof(g_srv_set_dscp_mask_user), "%s",
+             user ? user : "");
+    g_srv_set_dscp_mask_path_id = path_id;
+    g_srv_set_dscp_mask_mask = dscp_mask;
+    return g_srv_set_dscp_mask_rc;
+}
+
+/* Configurable return + captured-args for the _by_iface (persistent)
+ * variants — see mqvpn_path_label.h. */
+static int g_srv_set_weight_iface_rc = MQVPN_OK;
+static char g_srv_set_weight_iface_user[64];
+static char g_srv_set_weight_iface_iface[32];
+static uint32_t g_srv_set_weight_iface_weight;
+
+int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user,
+                                          const char *iface, uint32_t weight)
+{
+    (void)s;
+    snprintf(g_srv_set_weight_iface_user, sizeof(g_srv_set_weight_iface_user), "%s",
+             user ? user : "");
+    snprintf(g_srv_set_weight_iface_iface, sizeof(g_srv_set_weight_iface_iface), "%s",
+             iface ? iface : "");
+    g_srv_set_weight_iface_weight = weight;
+    return g_srv_set_weight_iface_rc;
+}
+
+static int g_srv_set_dscp_mask_iface_rc = MQVPN_OK;
+static char g_srv_set_dscp_mask_iface_user[64];
+static char g_srv_set_dscp_mask_iface_iface[32];
+static uint64_t g_srv_set_dscp_mask_iface_mask;
+
+int mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user,
+                                             const char *iface, uint64_t dscp_mask)
+{
+    (void)s;
+    snprintf(g_srv_set_dscp_mask_iface_user, sizeof(g_srv_set_dscp_mask_iface_user), "%s",
+             user ? user : "");
+    snprintf(g_srv_set_dscp_mask_iface_iface, sizeof(g_srv_set_dscp_mask_iface_iface), "%s",
+             iface ? iface : "");
+    g_srv_set_dscp_mask_iface_mask = dscp_mask;
+    return g_srv_set_dscp_mask_iface_rc;
+}
+
 /* ── Platform stubs ─────────────────────────────────────────────────────── */
 #include "platform_internal.h"
 
@@ -151,6 +223,7 @@ int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_
 static int g_add_path_rc          = 0;
 static int g_remove_path_rc       = 0;
 static int g_set_path_weight_rc   = 0;
+static int g_set_path_dscp_mask_rc = 0;
 static int g_list_paths_n         = 0;
 static char g_list_paths_names[MQVPN_MAX_PATHS][IFNAMSIZ];
 
@@ -171,6 +244,9 @@ int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
 
 int platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight)
 { (void)p; (void)iface; (void)weight; return g_set_path_weight_rc; }
+
+int platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_mask)
+{ (void)p; (void)iface; (void)dscp_mask; return g_set_path_dscp_mask_rc; }
 
 /* ── Pull in the implementation under test ──────────────────────────────── */
 #include "../src/platform/linux/control_socket.c"
@@ -660,6 +736,273 @@ TEST(set_path_weight_missing_weight)
     ASSERT_CONTAINS(resp, "weight required");
 }
 
+TEST(set_path_dscp_mask_success)
+{
+    g_set_path_dscp_mask_rc = 0;
+    char resp[256];
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":3}",
+                         resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+}
+
+TEST(set_path_dscp_mask_hex)
+{
+    g_set_path_dscp_mask_rc = 0;
+    char resp[256];
+    /* 0x400000000000 == 1ULL << 46 (EF), built via MQVPN_DSCP_BIT(46).
+     * Unquoted, like every other numeric field this mini-parser reads
+     * (json_find_key() returns the raw text after ':', not a validated
+     * JSON number token — see strtoull(..., 0) in the handler). */
+    call_dispatch_client(
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":0x400000000000}",
+        resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+}
+
+TEST(set_path_dscp_mask_platform_failure)
+{
+    g_set_path_dscp_mask_rc = -1;
+    char resp[256];
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":3}",
+                         resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "path not found");
+    g_set_path_dscp_mask_rc = 0;
+}
+
+TEST(set_path_dscp_mask_missing_mask)
+{
+    char resp[256];
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\"}",
+                         resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "dscp_mask required");
+}
+
+TEST(set_path_dscp_mask_missing_iface)
+{
+    char resp[256];
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"dscp_mask\":3}",
+                         resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "iface required");
+}
+
+/* ── set_path_weight / set_path_dscp_mask, SERVER mode ──
+ * Keyed by user + path_id instead of iface (control_socket.c doc comment
+ * explains why a server has no local-interface concept for a path). */
+
+TEST(set_path_weight_server_success)
+{
+    g_srv_set_weight_rc = MQVPN_OK;
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"path_id\":2,\"weight\":10}",
+                  resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+    ASSERT_STR_EQ(g_srv_set_weight_user, "alice");
+    if (g_srv_set_weight_path_id != 2 || g_srv_set_weight_weight != 10) {
+        printf("FAIL\n    captured path_id/weight mismatch: %" PRIu64 "/%u\n",
+               g_srv_set_weight_path_id, g_srv_set_weight_weight);
+        exit(1);
+    }
+}
+
+TEST(set_path_weight_server_user_not_found)
+{
+    g_srv_set_weight_rc = MQVPN_ERR_INVALID_ARG;
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"nobody\",\"path_id\":0,\"weight\":1}",
+                  resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user not found");
+    g_srv_set_weight_rc = MQVPN_OK;
+}
+
+TEST(set_path_weight_server_path_not_found)
+{
+    g_srv_set_weight_rc = MQVPN_ERR_ENGINE;
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"path_id\":99,\"weight\":1}",
+                  resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "path not found");
+    g_srv_set_weight_rc = MQVPN_OK;
+}
+
+TEST(set_path_weight_server_missing_user)
+{
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"path_id\":0,\"weight\":1}", resp,
+                  sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user required");
+}
+
+TEST(set_path_weight_server_missing_path_id)
+{
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"weight\":1}", resp,
+                  sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "iface or path_id required");
+}
+
+TEST(set_path_weight_server_by_iface_success)
+{
+    g_srv_set_weight_iface_rc = MQVPN_OK;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"iface\":\"wlan0\",\"weight\":10}",
+        resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+    ASSERT_STR_EQ(g_srv_set_weight_iface_user, "alice");
+    ASSERT_STR_EQ(g_srv_set_weight_iface_iface, "wlan0");
+    if (g_srv_set_weight_iface_weight != 10) {
+        printf("FAIL\n    captured weight mismatch: %u\n", g_srv_set_weight_iface_weight);
+        exit(1);
+    }
+}
+
+TEST(set_path_weight_server_iface_takes_priority_over_path_id)
+{
+    /* Both given: iface wins, per the doc comment. */
+    g_srv_set_weight_iface_rc = MQVPN_OK;
+    g_srv_set_weight_rc = MQVPN_OK;
+    g_srv_set_weight_path_id = 999; /* pre-dirty: must NOT be touched */
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"iface\":\"wlan0\","
+        "\"path_id\":2,\"weight\":10}",
+        resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+    ASSERT_STR_EQ(g_srv_set_weight_iface_iface, "wlan0");
+    if (g_srv_set_weight_path_id != 999) {
+        printf("FAIL\n    path_id-keyed setter was called; iface should have taken priority\n");
+        exit(1);
+    }
+}
+
+TEST(set_path_weight_server_by_iface_user_not_found)
+{
+    g_srv_set_weight_iface_rc = MQVPN_ERR_INVALID_ARG;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_weight\",\"user\":\"nobody\",\"iface\":\"wlan0\",\"weight\":1}",
+        resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user not found");
+    g_srv_set_weight_iface_rc = MQVPN_OK;
+}
+
+TEST(set_path_dscp_mask_server_success)
+{
+    g_srv_set_dscp_mask_rc = MQVPN_OK;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"path_id\":2,"
+        "\"dscp_mask\":0x400000000000}",
+        resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+    ASSERT_STR_EQ(g_srv_set_dscp_mask_user, "alice");
+    if (g_srv_set_dscp_mask_path_id != 2 ||
+        g_srv_set_dscp_mask_mask != (1ULL << 46)) {
+        printf("FAIL\n    captured path_id/mask mismatch: %" PRIu64 "/%" PRIu64 "\n",
+               g_srv_set_dscp_mask_path_id, g_srv_set_dscp_mask_mask);
+        exit(1);
+    }
+}
+
+TEST(set_path_dscp_mask_server_user_not_found)
+{
+    g_srv_set_dscp_mask_rc = MQVPN_ERR_INVALID_ARG;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"nobody\",\"path_id\":0,\"dscp_mask\":0}",
+        resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user not found");
+    g_srv_set_dscp_mask_rc = MQVPN_OK;
+}
+
+TEST(set_path_dscp_mask_server_path_not_found)
+{
+    g_srv_set_dscp_mask_rc = MQVPN_ERR_ENGINE;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"path_id\":99,\"dscp_mask\":0}",
+        resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "path not found");
+    g_srv_set_dscp_mask_rc = MQVPN_OK;
+}
+
+TEST(set_path_dscp_mask_server_missing_user)
+{
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"path_id\":0,\"dscp_mask\":0}", resp,
+                  sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user required");
+}
+
+TEST(set_path_dscp_mask_server_missing_path_id)
+{
+    char resp[256];
+    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"dscp_mask\":0}", resp,
+                  sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "iface or path_id required");
+}
+
+TEST(set_path_dscp_mask_server_by_iface_success)
+{
+    g_srv_set_dscp_mask_iface_rc = MQVPN_OK;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"iface\":\"wlan0\","
+        "\"dscp_mask\":0x400000000000}",
+        resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+    ASSERT_STR_EQ(g_srv_set_dscp_mask_iface_user, "alice");
+    ASSERT_STR_EQ(g_srv_set_dscp_mask_iface_iface, "wlan0");
+    if (g_srv_set_dscp_mask_iface_mask != (1ULL << 46)) {
+        printf("FAIL\n    captured mask mismatch: %" PRIu64 "\n",
+               g_srv_set_dscp_mask_iface_mask);
+        exit(1);
+    }
+}
+
+TEST(set_path_dscp_mask_server_iface_takes_priority_over_path_id)
+{
+    g_srv_set_dscp_mask_iface_rc = MQVPN_OK;
+    g_srv_set_dscp_mask_rc = MQVPN_OK;
+    g_srv_set_dscp_mask_path_id = 999; /* pre-dirty: must NOT be touched */
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"iface\":\"wlan0\","
+        "\"path_id\":2,\"dscp_mask\":3}",
+        resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true}");
+    ASSERT_STR_EQ(g_srv_set_dscp_mask_iface_iface, "wlan0");
+    if (g_srv_set_dscp_mask_path_id != 999) {
+        printf("FAIL\n    path_id-keyed setter was called; iface should have taken priority\n");
+        exit(1);
+    }
+}
+
+TEST(set_path_dscp_mask_server_by_iface_user_not_found)
+{
+    g_srv_set_dscp_mask_iface_rc = MQVPN_ERR_INVALID_ARG;
+    char resp[256];
+    call_dispatch(
+        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"nobody\",\"iface\":\"wlan0\","
+        "\"dscp_mask\":0}",
+        resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user not found");
+    g_srv_set_dscp_mask_iface_rc = MQVPN_OK;
+}
+
 TEST(list_paths_empty)
 {
     g_list_paths_n = 0;
@@ -751,6 +1094,30 @@ main(void)
     run_set_path_weight_success();
     run_set_path_weight_out_of_range();
     run_set_path_weight_missing_weight();
+    run_set_path_dscp_mask_success();
+    run_set_path_dscp_mask_hex();
+    run_set_path_dscp_mask_platform_failure();
+    run_set_path_dscp_mask_missing_mask();
+    run_set_path_dscp_mask_missing_iface();
+
+    /* set_path_weight / set_path_dscp_mask, server mode */
+    run_set_path_weight_server_success();
+    run_set_path_weight_server_user_not_found();
+    run_set_path_weight_server_path_not_found();
+    run_set_path_weight_server_missing_user();
+    run_set_path_weight_server_missing_path_id();
+    run_set_path_weight_server_by_iface_success();
+    run_set_path_weight_server_iface_takes_priority_over_path_id();
+    run_set_path_weight_server_by_iface_user_not_found();
+    run_set_path_dscp_mask_server_success();
+    run_set_path_dscp_mask_server_user_not_found();
+    run_set_path_dscp_mask_server_path_not_found();
+    run_set_path_dscp_mask_server_missing_user();
+    run_set_path_dscp_mask_server_missing_path_id();
+    run_set_path_dscp_mask_server_by_iface_success();
+    run_set_path_dscp_mask_server_iface_takes_priority_over_path_id();
+    run_set_path_dscp_mask_server_by_iface_user_not_found();
+
     run_list_paths_empty();
     run_list_paths_two_entries();
     run_list_paths_server_mode_rejected();

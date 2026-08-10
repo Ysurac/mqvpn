@@ -55,6 +55,7 @@
 #include "addr_pool.h"
 #include "auth.h"
 #include "flow_sched.h"
+#include "mqvpn_path_label.h"
 #include "icmp.h"
 #include "reorder.h"
 #include "reorder_gate.h"
@@ -82,6 +83,39 @@ typedef struct svr_stream_s svr_stream_t;
  * apart.  Chosen to be unreachable as the start of any valid hostname string
  * (high-bit bytes that are illegal in DNS names). */
 #define SVR_CONN_TAG 0xC0DE0001u
+
+/* Per-iface downlink weight/dscp_mask persistence AND client->server
+ * value mirroring — see mqvpn_path_label.h.
+ *
+ * Populated from PATH_LABEL capsules the client announces at path
+ * (re)activation; path_id is volatile (updated on every announcement).
+ * weight/dscp_mask is either the value the CLIENT itself announced (the
+ * default — this is what lets "set it once on the client" take effect on
+ * the server's downlink too, with no separate server-side action) or an
+ * operator's explicit mqvpn_server_set_path_weight_by_iface() /
+ * _dscp_mask_by_iface() call, which always wins from then on
+ * (weight_from_operator / dscp_mask_from_operator) — an operator override
+ * is a more specific, intentional action than the client's own default,
+ * and must not be silently clobbered by the client's next reconnect
+ * re-announcing its own (unchanged) value. Either source's value is
+ * reapplied automatically whenever path_id changes.
+ *
+ * Scoped to one connection's lifetime, same as everything else in
+ * svr_conn_s — mirrors the client side's path_entry_t, which is also only
+ * in-process/in-connection state, not persisted across a full restart. */
+typedef struct {
+    char     iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+    uint64_t path_id;
+    uint32_t weight;
+    uint64_t dscp_mask;
+    int      has_path_id;   /* an announcement has arrived (path_id 0 is a
+                              * valid id — can't use it as its own sentinel) */
+    int      has_weight;
+    int      has_dscp_mask;
+    int      weight_from_operator;     /* an explicit server-side call set this —
+                                         * ignore the client's own announced value */
+    int      dscp_mask_from_operator;
+} svr_path_label_t;
 
 struct svr_conn_s {
     uint32_t        tag;    /* SVR_CONN_TAG — set at alloc time in cb_accept */
@@ -111,6 +145,11 @@ struct svr_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+    /* Per-iface downlink weight/dscp_mask persistence — see
+     * svr_path_label_t above / mqvpn_path_label.h. */
+    svr_path_label_t path_labels[MQVPN_MAX_PATHS];
+    int n_path_labels;
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     int tcp_flow_count; /* per-session cap enforcement lands with the
@@ -609,6 +648,34 @@ cb_path_created(xqc_connection_t *conn, const xqc_cid_t *cid, uint64_t path_id,
     (void)cid;
     mqvpn_server_t *s = server_from_ud(conn_user_data);
     if (s) LOG_I(s, "new path created: path_id=%" PRIu64, path_id);
+
+    /* Reapply a previously-announced iface label's weight/dscp_mask for
+     * this path_id — backstop for a race in the PATH_LABEL capsule flow
+     * (see mqvpn_path_label.h): the capsule travels on an already-
+     * validated stream/path, independent of the NEW path_id it announces,
+     * so it can arrive and be processed before the server creates its own
+     * local path_ctx_t for that path_id — at which point
+     * xqc_conn_set_path_weight/_dscp_mask silently can't find it yet
+     * (xqc_conn_find_path_by_path_id fails). This callback fires exactly
+     * when that local object comes into existence, so re-scan for a
+     * label whose announcement already named this path_id and apply it
+     * now. (The capsule handler is the backstop for the opposite
+     * ordering — path created first, capsule arrives after — where its
+     * own direct apply attempt succeeds immediately.) */
+    svr_conn_t *sc = (svr_conn_t *)conn_user_data;
+    if (sc && sc->tag == SVR_CONN_TAG) {
+        for (int i = 0; i < sc->n_path_labels; i++) {
+            svr_path_label_t *label = &sc->path_labels[i];
+            if (!label->has_path_id || label->path_id != path_id) continue;
+            if (label->has_weight) {
+                xqc_conn_set_path_weight(s->engine, &sc->cid, path_id, label->weight);
+            }
+            if (label->has_dscp_mask) {
+                xqc_conn_set_path_dscp_mask(s->engine, &sc->cid, path_id,
+                                           label->dscp_mask);
+            }
+        }
+    }
     return 0;
 }
 
@@ -1405,7 +1472,41 @@ svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
 }
 #endif /* MQVPN_HYBRID_TCP_EGRESS_ENABLED */
 
-/* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST handling. */
+/* ─── Per-iface downlink weight/dscp_mask persistence (svr_path_label_t) ───
+ * See mqvpn_path_label.h and the struct's own doc comment for the why. */
+
+static svr_path_label_t *
+svr_path_label_find(svr_conn_t *conn, const char *iface)
+{
+    for (int i = 0; i < conn->n_path_labels; i++) {
+        if (strcmp(conn->path_labels[i].iface, iface) == 0) {
+            return &conn->path_labels[i];
+        }
+    }
+    return NULL;
+}
+
+/* Finds the existing entry for `iface`, or creates one (zero-initialized,
+ * i.e. no weight/dscp_mask assigned yet) if none exists. Capped at
+ * MQVPN_MAX_PATHS entries — one per client path, matching the client-side
+ * cap, so this should never actually fill up in practice. Returns NULL
+ * only if it somehow does. */
+static svr_path_label_t *
+svr_path_label_find_or_create(svr_conn_t *conn, const char *iface)
+{
+    svr_path_label_t *e = svr_path_label_find(conn, iface);
+    if (e) return e;
+
+    if (conn->n_path_labels >= MQVPN_MAX_PATHS) return NULL;
+
+    e = &conn->path_labels[conn->n_path_labels++];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->iface, sizeof(e->iface), "%s", iface);
+    return e;
+}
+
+/* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST/PATH_LABEL
+ * handling. */
 static int
 svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                        xqc_h3_request_t *h3_request)
@@ -1472,6 +1573,58 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                                               resp_written);
                     xqc_h3_request_send_body(h3_request, cap_buf, cap_w, 0);
                 }
+            }
+
+            if (cap_type == MQVPN_CAPSULE_PATH_LABEL && stream->conn) {
+                uint64_t path_id;
+                uint64_t client_dscp_mask;
+                uint32_t client_weight;
+                char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+                if (mqvpn_path_label_decode(cap_payload, cap_len, &path_id, iface,
+                                            sizeof(iface), &client_weight,
+                                            &client_dscp_mask) == 0) {
+                    svr_path_label_t *label =
+                        svr_path_label_find_or_create(stream->conn, iface);
+                    if (label) {
+                        label->path_id = path_id;
+                        label->has_path_id = 1;
+                        LOG_I(s, "path_label: user=%s iface=%s path_id=%" PRIu64
+                                 " client_weight=%u client_dscp_mask=%" PRIu64,
+                              stream->conn->username, iface, path_id, client_weight,
+                              client_dscp_mask);
+
+                        /* Adopt the client's own value by default — this is
+                         * what lets "set it once on the client" reach the
+                         * server's downlink with no separate server-side
+                         * action. An operator's explicit
+                         * set_path_weight_by_iface() / _dscp_mask_by_iface()
+                         * call always wins instead, and stays sticky across
+                         * further client re-announcements (weight_from_operator). */
+                        if (!label->weight_from_operator && client_weight != 0) {
+                            label->weight = client_weight;
+                            label->has_weight = 1;
+                        }
+                        if (!label->dscp_mask_from_operator && client_dscp_mask != 0) {
+                            label->dscp_mask = client_dscp_mask;
+                            label->has_dscp_mask = 1;
+                        }
+
+                        if (label->has_weight) {
+                            xqc_conn_set_path_weight(s->engine, &stream->conn->cid,
+                                                     path_id, label->weight);
+                        }
+                        if (label->has_dscp_mask) {
+                            xqc_conn_set_path_dscp_mask(s->engine, &stream->conn->cid,
+                                                        path_id, label->dscp_mask);
+                        }
+                    } else {
+                        LOG_W(s, "path_label table full: user=%s iface=%s",
+                              stream->conn->username, iface);
+                    }
+                }
+                /* Malformed payload: silently ignored, same treatment as any
+                 * other unrecognized/invalid capsule — never worth tearing
+                 * down the tunnel over an optional signaling channel. */
             }
 
             if (consumed < stream->capsule_len)
@@ -2390,9 +2543,11 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (xret != XQC_OK) return MQVPN_ERR_ENGINE;
 
     uint64_t dgram_id;
+    xqc_connection_t *xqc_conn = xqc_h3_conn_get_xqc_conn(target->h3_conn);
     uint32_t fh =
         flow_hash_pkt(pkt, (int)len, s->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
-    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
+    xqc_conn_set_dgram_flow_hash(xqc_conn, fh);
+    xqc_conn_set_dscp(xqc_conn, dscp_from_pkt(pkt, (int)len));
     xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
                                     mqvpn_dgram_qos_level(s->config.scheduler));
 
@@ -2769,6 +2924,139 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
     }
 
     return MQVPN_OK;
+}
+
+/* ─── Server-side per-path weight/DSCP-mask (wrtt/wrr/dscp downlink) ───
+ *
+ * Client-side path assignment (mqvpn_client_set_path_weight/dscp_mask) only
+ * ever affects packets the CLIENT sends — QUIC multipath scheduling is
+ * per-endpoint-per-direction, so on its own it has no effect on which path
+ * the SERVER picks for the downlink bytes it sends back. BUT the client
+ * also reports its own weight/dscp_mask to the server via the PATH_LABEL
+ * capsule (see mqvpn_path_label.h and svr_path_label_t's doc comment), and
+ * the server ADOPTS that report for its own downlink scheduling by
+ * default — so calling the client-side setter alone is normally enough
+ * for both directions to agree, no server-side call required.
+ *
+ * The functions below are for PINNING the server to a value different
+ * from what the client reports (asymmetric control) — an explicit call
+ * here always wins over the client's report, from then on. The plain
+ * path_id form is keyed by (user, path_id) — a server has no local-
+ * interface concept for a path, only the QUIC path_id it shares with the
+ * client (already surfaced per-user in mqvpn_server_get_client_info's
+ * per-path output) — and does NOT persist across a full path teardown/
+ * recreate: path_id can change, and there is no local slot to re-apply
+ * from. The _by_iface variants further below DO persist across that (and
+ * are what the client's own auto-reported value uses internally), by
+ * keying on the iface name the client announces per path instead of the
+ * volatile path_id directly — same iface string the client already uses
+ * everywhere else (mqvpn_path_desc_t.iface, the client's set_path_weight
+ * control command). Prefer these over the plain path_id form unless you
+ * specifically want a one-shot, non-persistent override. */
+
+int
+mqvpn_server_set_path_weight(mqvpn_server_t *s, const char *user, uint64_t path_id,
+                             uint32_t weight)
+{
+    if (!s || !user || user[0] == '\0') return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+        if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
+
+        xqc_int_t xret = xqc_conn_set_path_weight(s->engine, &conn->cid, path_id, weight);
+        return (xret == XQC_OK) ? MQVPN_OK : MQVPN_ERR_ENGINE;
+    }
+    return MQVPN_ERR_INVALID_ARG; /* user not found / not connected */
+}
+
+int
+mqvpn_server_set_path_dscp_mask(mqvpn_server_t *s, const char *user, uint64_t path_id,
+                                uint64_t dscp_mask)
+{
+    if (!s || !user || user[0] == '\0') return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+        if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
+
+        xqc_int_t xret =
+            xqc_conn_set_path_dscp_mask(s->engine, &conn->cid, path_id, dscp_mask);
+        return (xret == XQC_OK) ? MQVPN_OK : MQVPN_ERR_ENGINE;
+    }
+    return MQVPN_ERR_INVALID_ARG; /* user not found / not connected */
+}
+
+int
+mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user, const char *iface,
+                                      uint32_t weight)
+{
+    if (!s || !user || user[0] == '\0' || !iface || iface[0] == '\0' ||
+        strlen(iface) > MQVPN_PATH_LABEL_IFACE_MAX)
+        return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+        if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
+
+        svr_path_label_t *label = svr_path_label_find_or_create(conn, iface);
+        if (!label) return MQVPN_ERR_ENGINE; /* label table full — should not happen */
+
+        label->weight = weight;
+        label->has_weight = 1;
+        /* Explicit operator call: pins this value from now on, immune to
+         * the client re-announcing its own (different) value on a future
+         * reconnect — see svr_path_label_t's doc comment. */
+        label->weight_from_operator = 1;
+
+        if (!label->has_path_id) {
+            /* No PATH_LABEL announcement for this iface yet (peer predates
+             * this feature, or the path just hasn't come up yet) — stored
+             * for whenever one arrives; nothing to apply right now. */
+            return MQVPN_OK;
+        }
+
+        xqc_int_t xret =
+            xqc_conn_set_path_weight(s->engine, &conn->cid, label->path_id, weight);
+        return (xret == XQC_OK) ? MQVPN_OK : MQVPN_ERR_ENGINE;
+    }
+    return MQVPN_ERR_INVALID_ARG; /* user not found / not connected */
+}
+
+int
+mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user,
+                                         const char *iface, uint64_t dscp_mask)
+{
+    if (!s || !user || user[0] == '\0' || !iface || iface[0] == '\0' ||
+        strlen(iface) > MQVPN_PATH_LABEL_IFACE_MAX)
+        return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        svr_conn_t *conn = s->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+        if (strncmp(conn->username, user, sizeof(conn->username)) != 0) continue;
+
+        svr_path_label_t *label = svr_path_label_find_or_create(conn, iface);
+        if (!label) return MQVPN_ERR_ENGINE;
+
+        label->dscp_mask = dscp_mask;
+        label->has_dscp_mask = 1;
+        /* Explicit operator call: pins this value — same reasoning as
+         * set_path_weight_by_iface() above. */
+        label->dscp_mask_from_operator = 1;
+
+        if (!label->has_path_id) {
+            return MQVPN_OK;
+        }
+
+        xqc_int_t xret =
+            xqc_conn_set_path_dscp_mask(s->engine, &conn->cid, label->path_id, dscp_mask);
+        return (xret == XQC_OK) ? MQVPN_OK : MQVPN_ERR_ENGINE;
+    }
+    return MQVPN_ERR_INVALID_ARG; /* user not found / not connected */
 }
 
 int

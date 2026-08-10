@@ -4,9 +4,9 @@
 /*
  * flow_sched.h
  *
- * Scheduler mode constants and IPv4/IPv6 5-tuple flow hash utility.
- * Path selection is handled inside xquic scheduler callbacks
- * (minrtt/wlb).
+ * Scheduler mode constants, the IPv4/IPv6 5-tuple flow hash utility (WLB),
+ * and the DSCP class extractor (DSCP scheduler). Path selection itself is
+ * handled inside xquic scheduler callbacks (minrtt/wlb/dscp).
  */
 #ifndef MQVPN_FLOW_SCHED_H
 #define MQVPN_FLOW_SCHED_H
@@ -25,6 +25,7 @@
 #define MQVPN_SCHED_WRTT        6
 #define MQVPN_SCHED_WRR         7
 #define MQVPN_SCHED_REDUNDANT   8
+#define MQVPN_SCHED_DSCP        9
 
 /* Sentinel: WRR without flow pinning (for UDP/QUIC — no reordering concern) */
 #define MQVPN_FLOW_HASH_UNPINNED 0xFFFFFFFFU
@@ -42,5 +43,14 @@
  * IPv6 extension headers are intentionally out of scope for now; IPv6 pinning
  * only recognizes packets whose base header points directly at TCP or UDP. */
 uint32_t flow_hash_pkt(const uint8_t *pkt, int len, bool udp_pin);
+
+/* Returns the inner packet's DSCP class (0-63) for xquic's DSCP scheduler
+ * hint (xqc_conn_set_dscp).
+ *   IPv4  → top 6 bits of the TOS byte (pkt[1] >> 2)
+ *   IPv6  → top 6 bits of the traffic class field
+ *   malformed / too short / unknown IP version → 0 ("untagged" — the DSCP
+ *     scheduler treats this identically to a genuine CS0/best-effort packet
+ *     and falls back to plain MinRTT across every path). */
+uint8_t dscp_from_pkt(const uint8_t *pkt, int len);
 
 #endif /* MQVPN_FLOW_SCHED_H */

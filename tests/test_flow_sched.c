@@ -503,6 +503,10 @@ test_sched_mode_constants(void)
     ASSERT_EQ(MQVPN_SCHED_BACKUP_FEC, 3);
     ASSERT_EQ(MQVPN_SCHED_RAP, 4);
     ASSERT_EQ(MQVPN_SCHED_WLB_UDP_PIN, 5);
+    ASSERT_EQ(MQVPN_SCHED_WRTT, 6);
+    ASSERT_EQ(MQVPN_SCHED_WRR, 7);
+    ASSERT_EQ(MQVPN_SCHED_REDUNDANT, 8);
+    ASSERT_EQ(MQVPN_SCHED_DSCP, 9);
     ASSERT_NEQ(MQVPN_SCHED_MINRTT, MQVPN_SCHED_WLB);
 
     PASS();
@@ -780,6 +784,138 @@ test_hash_ipv4_udp_fragments_respect_udp_pin(void)
     PASS();
 }
 
+/* ── dscp_from_pkt tests ── */
+
+static void
+set_ipv6_traffic_class(uint8_t *buf, uint8_t tc)
+{
+    /* version(4) | traffic_class(8) | flow_label(20) */
+    buf[0] = (uint8_t)(0x60 | (tc >> 4));
+    buf[1] = (uint8_t)((tc & 0x0f) << 4);
+}
+
+static void
+test_dscp_ipv4_basic(void)
+{
+    TEST(dscp_from_pkt IPv4 basic(EF 46));
+
+    uint8_t pkt[20] = {0};
+    pkt[0] = 0x45; /* IPv4, IHL=5 */
+    pkt[1] = 46 << 2; /* DSCP=46 (EF), ECN=0 */
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 20), 46);
+
+    PASS();
+}
+
+static void
+test_dscp_ipv4_ecn_bits_ignored(void)
+{
+    TEST(dscp_from_pkt IPv4 ignores ECN bits);
+
+    uint8_t pkt[20] = {0};
+    pkt[0] = 0x45;
+    pkt[1] = (uint8_t)((10 << 2) | 0x3); /* DSCP=10 (AF11), ECN=3 */
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 20), 10);
+
+    PASS();
+}
+
+static void
+test_dscp_ipv4_zero_default(void)
+{
+    TEST(dscp_from_pkt IPv4 untagged returns 0);
+
+    uint8_t pkt[20] = {0};
+    pkt[0] = 0x45;
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 20), 0);
+
+    PASS();
+}
+
+static void
+test_dscp_ipv4_max_value(void)
+{
+    TEST(dscp_from_pkt IPv4 max DSCP(63));
+
+    uint8_t pkt[20] = {0};
+    pkt[0] = 0x45;
+    pkt[1] = 0xff; /* DSCP=63, ECN=3 */
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 20), 63);
+
+    PASS();
+}
+
+static void
+test_dscp_ipv4_too_short(void)
+{
+    TEST(dscp_from_pkt IPv4 too short returns 0);
+
+    uint8_t pkt[19] = {0};
+    pkt[0] = 0x45;
+    pkt[1] = 46 << 2;
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 19), 0);
+
+    PASS();
+}
+
+static void
+test_dscp_ipv6_basic(void)
+{
+    TEST(dscp_from_pkt IPv6 basic(AF41 34));
+
+    uint8_t pkt[40] = {0};
+    set_ipv6_traffic_class(pkt, 34 << 2);
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 40), 34);
+
+    PASS();
+}
+
+static void
+test_dscp_ipv6_too_short(void)
+{
+    TEST(dscp_from_pkt IPv6 too short returns 0);
+
+    uint8_t pkt[39] = {0};
+    set_ipv6_traffic_class(pkt, 34 << 2);
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 39), 0);
+
+    PASS();
+}
+
+static void
+test_dscp_unknown_version(void)
+{
+    TEST(dscp_from_pkt unknown IP version returns 0);
+
+    uint8_t pkt[40] = {0};
+    pkt[0] = 0x50; /* version 5 */
+    pkt[1] = 46 << 2;
+
+    ASSERT_EQ(dscp_from_pkt(pkt, 40), 0);
+
+    PASS();
+}
+
+static void
+test_dscp_null_and_zero_length(void)
+{
+    TEST(dscp_from_pkt NULL / zero length returns 0);
+
+    ASSERT_EQ(dscp_from_pkt(NULL, 20), 0);
+
+    uint8_t pkt[1] = {0x45};
+    ASSERT_EQ(dscp_from_pkt(pkt, 0), 0);
+
+    PASS();
+}
+
 /* ── UDP pin gate tests ── */
 
 static void
@@ -933,6 +1069,17 @@ main(void)
     test_udp_pin_ipv6_gate();
     test_udp_pin_tcp_unchanged();
     test_udp_pin_ipv4_truncated();
+
+    /* dscp_from_pkt (DSCP scheduler hint) */
+    test_dscp_ipv4_basic();
+    test_dscp_ipv4_ecn_bits_ignored();
+    test_dscp_ipv4_zero_default();
+    test_dscp_ipv4_max_value();
+    test_dscp_ipv4_too_short();
+    test_dscp_ipv6_basic();
+    test_dscp_ipv6_too_short();
+    test_dscp_unknown_version();
+    test_dscp_null_and_zero_length();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

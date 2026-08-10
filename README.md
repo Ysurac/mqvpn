@@ -223,6 +223,7 @@ User = carol:carol-secret:10.0.0.50   # fixed IP — always assigned this addres
 Scheduler = wlb
 # Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
 # Scheduler = redundant         # broadcast every packet on every usable path (loss-critical, low-bitrate)
+# Scheduler = dscp               # route by inner packet's DSCP class (set per-path masks via control API)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
 # FecEnable = true
@@ -257,6 +258,7 @@ DNS = 1.1.1.1, 8.8.8.8
 Scheduler = wlb
 # Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
 # Scheduler = redundant         # broadcast every packet on every usable path (loss-critical, low-bitrate)
+# Scheduler = dscp               # route by inner packet's DSCP class (set per-path masks via control API)
 # ReinjectionControl = true
 # ReinjectionMode = deadline  # default|deadline|dgram
 # FecEnable = true
@@ -365,6 +367,7 @@ sudo mqvpn --config /etc/mqvpn/client.conf
 | `wrr`           | weighted RR      | weighted RR      | smooth weighted round robin, interleaved across paths      |
 | `backup_fec`    | redundant        | redundant        | resilience-first (requires XQC_ENABLE_FEC)                |
 | `redundant`     | broadcast        | broadcast        | every packet duplicated on every usable path; loss-critical, low-bitrate traffic |
+| `dscp`          | DSCP policy route | DSCP policy route | route by inner packet's DSCP class to an assigned path, min-RTT fallback |
 
 **Choosing wlb vs wlb_udp_pin:** Plain `wlb` distributes UDP packets across
 paths per-packet, which gives better aggregate throughput when the inner
@@ -387,10 +390,20 @@ best weight-to-RTT score. When weights are equal, the lowest-RTT path leads.
 When weights differ, the higher-weight path dominates even if its RTT is worse.
 When the preferred path is congestion-limited, traffic spills over to secondary
 paths automatically (cwnd-block fallback). Path weights are set at runtime via
-`set_path_weight` (see [Client commands](#client-commands) below). Use `wrtt`
-when you need fine-grained per-link preference in addition to aggregation — for
-example, to prioritise a high-bandwidth fibre link over a metered LTE backup
-while still drawing on both under load.
+`set_path_weight` (see [Client commands](#client-commands) below). QUIC
+multipath scheduling is per-endpoint-per-direction — the client and server
+each schedule only the packets *they* send — but setting a weight on the
+**client** is enough on its own: the client tells the server its own weight
+for that path (piggybacked on the same mechanism that makes this survive a
+reconnect — see the note under [Set path weight](#set-path-weight) below),
+and the server adopts it for its downlink scheduling too, with no separate
+server-side call needed. Use the server-mode form of `set_path_weight` only
+if you want the server to use a *different* weight than the client for that
+path (asymmetric control) — that explicit choice always wins over whatever
+the client reports. Use `wrtt` when you need fine-grained per-link
+preference in addition to aggregation — for example, to prioritise a
+high-bandwidth fibre link over a metered LTE backup while still drawing on
+both under load.
 
 **`redundant` — broadcast scheduler:** every packet is duplicated onto every
 currently usable path (both AVAILABLE and STANDBY, unlike the other
@@ -400,6 +413,25 @@ arrives, the data is delivered. There is no aggregation benefit and effective
 throughput is capped at the slowest usable path's share of bandwidth. Intended
 for low-bitrate, loss/latency-critical traffic (control channels, keepalives,
 VoIP) rather than bulk transfer.
+
+**`dscp` — DSCP policy-routing scheduler:** each path is assigned one or more
+DSCP classes via `set_path_dscp_mask` (see [Client commands](#client-commands)
+below); packets are then routed by the inner IP header's DSCP field (the
+same field `iptables -t mangle -j DSCP --set-dscp` or a QoS-aware application
+would set), analogous to `ip rule add fwmark N table T`. A packet tagged with
+a class goes to whichever assigned path currently has the best RTT (min-RTT
+breaks ties when a class is assigned to more than one path); untagged
+packets (DSCP 0 — the default for most traffic) and any class with no
+currently-usable assigned path fall back to plain MinRTT across every path
+instead of stalling. Use `dscp` when different inner traffic classes need
+deterministic path placement — for example, pinning VoIP/EF traffic to a
+low-latency link while bulk transfer rides a separate high-bandwidth one.
+As with `wrtt` above, setting the mask on the **client** is enough — it's
+reported to the server and adopted for downlink scheduling automatically,
+so e.g. for a file download (where the bulk of the data flows
+server→client) the client-side mask alone *does* now determine which path
+it arrives on. Use the server-mode form of `set_path_dscp_mask` only to
+pin the server to a different mask than the client (asymmetric control).
 
 ## Reorder buffer (datagram lane)
 
@@ -596,6 +628,10 @@ echo '{"cmd":"get_stats"}' | nc 127.0.0.1 9090
 
 ### Client commands
 
+`add_path`/`remove_path`/`list_paths` are client-only. `set_path_weight` and
+`set_path_dscp_mask` below also have a server-mode form — see each
+subsection.
+
 #### Add a path
 
 ```bash
@@ -657,6 +693,89 @@ echo '{"cmd":"set_path_weight","iface":"wlan0","weight":1}' | nc 127.0.0.1 9091
 > `set_path_weight` before paths are active is accepted but the weight is applied
 > as soon as the path activates.
 
+**This is enough on its own — no server-side call needed.** QUIC multipath
+scheduling is per-endpoint-per-direction (client and server each schedule
+only the packets *they* send), but the client reports its own weight to the
+server automatically, over the tunnel, every time it sets or (re)activates
+a path — and by default the server adopts it for its own downlink
+scheduling on that same path too. So setting `set_path_weight` on the
+client, as above, biases *both* directions.
+
+If you want the server to use a **different** weight than the client for a
+given path (asymmetric control), call `set_path_weight` in server mode
+instead — this always overrides whatever the client reports, from then on:
+
+```bash
+echo '{"cmd":"set_path_weight","user":"alice","iface":"wlan0","weight":10}' | nc 127.0.0.1 9090
+```
+```json
+{"ok":true}
+```
+
+The server has no local-interface concept for a path, so the server-mode
+form takes either `iface` (the same name the client uses) or the raw
+`path_id` (get the current value from [`get_status`](#commands)); `iface`
+takes priority if both are given, and can be issued before that path has
+even come up. Both forms — the client's own report and an operator's
+explicit override — **persist across a path reconnect** (survive path_id
+changing, which happens on every full teardown/recreate — xquic never
+reuses an abandoned path_id): the underlying mechanism is a PATH_LABEL
+capsule the client sends on the existing CONNECT-IP stream announcing
+"path_id N is my iface I, with this weight/dscp_mask" every time it
+(re)activates a path. It's additive and backward-compatible — an older
+peer on either end just never sends/recognizes it, falling back to the
+one-shot `path_id` form with no auto-mirroring. Scoped to one connection's
+lifetime like the rest of a live session; a full reconnect (new QUIC
+connection) starts it over on both sides, same as the client's own path
+weights would if its process restarted.
+
+#### Set path DSCP mask
+
+Set the DSCP scheduler class bitmask for a path. Only effective with the
+`dscp` scheduler. `dscp_mask` is a bitmask where bit *N* means the path may
+carry DSCP class *N* (build it as `1 << dscp_class`, OR'd together for
+multiple classes — e.g. `1 << 46` for EF alone). Mask `0` (the default)
+assigns no dedicated class; the path still carries fallback MinRTT traffic.
+Accepts decimal or `0x`-prefixed hex.
+
+```bash
+echo '{"cmd":"set_path_dscp_mask","iface":"eth0","dscp_mask":70368744177664}' | nc 127.0.0.1 9091
+```
+```json
+{"ok":true}
+```
+
+Example — pin EF (46, e.g. VoIP) to `eth0` and AF41 (34, e.g. video) to `wlan0`,
+both computed as `1 << class`:
+
+```bash
+echo '{"cmd":"set_path_dscp_mask","iface":"eth0","dscp_mask":0x400000000000}'  | nc 127.0.0.1 9091
+echo '{"cmd":"set_path_dscp_mask","iface":"wlan0","dscp_mask":0x400000000}'    | nc 127.0.0.1 9091
+```
+
+Untagged traffic and any class assigned to a path that is currently down
+still get delivered — they fall back to plain MinRTT across every usable
+path rather than stalling. Same activation-timing note as `set_path_weight`
+above applies.
+
+**Same as `set_path_weight` above — this is enough on its own.** The
+client reports its own mask to the server automatically, and the server
+adopts it for downlink by default, so setting this on the client biases
+both directions; no server-side call needed unless you want the server to
+use a *different* mask (asymmetric control), via the same `iface`/`path_id`
+server-mode form:
+
+```bash
+echo '{"cmd":"set_path_dscp_mask","user":"alice","iface":"wlan0","dscp_mask":0x400000000000}' \
+    | nc 127.0.0.1 9090
+```
+```json
+{"ok":true}
+```
+
+Same priority (`iface` over `path_id` if both given) and persistence
+behavior as `set_path_weight`'s server-mode form above.
+
 ### From code (Python example)
 
 ```python
@@ -675,9 +794,24 @@ ctrl(9090, {"cmd": "remove_user",       "name": "dave"})
 print(ctrl(9090, {"cmd": "list_users"}))   # {'ok': True, 'users': ['alice', 'bob', 'eve']}
 print(ctrl(9090, {"cmd": "get_stats"}))    # {'ok': True, 'n_clients': 1, ...}
 
-# WRTT weight control (client port)
+# WRTT weight control (client port) — this alone is enough for both
+# directions: the client reports its own weight to the server, which
+# adopts it for downlink too, by default.
 ctrl(9091, {"cmd": "set_path_weight", "iface": "eth0",  "weight": 10})
 ctrl(9091, {"cmd": "set_path_weight", "iface": "wlan0", "weight": 1})
+
+# DSCP scheduler path assignment (client port), same deal — EF (46) to
+# eth0, AF41 (34) to wlan0, both directions:
+ctrl(9091, {"cmd": "set_path_dscp_mask", "iface": "eth0",  "dscp_mask": 1 << 46})
+ctrl(9091, {"cmd": "set_path_dscp_mask", "iface": "wlan0", "dscp_mask": 1 << 34})
+
+# Optional: pin the server to a DIFFERENT value than the client reports
+# (asymmetric control) — an explicit call here always wins over the
+# client's own report, and also persists across a reconnect. Keyed by
+# user + iface; pass path_id instead for a one-shot override (see
+# {"cmd": "get_status"}).
+ctrl(9090, {"cmd": "set_path_weight",    "user": "alice", "iface": "wlan0", "weight": 10})
+ctrl(9090, {"cmd": "set_path_dscp_mask", "user": "alice", "iface": "wlan0", "dscp_mask": 1 << 46})
 ```
 
 ## Benchmarks
@@ -821,7 +955,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
-    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|redundant Multipath scheduler (default: wlb)
+    --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|redundant|dscp Multipath scheduler (default: wlb)
     --cc bbr2|bbr|cubic|new_reno|copa|unlimited Congestion control (default: bbr2)
     --reinjection-control  Enable multipath reinjection control
     --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)

@@ -466,6 +466,188 @@ TEST(server_get_reorder_stats_no_conns)
     mqvpn_server_destroy(s);
 }
 
+/* set_path_weight / set_path_dscp_mask (server-side wrtt/wrr/dscp downlink
+ * assignment, keyed by user + path_id — see libmqvpn.h and
+ * control_socket.c's doc comment for why: no local-interface concept for a
+ * server-side path). Real mqvpn_server.c behavior, not the control_socket.c
+ * dispatch mock — that layer's JSON parsing/error-mapping is covered by
+ * tests/test_control_socket.c. */
+
+TEST(server_set_path_weight_null_args)
+{
+    ASSERT_EQ(mqvpn_server_set_path_weight(NULL, "alice", 0, 1), MQVPN_ERR_INVALID_ARG);
+
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(mqvpn_server_set_path_weight(s, NULL, 0, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_weight(s, "", 0, 1), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_path_weight_no_matching_session)
+{
+    /* A live server with no connected session for `user` (whether because
+     * no one is connected at all, or a different user is) must not find a
+     * path to assign to — same "not found" contract as
+     * mqvpn_server_get_client_fec_stats returning 0 for an unknown user. */
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    ASSERT_EQ(mqvpn_server_set_path_weight(s, "alice", 0, 10), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_path_dscp_mask_null_args)
+{
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask(NULL, "alice", 0, 1), MQVPN_ERR_INVALID_ARG);
+
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask(s, NULL, 0, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask(s, "", 0, 1), MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_path_dscp_mask_no_matching_session)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask(s, "alice", 0, MQVPN_DSCP_BIT(46)),
+              MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+/* set_path_weight_by_iface / set_path_dscp_mask_by_iface (persistent
+ * downlink assignment, keyed by iface — see mqvpn_path_label.h). Same
+ * "real mqvpn_server.c, not the control_socket.c mock" scope note as the
+ * path_id-keyed tests above. */
+
+TEST(server_set_path_weight_by_iface_null_args)
+{
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(NULL, "alice", "wlan0", 1),
+              MQVPN_ERR_INVALID_ARG);
+
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, NULL, "wlan0", 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "", "wlan0", 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", NULL, 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", "", 1), MQVPN_ERR_INVALID_ARG);
+    /* 16 chars — one past MQVPN_PATH_LABEL_IFACE_MAX (15) */
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", "abcdefghijklmnop", 1),
+              MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_path_weight_by_iface_no_matching_session)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", "wlan0", 10),
+              MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_path_dscp_mask_by_iface_null_args)
+{
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(NULL, "alice", "wlan0", 1),
+              MQVPN_ERR_INVALID_ARG);
+
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, NULL, "wlan0", 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "", "wlan0", 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", NULL, 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "", 1),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(
+        mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "abcdefghijklmnop", 1),
+        MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
+TEST(server_set_path_dscp_mask_by_iface_no_matching_session)
+{
+    reset_mocks();
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
+
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "wlan0",
+                                                        MQVPN_DSCP_BIT(46)),
+              MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_server_destroy(s);
+}
+
 /* on_tun_packet with no sessions */
 
 TEST(server_on_tun_packet_no_sessions)
@@ -1568,6 +1750,17 @@ main(void)
     /* reorder stats getter (aggregate; empty-sum contract) */
     run_server_get_reorder_stats_null();
     run_server_get_reorder_stats_no_conns();
+
+    /* set_path_weight / set_path_dscp_mask (server-side wrtt/wrr/dscp
+     * downlink assignment, keyed by user + path_id) */
+    run_server_set_path_weight_null_args();
+    run_server_set_path_weight_no_matching_session();
+    run_server_set_path_dscp_mask_null_args();
+    run_server_set_path_dscp_mask_no_matching_session();
+    run_server_set_path_weight_by_iface_null_args();
+    run_server_set_path_weight_by_iface_no_matching_session();
+    run_server_set_path_dscp_mask_by_iface_null_args();
+    run_server_set_path_dscp_mask_by_iface_no_matching_session();
 
     /* TUN packet with no sessions */
     run_server_on_tun_packet_no_sessions();

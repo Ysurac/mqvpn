@@ -146,6 +146,7 @@ int platform_add_path(platform_ctx_t *p, const char *iface, int backup);
 int platform_remove_path(platform_ctx_t *p, const char *iface);
 int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max);
 int platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight);
+int platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_mask);
 
 /* darwin/killswitch.c — flushes the pf anchor unconditionally, independent
  * of any platform_ctx_t / killswitch_active state. Darwin-only: called from

@@ -5,7 +5,8 @@
  * flow_sched.c
  *
  * IPv4/IPv6 5-tuple flow hash for xquic flow-affinity hint
- * (xqc_conn_set_dgram_flow_hash).
+ * (xqc_conn_set_dgram_flow_hash), plus the DSCP class extractor for the
+ * DSCP scheduler hint (xqc_conn_set_dscp).
  */
 #include "flow_sched.h"
 
@@ -122,6 +123,36 @@ flow_hash_pkt(const uint8_t *pkt, int len, bool udp_pin)
         }
 
         return flow_hash_finish(h);
+    }
+
+    return 0; /* Unknown IP version */
+}
+
+uint8_t
+dscp_from_pkt(const uint8_t *pkt, int len)
+{
+    if (!pkt || len < 1) {
+        return 0;
+    }
+
+    uint8_t version = pkt[0] >> 4;
+
+    if (version == 4) {
+        /* === IPv4 === */
+        if (len < 20) return 0;
+
+        /* TOS byte: DSCP is the top 6 bits, ECN the bottom 2. */
+        return pkt[1] >> 2;
+
+    } else if (version == 6) {
+        /* === IPv6 === */
+        if (len < 40) return 0;
+
+        /* Traffic class straddles the low nibble of byte 0 and the high
+         * nibble of byte 1: version(4) | traffic_class(8) | flow_label(20).
+         * DSCP is the top 6 bits of that 8-bit traffic class. */
+        uint8_t traffic_class = (uint8_t)((pkt[0] & 0x0f) << 4) | (pkt[1] >> 4);
+        return traffic_class >> 2;
     }
 
     return 0; /* Unknown IP version */

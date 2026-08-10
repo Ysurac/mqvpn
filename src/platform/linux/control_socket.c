@@ -16,11 +16,36 @@
  *   {"cmd":"get_all_fec_stats"}
  *   {"cmd":"get_reorder_stats"}
  *
- * Client-only commands (not available in server mode):
+ * Client-only commands (not available in server mode) — keyed by local
+ * interface name:
  *   {"cmd":"add_path",        "iface":"eth0"}
  *   {"cmd":"remove_path",     "iface":"eth0"}
  *   {"cmd":"list_paths"}
  *   {"cmd":"set_path_weight", "iface":"eth0","weight":3}
+ *   {"cmd":"set_path_dscp_mask", "iface":"eth0","dscp_mask":70368744177664}
+ *
+ * set_path_weight / set_path_dscp_mask are ALSO available in server mode
+ * — but usually you don't need them: the client already reports its own
+ * weight/dscp_mask to the server via a PATH_LABEL capsule (see
+ * mqvpn_path_label.h) every time it (re)activates a path, and the server
+ * adopts that value for its own downlink scheduling BY DEFAULT. Calling
+ * set_path_weight/set_path_dscp_mask on the client side alone is enough
+ * for both directions to agree. The server-mode form below exists to
+ * PIN the server to a *different* value than the client (asymmetric
+ * control) — an explicit call here always overrides the client's report,
+ * from then on, including across future reconnects. A server has no
+ * local interface for a path, so it takes EITHER `iface` (the same name
+ * the client uses — persists across a full path teardown/recreate,
+ * same as the client's own auto-reported value) OR the raw `path_id`
+ * (one-shot, see get_status's per-path output; does NOT persist —
+ * path_id can change on reconnect):
+ *   {"cmd":"set_path_weight",    "user":"alice","iface":"wlan0","weight":3}
+ *   {"cmd":"set_path_dscp_mask", "user":"alice","iface":"wlan0","dscp_mask":70368744177664}
+ *   {"cmd":"set_path_weight",    "user":"alice","path_id":2,"weight":3}
+ *   {"cmd":"set_path_dscp_mask", "user":"alice","path_id":2,"dscp_mask":70368744177664}
+ * `iface` takes priority if both are given. The iface form can be issued
+ * before that path has even come up — the value is stored and applied the
+ * moment the PATH_LABEL announcement for it arrives.
  *
  * Responses:
  *   {"ok":true}
@@ -487,13 +512,6 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         return snprintf(resp, resp_len, "{\"ok\":true}");
     }
     if (strcmp(cmd, "set_path_weight") == 0) {
-        if (!cli_ctx)
-            return snprintf(resp, resp_len,
-                            "{\"ok\":false,\"error\":\"not supported in server mode\"}");
-        char iface[IFNAMSIZ] = {0};
-        const char *iv = json_find_key(req, "iface");
-        if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
-            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"iface required\"}");
         const char *wv = json_find_key(req, "weight");
         if (!wv)
             return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"weight required\"}");
@@ -501,7 +519,89 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server,
         if (w < 0 || w > 65535)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"weight must be 0-65535\"}");
-        if (platform_set_path_weight(cli_ctx, iface, (uint32_t)w) < 0)
+
+        if (cli_ctx) {
+            /* Client mode: keyed by local interface name. */
+            char iface[IFNAMSIZ] = {0};
+            const char *iv = json_find_key(req, "iface");
+            if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+                return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"iface required\"}");
+            if (platform_set_path_weight(cli_ctx, iface, (uint32_t)w) < 0)
+                return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"path not found\"}");
+            return snprintf(resp, resp_len, "{\"ok\":true}");
+        }
+
+        /* Server mode: no local-interface concept for a server-side path.
+         * Two ways to identify one: `iface` (persists across a path
+         * teardown/recreate — see mqvpn_server_set_path_weight_by_iface(),
+         * requires the client to have announced that iface at least once)
+         * or the raw QUIC `path_id` (one-shot, does not persist — see
+         * get_status's per-path output for the current path_id). */
+        char user[64] = {0};
+        const char *uv = json_find_key(req, "user");
+        if (!uv || json_read_string(uv, user, sizeof(user)) < 0 || user[0] == '\0')
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
+
+        int sret;
+        const char *iv = json_find_key(req, "iface");
+        char iface[IFNAMSIZ] = {0};
+        if (iv && json_read_string(iv, iface, sizeof(iface)) == 0 && iface[0] != '\0') {
+            sret = mqvpn_server_set_path_weight_by_iface(server, user, iface, (uint32_t)w);
+        } else {
+            uint64_t path_id;
+            if (json_read_u64_strict(json_find_key(req, "path_id"), &path_id) < 0)
+                return snprintf(resp, resp_len,
+                                "{\"ok\":false,\"error\":\"iface or path_id required\"}");
+            sret = mqvpn_server_set_path_weight(server, user, path_id, (uint32_t)w);
+        }
+        if (sret == MQVPN_ERR_INVALID_ARG)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
+        if (sret != MQVPN_OK)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"path not found\"}");
+        return snprintf(resp, resp_len, "{\"ok\":true}");
+    }
+    if (strcmp(cmd, "set_path_dscp_mask") == 0) {
+        const char *mv = json_find_key(req, "dscp_mask");
+        if (!mv)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"dscp_mask required\"}");
+        /* Base 0: accepts both decimal and 0x-prefixed hex — masks built from
+         * MQVPN_DSCP_BIT() OR'd together read more naturally in hex. */
+        uint64_t m = (uint64_t)strtoull(mv, NULL, 0);
+
+        if (cli_ctx) {
+            /* Client mode: keyed by local interface name. */
+            char iface[IFNAMSIZ] = {0};
+            const char *iv = json_find_key(req, "iface");
+            if (!iv || json_read_string(iv, iface, sizeof(iface)) < 0 || iface[0] == '\0')
+                return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"iface required\"}");
+            if (platform_set_path_dscp_mask(cli_ctx, iface, m) < 0)
+                return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"path not found\"}");
+            return snprintf(resp, resp_len, "{\"ok\":true}");
+        }
+
+        /* Server mode: `iface` (persists — see
+         * mqvpn_server_set_path_dscp_mask_by_iface()) or raw `path_id`
+         * (one-shot), same as set_path_weight above. */
+        char user[64] = {0};
+        const char *uv = json_find_key(req, "user");
+        if (!uv || json_read_string(uv, user, sizeof(user)) < 0 || user[0] == '\0')
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
+
+        int sret;
+        const char *iv = json_find_key(req, "iface");
+        char iface[IFNAMSIZ] = {0};
+        if (iv && json_read_string(iv, iface, sizeof(iface)) == 0 && iface[0] != '\0') {
+            sret = mqvpn_server_set_path_dscp_mask_by_iface(server, user, iface, m);
+        } else {
+            uint64_t path_id;
+            if (json_read_u64_strict(json_find_key(req, "path_id"), &path_id) < 0)
+                return snprintf(resp, resp_len,
+                                "{\"ok\":false,\"error\":\"iface or path_id required\"}");
+            sret = mqvpn_server_set_path_dscp_mask(server, user, path_id, m);
+        }
+        if (sret == MQVPN_ERR_INVALID_ARG)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
+        if (sret != MQVPN_OK)
             return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"path not found\"}");
         return snprintf(resp, resp_len, "{\"ok\":true}");
     }
