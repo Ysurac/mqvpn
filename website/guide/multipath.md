@@ -121,17 +121,67 @@ parameters in this experimental release.
 **Performance**: See [weekly benchmarks](../benchmarks/weekly) for measured
 throughput vs WLB across loss rates 1%–10%.
 
-### Which Scheduler to Use?
+### Scheduler Selection Guide
 
 | Scenario | Recommended |
 |----------|-------------|
-| General use, bandwidth aggregation | **WLB** |
+| General use, bandwidth aggregation | **WLB + [Hybrid Mode](./hybrid-mode)** |
 | Inner UDP needing single-path delivery | **`wlb_udp_pin`** |
-| Latency-sensitive applications | MinRTT |
-| Asymmetric paths (different speeds) | **WLB** |
-| Similar-speed paths | Either works well |
+| Latency-sensitive applications | MinRTT (trades off bandwidth aggregation; if latency matters most, consider adding Reinjection (`dgram`)) |
+| Combinations of poor-quality links | MinRTT + [Hybrid Mode](./hybrid-mode) (consider adding Reinjection or the reorder buffer as needed) |
 | Lossy primary + reliable standby (experimental) | `backup_fec` |
 
+
+## Reinjection (Speculative Duplication)
+
+Reinjection sends copies of selected packets over a second path. It costs
+some extra bandwidth, and in return the tunnel rides out packet loss and
+sudden link trouble much more smoothly. Off by default, and independent of
+the scheduler choice: originals are scheduled normally, while copies are
+always placed on a *different* path than their origin.
+
+Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/papers/3452296.3472893.pdf)
+
+```ini
+[Multipath]
+Reinjection = deadline   # off | deadline | idle | dgram
+```
+
+| Mode | What gets copied | Use it for |
+|------|------------------|------------|
+| `deadline` | Stream-lane (TCP-side) data still awaiting delivery confirmation that is running late, plus everything sent on a link judged unhealthy | Insurance for tunnels running [Hybrid Mode](./hybrid-mode), which carries TCP over QUIC streams: does nothing (and costs nothing) most of the time, and minimizes the hiccup at the moment a link suddenly goes bad |
+| `idle` | Recent still-unconfirmed stream data (TCP side only), in moments when the tunnel has nothing else to send | Low-cost smoothing of occasional hiccups in interactive use (SSH, browsing). No tuning needed |
+| `dgram` | Every packet on the datagram lane, always — hybrid-mode TCP is not copied | Tunnels dedicated to real-time traffic (VoIP, gaming): a lost packet or a dying link no longer causes dropouts or lag spikes. Note: since everything is always copied, this trades off against bandwidth aggregation |
+
+**Why a hiccup can happen at all**: when a link goes bad, the scheduler does
+steer new data to the healthy link — but data already sent on the failing
+link still has to be recovered, and in-order delivery makes everything behind
+it wait, even data that already arrived via the healthy link (multipath
+head-of-line blocking). A silently dead link is only detected after a timeout
+of hundreds of milliseconds, so in the worst case that wait approaches a
+second. `deadline` resends the late data on the healthy link right away,
+reducing that wait.
+
+Deadline-mode tuning (defaults shown):
+
+```ini
+ReinjectionSrttFactorPct = 110        # duplicate when older than 1.1 × min_srtt (100–1000)
+ReinjectionHardDeadlineMs = 500       # upper clamp on the deadline (1–60000)
+ReinjectionDeadlineLowerBoundMs = 20  # lower clamp (1–60000; clamped down to the hard deadline)
+```
+
+Notes:
+
+- Reinjection is sender-side: each side's setting protects the traffic it
+  *sends*, so enable it on the **server** to protect download traffic (and on
+  the client for upload).
+- `dgram` uses double the bandwidth for that traffic and is not recommended
+  for mixed tunnels: it duplicates *all* inner UDP — including HTTP/3 video
+  streams — so the usable speed of the datagram lane drops to a single
+  path's capacity.
+- Per-path duplicated bytes are reported as `reinject_tx_bytes` in the
+  control API `get_status` response.
+- Requires two or more active paths; silently inactive otherwise.
 
 ## Path Weighting
 

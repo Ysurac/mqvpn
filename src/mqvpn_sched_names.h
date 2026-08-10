@@ -52,6 +52,12 @@
     X(MQVPN_CC_UNLIMITED, "unlimited") \
     X(MQVPN_CC_NONE, "none")
 
+#define MQVPN_REINJ_LIST(X)             \
+    X(MQVPN_REINJ_OFF, "off")           \
+    X(MQVPN_REINJ_DEADLINE, "deadline") \
+    X(MQVPN_REINJ_IDLE, "idle")         \
+    X(MQVPN_REINJ_DGRAM, "dgram")
+
 /* mqvpn_sched_from_name: returns the enum value, or -1 if unrecognized. */
 static inline int
 mqvpn_sched_from_name(const char *s)
@@ -126,6 +132,44 @@ case enum_val: return 1;
     }
 }
 
+/* mqvpn_reinj_from_name: returns the enum value, or -1 if unrecognized. */
+static inline int
+mqvpn_reinj_from_name(const char *s)
+{
+    if (!s) return -1;
+#define MQVPN_REINJ_FROM_NAME_CASE(enum_val, str) \
+    if (strcmp(s, str) == 0) return (int)(enum_val);
+    MQVPN_REINJ_LIST(MQVPN_REINJ_FROM_NAME_CASE)
+#undef MQVPN_REINJ_FROM_NAME_CASE
+    return -1;
+}
+
+/* mqvpn_reinj_to_name: canonical name for status/log use. Returns "unknown"
+ * for any value outside the table. */
+static inline const char *
+mqvpn_reinj_to_name(mqvpn_reinjection_t reinj)
+{
+    switch (reinj) {
+#define MQVPN_REINJ_TO_NAME_CASE(enum_val, str) \
+case enum_val: return str;
+        MQVPN_REINJ_LIST(MQVPN_REINJ_TO_NAME_CASE)
+#undef MQVPN_REINJ_TO_NAME_CASE
+    default: return "unknown";
+    }
+}
+
+static inline int
+mqvpn_reinj_is_valid(mqvpn_reinjection_t reinj)
+{
+    switch (reinj) {
+#define MQVPN_REINJ_VALID_CASE(enum_val, str) \
+case enum_val: return 1;
+        MQVPN_REINJ_LIST(MQVPN_REINJ_VALID_CASE)
+#undef MQVPN_REINJ_VALID_CASE
+    default: return 0;
+    }
+}
+
 /* Compile-time coverage check: this switch has no `default`, so -Wswitch
  * (built with -Werror in the project's CI sanitizer job, see AGENTS.md G11)
  * turns "a new mqvpn_scheduler_t enumerator was added to libmqvpn.h but not
@@ -154,6 +198,17 @@ mqvpn_cc_list_covers_enum_(mqvpn_cc_t cc)
 case enum_val: break;
         MQVPN_CC_LIST(MQVPN_CC_COVERAGE_CASE)
 #undef MQVPN_CC_COVERAGE_CASE
+    }
+}
+
+static inline void
+mqvpn_reinj_list_covers_enum_(mqvpn_reinjection_t reinj)
+{
+    switch (reinj) {
+#define MQVPN_REINJ_COVERAGE_CASE(enum_val, str) \
+case enum_val: break;
+        MQVPN_REINJ_LIST(MQVPN_REINJ_COVERAGE_CASE)
+#undef MQVPN_REINJ_COVERAGE_CASE
     }
 }
 

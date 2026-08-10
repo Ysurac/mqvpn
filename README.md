@@ -21,11 +21,16 @@ This is a fork of official mqvpn with path weight support.
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
+Example: an 8 Mbps SRT live stream over two 6 Mbit uplinks — a single connection (left) vs the same two connections bonded by mqvpn (right):
+
+https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
+
 ## Table of Contents
 
 <!--toc:start-->
 - [Supported Platforms](#supported-platforms)
 - [Features](#features)
+- [Key Use Cases](#key-use-cases)
 - [Installation](#installation)
   - [Server](#server)
   - [Client (deb package)](#client-deb-package)
@@ -38,6 +43,7 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
   - [JSON config](#json-config)
 - [Schedulers](#schedulers)
 - [Reorder buffer (datagram lane)](#reorder-buffer-datagram-lane)
+- [Reinjection (speculative duplication)](#reinjection-speculative-duplication)
 - [Hybrid mode (TCP lane)](#hybrid-mode-tcp-lane)
 - [systemd](#systemd)
 - [Control API](#control-api)
@@ -88,6 +94,14 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
 - **PSK auth** — Pre-shared key over TLS 1.3.
 - **DNS override** — Prevents DNS leaks. Uses `resolvectl` on systemd-resolved systems, falls back to resolv.conf.
 
+
+## Key Use Cases
+
+**Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks).
+
+**Boosting general-purpose transfer** — not just video: bonding speeds up everyday traffic too. UDP and any other traffic is aggregated across paths over the datagram lane, and with [hybrid mode](#hybrid-mode-tcp-lane) TCP is aggregated as well — even a single TCP connection can use multiple paths at once. Details in [Benchmarks](#benchmarks).
+
+**Staying connected on unreliable links** — when one connection drops or degrades (moving vehicles, congested Wi-Fi, cellular dead spots), traffic continues over the remaining paths without interrupting sessions.
 
 ## Installation
 
@@ -459,6 +473,30 @@ Profile = cellular_bond  # cellular_bond (wait=50ms, cap=1024) | fiber_lte (wait
 INI/JSON only (no CLI flag). Best on asymmetric-RTT path pairs (e.g. Wi-Fi +
 LTE); for symmetric, loss-dominated paths leave it off. See
 [docs/report/](docs/report/) for the parameter sweep and measured numbers.
+
+## Reinjection (speculative duplication)
+
+Sends copies of selected packets over a second link. This costs some extra
+bandwidth, and in return the tunnel rides out packet loss and sudden link
+trouble much more smoothly. Off by default. Sender-side only — each side's setting
+protects the traffic it *sends*, so set it on the **server** to protect
+download traffic (and on the client for upload). Requires multipath with two
+or more active paths — silently inactive with only one.
+
+```ini
+[Multipath]
+Reinjection = off                     # off (default) | deadline | idle | dgram
+ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
+ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
+ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
+```
+
+- `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
+- `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
+- `dgram` — for tunnels dedicated to real-time traffic (VoIP, gaming): every datagram-lane packet (UDP and other non-TCP traffic; hybrid-mode TCP is not duplicated) is sent over two links at once, so a lost packet or a dying link no longer causes dropouts or lag spikes. **Uses double the bandwidth for that traffic; not recommended for mixed tunnels** — it duplicates all inner UDP, including HTTP/3 video streams, so the usable speed of the datagram lane drops to a single link's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it removes them); plain UDP apps may otherwise see duplicate packets.
+
+Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
+API `get_status` response.
 
 ## Hybrid mode (TCP lane)
 
@@ -845,6 +883,18 @@ Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) ·
 | gain | **+26 %** | +29 % | +13 % | +12 % | +7 % |
 
 Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_asym_minrtt_1785306660.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_asym_wlb_1785306660.png) — data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
+
+### SRT live streaming
+
+SRT contribution feeds over mqvpn, netns-emulated impaired links, mqvpn defaults (WLB, BBRv2) + SRT `lossmaxttl=32`. The starved-uplinks comparison video is shown at the top of this page; per-scenario results:
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
+| Exceeds any single link (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Dual cellular (42 Mbps over 40 + 30 Mbit lossy links) | 20–40 % stream loss | **0.9 %** stream loss |
+
+Full report: [`bench_results/srt/REPORT.md`](bench_results/srt/REPORT.md) — data & comparison videos: [`bench_results/srt/`](bench_results/srt/) — bench: [`scripts/benchmark_srt.sh`](scripts/benchmark_srt.sh)
 
 ## Architecture
 

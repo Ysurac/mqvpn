@@ -89,8 +89,6 @@ usage(const char *prog)
         "                            TP (default = xquic default 8; set lower, "
         "e.g. 2,\n"
         "                            to exercise G-P16 PATHS_BLOCKED).\n"
-        "  --reinjection-control     Enable multipath reinjection control\n"
-        "  --reinjection-mode default|deadline|dgram  Reinjection control mode\n"
         "  --fec-enable              Enable FEC\n"
         "  --no-fec                  Disable FEC\n"
         "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme\n"
@@ -176,8 +174,6 @@ main(int argc, char *argv[])
         {"cc", required_argument, NULL, 0x101},
         {"init-max-path-id", required_argument, NULL, 0x100},
         {"mtu", required_argument, NULL, 0x102},
-        {"reinjection-control", no_argument, NULL, 'Y'},
-        {"reinjection-mode", required_argument, NULL, 'Z'},
         {"fec-enable", no_argument, NULL, 'E'},
         {"no-fec", no_argument, NULL, 'e'},
         {"fec-scheme", required_argument, NULL, 'F'},
@@ -222,8 +218,6 @@ main(int argc, char *argv[])
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
     int cli_mtu = -1;     /* -1 means "not set by CLI" */
-    int reinjection_control = -1; /* -1 means not set by CLI */
-    const char *reinjection_mode_str = NULL;
     int fec_enable = -1; /* -1 means not set by CLI */
     const char *fec_scheme_str = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
@@ -330,8 +324,6 @@ main(int argc, char *argv[])
             init_max_path_id_set = 1;
             break;
         }
-        case 'Y': reinjection_control = 1; break;
-        case 'Z': reinjection_mode_str = optarg; break;
         case 'E': fec_enable = 1; break;
         case 'e': fec_enable = 0; break;
         case 'F': fec_scheme_str = optarg; break;
@@ -427,12 +419,6 @@ main(int argc, char *argv[])
     const char *eff_cc = cc_str ? cc_str : file_cfg.cc;
     uint64_t eff_init_max_path_id =
         init_max_path_id_set ? init_max_path_id : (uint64_t)file_cfg.init_max_path_id;
-    int eff_reinjection_control = reinjection_control >= 0
-                                  ? reinjection_control
-                                  : file_cfg.reinjection_control;
-    const char *eff_reinjection_mode = reinjection_mode_str
-                                       ? reinjection_mode_str
-                                       : file_cfg.reinjection_mode;
     int eff_fec_enable = fec_enable >= 0 ? fec_enable : file_cfg.fec_enable;
     const char *eff_fec_scheme = fec_scheme_str ? fec_scheme_str : file_cfg.fec_scheme;
     const char *eff_listen = listen_str ? listen_str : file_cfg.listen;
@@ -545,15 +531,36 @@ main(int argc, char *argv[])
 #endif
     }
 
-    int reinjection_mode = MQVPN_REINJ_CTL_DEFAULT;
-    if (strcmp(eff_reinjection_mode, "deadline") == 0) {
-        reinjection_mode = MQVPN_REINJ_CTL_DEADLINE;
-    } else if (strcmp(eff_reinjection_mode, "dgram") == 0) {
-        reinjection_mode = MQVPN_REINJ_CTL_DGRAM;
-    } else if (strcmp(eff_reinjection_mode, "default") != 0) {
+    /* Parse reinjection mode. No CLI flag (config file/JSON only — YAGNI).
+     * Name lookup is the shared table (mqvpn_sched_names.h). Unlike the
+     * scheduler/cc CLI gates above, an unrecognized value here is a WARN +
+     * fallback to "off", not a fatal error: mqvpn_config.c's JSON surface is
+     * the hard-error surface for this key (see that file's parse_reinj_name
+     * call site). */
+    int reinj_lookup = mqvpn_reinj_from_name(file_cfg.reinjection);
+    int reinjection = MQVPN_REINJ_OFF;
+    if (reinj_lookup < 0) {
         fprintf(stderr,
-                "error: --reinjection-mode must be 'default', 'deadline' or 'dgram'\n");
-        return 1;
+                "warning: [Multipath] Reinjection '%s' not recognized "
+                "(expected 'off', 'deadline', 'idle', or 'dgram'); using 'off'\n",
+                file_cfg.reinjection);
+    } else {
+        reinjection = reinj_lookup;
+    }
+
+    /* Back-compat: the old ReinjectionControl/ReinjectionMode/ReinjCtl INI
+     * keys, superseded by [Multipath] Reinjection above. Only consulted
+     * when Reinjection was left at its "off" default, so an explicit
+     * modern key always wins. "default" maps to IDLE (closest equivalent
+     * of the old always-on, xqc_default_reinj_ctl_cb behavior). */
+    if (reinjection == MQVPN_REINJ_OFF && file_cfg.reinjection_control) {
+        if (strcmp(file_cfg.reinjection_mode, "deadline") == 0) {
+            reinjection = MQVPN_REINJ_DEADLINE;
+        } else if (strcmp(file_cfg.reinjection_mode, "dgram") == 0) {
+            reinjection = MQVPN_REINJ_DGRAM;
+        } else {
+            reinjection = MQVPN_REINJ_IDLE;
+        }
     }
 
     int fec_scheme = MQVPN_FEC_SCHEME_REED_SOLOMON;
@@ -638,8 +645,6 @@ main(int argc, char *argv[])
             .n_paths = n_paths,
             .n_backup_paths = n_backup_paths,
             .scheduler = scheduler,
-            .reinjection_control = eff_reinjection_control,
-            .reinjection_mode = reinjection_mode,
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
@@ -652,11 +657,16 @@ main(int argc, char *argv[])
             .route_via_server = route_via_server >= 0 ? route_via_server
                                                       : file_cfg.route_via_server,
             .no_routes = no_routes >= 0 ? no_routes : file_cfg.no_routes,
+            .manage_routes = file_cfg.manage_routes,
             .control_port = control_port ? control_port : file_cfg.control_port,
             .control_addr = control_addr ? control_addr
                           : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .reinjection = reinjection,
+            .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
+            .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
+            .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
@@ -665,6 +675,10 @@ main(int argc, char *argv[])
             .hybrid = file_cfg.hybrid,
             /* [Advanced]; 0 = off. Client-only (server path never reads it). */
             .recv_rate_limit = file_cfg.recv_rate_limit,
+            /* [Advanced] UdpGso; default 1. Applies to client and server. */
+            .udp_gso = file_cfg.udp_gso,
+            /* [Advanced] UdpGro; default 1. Applies to client and server. */
+            .udp_gro = file_cfg.udp_gro,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -708,8 +722,6 @@ main(int argc, char *argv[])
             .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .log_level = log_level,
             .scheduler = scheduler,
-            .reinjection_control = eff_reinjection_control,
-            .reinjection_mode = reinjection_mode,
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
@@ -720,12 +732,20 @@ main(int argc, char *argv[])
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .reinjection = reinjection,
+            .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
+            .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
+            .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
             /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
              * disabled defaults even with no [Hybrid] section). */
             .hybrid = file_cfg.hybrid,
+            /* [Advanced] UdpGso; default 1. Applies to client and server. */
+            .udp_gso = file_cfg.udp_gso,
+            /* [Advanced] UdpGro; default 1. Applies to client and server. */
+            .udp_gro = file_cfg.udp_gro,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

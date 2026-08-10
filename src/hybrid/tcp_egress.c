@@ -31,9 +31,61 @@
 /* One relay-loop chunk (both directions) and the lazily-allocated stash
  * buffer size: a single in-flight chunk per direction, matching the
  * client's tcp_lane precedent (downlink_stash is TCP_MSS-sized there; here
- * both directions share a flat 4096 to match the relay loop's stack
- * buffers). */
-#define TCP_EGRESS_RELAY_CHUNK 4096
+ * both directions share one flat size to match the relay loop's stack
+ * buffers).
+ *
+ * The value is a send-batching parameter, not just a buffer size. Each
+ * xqc_h3_request_send_body() of one chunk queues floor(chunk / packet) full
+ * QUIC packets plus a short remainder, and a GSO run cannot span that
+ * remainder. Measured, downlink, netns, 8 parallel flows:
+ *
+ *     chunk    outer-UDP batching factor
+ *      4096    3.40
+ *      8192   19.64
+ *     16384   20.75      <- here
+ *     32768   22.58
+ *
+ * Read the shape, not the formula: the numbers are NOT floor(chunk/packet)
+ * (that would predict ~6 at 8192 and ~12 at 16384). Only 4096 is anomalous —
+ * with just ~3 full packets per write the remainder interrupts almost every
+ * run, so runs never span writes. From 8192 up the factor is essentially flat,
+ * i.e. the chunk has stopped being the binding constraint and something else
+ * (burst budget, pacing, cwnd) sets the ceiling. So the win here is escaping
+ * the 4096 pathology, NOT a proportional return on a bigger buffer.
+ *
+ * 16384 sits just past the knee. 8192 captures most of the win at half the
+ * memory but with 5x the run-to-run spread; 32768 buys ~9% more for another
+ * doubling of both the stash bound below and the relay loop's stack frames.
+ * A different MTU regime changes where the pathology ends, so re-tune only
+ * against a fresh sweep (benchmarks/bench_stream_gso.sh with IPERF_EXTRA=-R,
+ * rebuilding per value) — and expect to find another flat region rather than
+ * a number that keeps climbing.
+ *
+ * Stack: two functions hold a chunk-sized automatic buffer —
+ * svr_tcp_egress_drain_body() and svr_tcp_egress_on_relay_ready() — and a
+ * writable event can have both live at once (relay_ready calls into the
+ * downlink drain); the relay-error flush can nest one more drain_body via
+ * the engine (see the assert comment below). Peak is therefore 3*chunk plus
+ * frame overhead, on the
+ * process main stack: nothing under src/ calls pthread_create, so these run
+ * on the 8 MiB default rather than a small thread stack. The assert below
+ * bounds that against the smallest stack this could plausibly land on — a
+ * musl/OpenWrt default pthread stack is 128 KiB — so moving the egress relay
+ * onto a spawned thread, or raising the chunk far enough to matter, fails the
+ * build instead of overflowing a guard page at runtime. */
+#define TCP_EGRESS_RELAY_CHUNK 16384
+
+/* 3 chunk-sized frames can nest since the relay-error flush: relay_ready
+ * (1) -> drain_body (2) -> on_relay_error -> svr_flush_deferred_sends ->
+ * engine run -> h3 read/write notify -> drain_body for ANOTHER flow (3);
+ * deeper nesting is impossible because the nested engine run's re-entrancy
+ * guard makes any further flush a no-op. 3/8 of a 128 KiB thread stack
+ * (musl/OpenWrt pthread default) leaves the rest for the two xquic engine
+ * call chains this can sit under. Deliberately not a tight bound — it
+ * exists to catch an order-of-magnitude mistake, not to certify a specific
+ * target. */
+_Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
+               "relay chunk frames must stay within a small-thread stack budget");
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -308,15 +360,19 @@ typedef struct svr_tcp_egress_flow_s {
      *
      * Plain booleans, not the client's high/low-water byte-count scheme
      * (tcp_lane.h's MQVPN_TCP_LANE_BP_*_WATER): the server relays between
-     * two syscalls through a fixed 4096B stack buffer with no accumulation
-     * phase, so there is nothing to hysteresis over — withhold on ANY
-     * EWOULDBLOCK/-XQC_EAGAIN, resume on the very next writable/write-ready
-     * signal. Stash buffers are lazily malloc'd (first pause) and freed only
-     * in svr_tcp_egress_flow_destroy, matching the client's downlink_stash
-     * precedent. Memory bound: 2 * TCP_EGRESS_RELAY_CHUNK (8 KiB) per flow
-     * that has EVER paused in either direction, times the global egress fd
-     * budget — bounded by egress_fd_budget, not tcp_max_flows, since that's
-     * the true worst case (every admitted flow pauses once). */
+     * two syscalls through a fixed TCP_EGRESS_RELAY_CHUNK stack buffer with
+     * no accumulation phase, so there is nothing to hysteresis over —
+     * withhold on ANY EWOULDBLOCK/-XQC_EAGAIN, resume on the very next
+     * writable/write-ready signal. Stash buffers are lazily malloc'd (first
+     * pause) and freed only in svr_tcp_egress_flow_destroy, matching the
+     * client's downlink_stash precedent. Memory bound:
+     * 2 * TCP_EGRESS_RELAY_CHUNK (32 KiB at the current 16384) per flow that
+     * has EVER paused in either direction, times the global egress fd budget
+     * — bounded by egress_fd_budget, not tcp_max_flows, since that's the
+     * true worst case (every admitted flow pauses once). At the 4096-flow
+     * ceiling that is ~128 MiB, which is why the chunk's own comment treats
+     * its size as a deployment-visible number and not an implementation
+     * detail. */
     int downlink_paused; /* send()-side backpressure: downlink_stash holds
                           * one unsent chunk pulled out of xquic's body_buf
                           * (already destructively consumed — cannot be
@@ -343,6 +399,13 @@ typedef struct svr_tcp_egress_flow_s {
     int egress_eof_seen; /* recv()==0 observed — want_read is dropped
                           * PERMANENTLY for this fd (EOF is level-triggered
                           * readable; re-arming would busy-loop). */
+    uint64_t serial;     /* Unique per flow for the server's lifetime (the
+                          * post-increment value of flows_total_opened at
+                          * creation). Exists for one consumer:
+                          * on_relay_error's post-flush revalidation, where
+                          * pointer identity alone is ABA-unsafe — a flow
+                          * freed by the flush and a new one allocated at
+                          * the same address must not pass for each other. */
     int uplink_fin_sent; /* send_body(NULL,0,1) succeeded — no more FIN
                           * retries needed. Until this is true and
                           * egress_eof_seen is true, cb_request_write
@@ -491,6 +554,35 @@ static void
 svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
 {
     TLOG_W(server, "connect-tcp: relay I/O error (errno=%d) — closing stream", err);
+
+    /* Flush BEFORE the close when the deferred send flush is engaged:
+     * xqc_h3_request_close drops still-queued STREAM packets before
+     * RESET_STREAM (the write-then-abort KNOWN LIMITATION documented on
+     * defer_send_flush in xquic.h), so chunks send_body() accepted earlier
+     * in this same relay invocation — up to TCP_EGRESS_RELAY_CHUNK of data
+     * the upstream really delivered — would otherwise be truncated. From
+     * event-loop contexts this pushes them out; from inside an engine
+     * callback it is a no-op (xquic's re-entrancy guard) and the bounded
+     * truncation remains, same as the xquic-side limitation.
+     *
+     * The flush may run timers and teardown paths that destroy flows —
+     * including this one (e.g. a send hard error killing the whole conn).
+     * Re-validate `ef` against the live-flow list before touching it again:
+     * pointer identity AND serial, because the flush can both free ef and
+     * admit a new flow that the allocator places at the same address (ABA)
+     * — the serial is read before the flush, while ef is still valid, and
+     * a recycled allocation necessarily carries a newer one. If the flow is
+     * gone, the teardown that removed it already closed the stream and the
+     * close below must be skipped. */
+    uint64_t serial = ef->serial;
+    svr_flush_deferred_sends(server);
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    svr_tcp_egress_flow_t *live = *ctx.flow_list_head;
+    while (live && !(live == ef && live->serial == serial))
+        live = live->next;
+    if (!live) return; /* flushed teardown already destroyed the flow */
+
     xqc_h3_request_close(ef->h3_request);
     /* Do NOT touch ef again — see the destroy-ownership note above. */
 }
@@ -650,7 +742,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
     /* Downlink-activity accounting: bytes that actually reached the egress
      * socket are summed here and folded into last_activity_us ONCE at the
      * "still alive" exits (a per-send() refresh inside the loop would call
-     * svr_now_us per 4 KiB chunk for no precision gain — the idle sweep has
+     * svr_now_us per relay chunk for no precision gain — the idle sweep has
      * seconds granularity). The relay-error exits skip the refresh: `ef`
      * may already be freed there (see on_relay_error's contract). */
     size_t moved = 0;
@@ -1015,6 +1107,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     if (conn_count) (*conn_count)++;
     (*ctx.global_fd_count)++;
     (*ctx.flows_total_opened)++;
+    ef->serial = *ctx.flows_total_opened; /* cumulative => unique; see field doc */
 
     int r = connect(fd, (struct sockaddr *)&dst, dst_len);
     if (r == 0) {

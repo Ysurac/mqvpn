@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.14.1 (callback ABI version 2)
+ * Version: 0.16.0 (callback ABI version 2)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this via MQVPN_ASSERT_TICK_THREAD.
@@ -38,8 +38,8 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 14
-#define MQVPN_VERSION_PATCH 1
+#define MQVPN_VERSION_MINOR 16
+#define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
 
@@ -155,6 +155,13 @@ typedef enum {
  * XQC_DSCP_BIT() so callers need not include xquic headers. */
 #define MQVPN_DSCP_BIT(dscp) (1ULL << ((dscp) & 0x3F))
 
+typedef enum {
+    MQVPN_REINJ_OFF = 0,
+    MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
+    MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
+    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
+} mqvpn_reinjection_t;
+
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).
  * AUTO is deferred to a later phase and will be appended as = 2. */
 typedef enum {
@@ -171,12 +178,6 @@ typedef enum {
     MQVPN_RPROF_CELLULAR_BOND = 3, /* preset: wait=50ms cap=1024 */
     MQVPN_RPROF_FIBER_LTE = 4,     /* preset: wait=50ms cap=2048 */
 } mqvpn_reorder_profile_t;
-
-typedef enum {
-    MQVPN_REINJ_CTL_DEFAULT  = 0,
-    MQVPN_REINJ_CTL_DEADLINE = 1,
-    MQVPN_REINJ_CTL_DGRAM    = 2,
-} mqvpn_reinj_ctl_t;
 
 typedef enum {
     MQVPN_FEC_SCHEME_REED_SOLOMON      = 0,
@@ -349,6 +350,21 @@ typedef struct {
      * held in the TCP-lane flow table (5-tuples pinned to RAW under
      * tcp=auto). Always 0 server-side. */
     uint64_t raw_markers_active;
+    /* Outer-UDP transmit offload counters, the live counterpart of the
+     * "udp-tx: " teardown log line. udp_tx_datagrams / udp_tx_sends is the
+     * achieved batching factor: 1.0 means every datagram cost its own send
+     * syscall — the state the one-shot "udp-gso: GSO enabled" marker cannot
+     * distinguish, because that marker only reports the kernel capability
+     * probe. Fed by every outer-UDP send path, so the ratio stays meaningful
+     * with UdpGso=false and on platforms without the batched callback, where
+     * it is exactly 1.0 by construction.
+     *
+     * There is deliberately no receive-side pair here: RX offload (UDP GRO)
+     * is set up and un-coalesced entirely in the platform layer, which the
+     * library never sees — the server's control API reports those counters
+     * from the platform instead (see ctrl_socket_create). */
+    uint64_t udp_tx_sends;
+    uint64_t udp_tx_datagrams;
 } mqvpn_stats_t;
 
 typedef struct {
@@ -558,10 +574,19 @@ MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
-MQVPN_API int mqvpn_config_set_reinjection(mqvpn_config_t *cfg, int enable);
-MQVPN_API int mqvpn_config_set_reinj_ctl(mqvpn_config_t *cfg, mqvpn_reinj_ctl_t ctl);
 MQVPN_API int mqvpn_config_set_fec(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_fec_scheme(mqvpn_config_t *cfg, mqvpn_fec_scheme_t scheme);
+
+/* Reinjection (speculative multipath duplication of unacked data). OFF by
+ * default. The deadline-mode params are validated as a group: srtt_factor_pct
+ * in [100,1000] (percent, e.g. 110 = 1.10x srtt), hard_deadline_ms and
+ * deadline_lower_bound_ms in [1,60000]. Values are only consulted when mode
+ * is MQVPN_REINJ_DEADLINE — see mqvpn_conn_settings.c. */
+MQVPN_API int mqvpn_config_set_reinjection(mqvpn_config_t *cfg, mqvpn_reinjection_t mode);
+MQVPN_API int mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg,
+                                                           int srtt_factor_pct,
+                                                           int hard_deadline_ms,
+                                                           int deadline_lower_bound_ms);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
@@ -673,6 +698,13 @@ MQVPN_API int mqvpn_config_set_hybrid_egress_acl(mqvpn_config_t *cfg, const char
 MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
                                                uint64_t bytes_per_sec);
 
+/* Linux TX UDP GSO / batched send. 1 (default) = engage when the kernel
+ * supports it (silent sendmmsg fallback otherwise); 0 = per-packet send
+ * path, byte-identical to pre-GSO behavior. Engages on Linux-kernel
+ * platforms including Android; no effect on Windows/macOS/iOS. Any nonzero
+ * value is stored as 1. */
+MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
@@ -693,6 +725,13 @@ MQVPN_API mqvpn_client_t *mqvpn_client_new(const mqvpn_config_t *cfg,
                                            const mqvpn_client_callbacks_t *cbs,
                                            void *user_ctx);
 
+/* Destroy the client. May still fire callbacks (state_changed,
+ * tunnel_closed — never reconnect_scheduled) from inside the call: with the
+ * batched send path engaged it first flushes datagrams already accepted by
+ * mqvpn_client_on_tun_packet, and that engine pass can close the
+ * connection. Callback-owned resources must therefore stay valid until
+ * this returns, and nothing — including those callbacks — may use the
+ * handle afterwards. */
 MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
@@ -835,7 +874,16 @@ MQVPN_API int mqvpn_client_reactivate_path(mqvpn_client_t *client,
 
 MQVPN_API int mqvpn_client_set_tun_active(mqvpn_client_t *client, int active, int tun_fd);
 
-/* Feed data from platform into the engine */
+/* Feed data from platform into the engine.
+ *
+ * MQVPN_OK means accepted, not sent: when the batched send path is engaged
+ * (Linux, UdpGso enabled — the default), the datagram may sit in the send
+ * queue until the caller's next mqvpn_client_tick(), which is what lets a
+ * run of packets leave as one sendmmsg/GSO batch. Feed-then-tick promptly;
+ * a consumer that ticks on a coarse timer adds up to one tick period of
+ * latency to every packet accepted here. (Before the deferred flush every
+ * call flushed synchronously, so this obligation is new as of UdpGso
+ * batching — same contract as mqvpn_server_on_egress_fd_ready.) */
 MQVPN_API int mqvpn_client_on_tun_packet(mqvpn_client_t *client, const uint8_t *pkt,
                                          size_t len);
 
@@ -869,6 +917,11 @@ MQVPN_API mqvpn_server_t *mqvpn_server_new(const mqvpn_config_t *cfg,
                                            const mqvpn_server_callbacks_t *cbs,
                                            void *user_ctx);
 
+/* Destroy the server. Same callback contract as mqvpn_client_destroy: the
+ * deferred-flush pass and engine teardown can still invoke callbacks
+ * (tun_output, egress fd unregister, log), so callback-owned resources —
+ * the TUN, the UDP socket, the egress registry — must stay valid until
+ * this returns. */
 MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
 
 MQVPN_API int mqvpn_server_set_socket_fd(mqvpn_server_t *server, int fd,
@@ -883,7 +936,17 @@ MQVPN_API int mqvpn_server_on_socket_recv(mqvpn_server_t *server, const uint8_t 
 
 /* Platform calls this when a previously-registered egress fd (via
  * egress_fd_register) becomes readable and/or writable. fd_ctx is the
- * opaque pointer the core passed to egress_fd_register for that fd. */
+ * opaque pointer the core passed to egress_fd_register for that fd.
+ *
+ * The caller MUST run mqvpn_server_tick() after servicing an event-loop
+ * iteration's egress readiness — the same obligation the TUN and UDP receive
+ * entry points carry. This call relays bytes into the QUIC connection's send
+ * queue; it does not by itself put them on the wire. (Before UDP send
+ * batching was wired up it happened to transmit synchronously, so a caller
+ * that ticked only occasionally still made progress by accident; that is no
+ * longer true.) A caller that ticks on a coarse timer instead will relay one
+ * chunk per tick period, and a half-close whose FIN was queued here will not
+ * reach the peer until that tick. */
 MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
                                                void *fd_ctx, int readable, int writable);
 
@@ -896,6 +959,10 @@ MQVPN_API void mqvpn_server_on_egress_fd_ready(mqvpn_server_t *server, int fd,
  * "treat tcp_egress as disabled — do not allocate a registry". */
 MQVPN_API int mqvpn_server_egress_fd_budget(mqvpn_server_t *server);
 
+/* Feed data from platform into the engine. Same accepted-not-sent contract
+ * as mqvpn_client_on_tun_packet: with the batched send path engaged the
+ * datagram may wait for the caller's next mqvpn_server_tick() — feed, then
+ * tick promptly. */
 MQVPN_API int mqvpn_server_on_tun_packet(mqvpn_server_t *server, const uint8_t *pkt,
                                          size_t len);
 

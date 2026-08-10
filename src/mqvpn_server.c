@@ -61,6 +61,7 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#include "udp_offload.h"
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
 #  include "hybrid/tcp_egress.h"
 #endif
@@ -139,6 +140,17 @@ struct svr_conn_s {
     /* Auth identity (set on CONNECT-IP auth success) */
     uint64_t connected_at_us;
 
+    /* Runtime sticky GSO fallback, PER CONNECTION — not on the shared
+     * server socket. The GSO-class errno set includes EMSGSIZE, which
+     * reflects the ROUTE to one peer (segment + headers exceed that path's
+     * PMTU), so a socket-wide flag would let a single narrow-PMTU client
+     * permanently disable GSO for every other client. Scope therefore
+     * matches the client side's per-path-fd flag: one destination, one
+     * flag. Capability-class errnos (EIO/EINVAL/ENOTSUP) re-discover per
+     * conn — one extra failed syscall per connection lifetime, bounded by
+     * max_clients. Zero on accept (calloc). */
+    int gso_disabled;
+
     /* Flow-aware reorder shim (§5). Created on accept when cfg.reorder.mode
      * != OFF, freed on conn teardown. peer_reorder_supported is set when the
      * client advertised mqvpn-reorder in its CONNECT-IP request (§19.3). */
@@ -208,6 +220,19 @@ struct mqvpn_server_s {
 
     /* UDP socket (provided by platform via set_socket_fd) */
     int udp_fd;
+    int gso_available; /* engine-create probe result (kernel capability;
+                        * the runtime sticky flag is per-conn — svr_conn_s) */
+    /* 1 = the batched send callback (cb_write_mmsg_ex) was registered. Also
+     * drives conn_settings.defer_send_flush, so the two can never disagree — see
+     * mqvpn_conn_settings.h. Independent of gso_available: a failed UDP_SEGMENT probe
+     * still batches via sendmmsg. */
+    int tx_batch;
+    /* Outer-UDP TX syscall counters; see the matching comment in
+     * mqvpn_client.c's struct. tx_datagrams / tx_sends is the achieved
+     * batching factor, fed by both the batched and the single-datagram send
+     * paths. Reported by mqvpn_server_destroy as the "udp-tx: " line. */
+    uint64_t tx_sends;
+    uint64_t tx_datagrams;
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
 
@@ -534,6 +559,8 @@ svr_do_send(mqvpn_server_t *s, const unsigned char *buf, size_t size,
         return XQC_SOCKET_ERROR;
     }
     s->bytes_tx += (uint64_t)res;
+    s->tx_sends++; /* one sendto = one datagram; keeps the batching factor */
+    s->tx_datagrams++;
     return res;
 }
 
@@ -566,6 +593,64 @@ cb_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     (void)path_id;
     return cb_write_socket(buf, size, peer, peerlen, conn_user_data);
 }
+
+#if defined(__linux__)
+/* Batch/GSO send for post-accept server conns. The server has ONE socket for
+ * all clients (unlike the client's per-path fd), so — unlike the client's
+ * cb_write_mmsg_ex, which resolves a path_entry_t per path_id — there is no
+ * per-path/per-client state to consult here: conn_user_data resolves to s
+ * exactly as cb_write_socket does (conn_user_data reinterpreted as
+ * svr_conn_t*, see the comment in cb_accept), and the burst always targets
+ * s->udp_fd with the peer sockaddr xquic hands in. path_id is unused for the
+ * same reason cb_write_socket_ex ignores it above. gso_available is
+ * server-wide (a kernel property, probed once in mqvpn_server_new() at
+ * engine-create time and never re-probed); gso_disabled is PER CONNECTION —
+ * see its field doc on svr_conn_s for why destination-scoped stickiness is
+ * required on the shared socket. */
+static ssize_t
+cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vlen,
+                 const struct sockaddr *peer, socklen_t peerlen, void *conn_user_data)
+{
+    (void)path_id;
+    svr_conn_t *conn = (svr_conn_t *)conn_user_data;
+    mqvpn_server_t *s = conn->server;
+
+    if (s->udp_fd < 0) return XQC_SOCKET_ERROR; /* same check as svr_do_send */
+
+    mqvpn_tx_counters_t tx = {0};
+    int was_gso = !conn->gso_disabled;
+    ssize_t r = mqvpn_udp_send_batch(s->udp_fd, msg_iov, vlen, peer, peerlen,
+                                     s->gso_available, &conn->gso_disabled, &tx);
+    /* Captured before any LOG_* call: the log write path can clobber errno,
+     * and the hard-error branch below is the only diagnostic that reports
+     * it. Meaningful only when r == MQVPN_SEND_ERR (udp_offload.h). */
+    int send_errno = errno;
+    if (was_gso && conn->gso_disabled) {
+        /* One-shot per connection (the flag never resets within one) — at
+         * most max_clients lines per server lifetime, no spam guard
+         * needed. The reason comes from the flag itself, not errno — see
+         * the matching comment in the client's cb_write_mmsg_ex. */
+        LOG_W(s,
+              "udp-gso: runtime GSO failure (%s), sticky fallback to sendmmsg for "
+              "this client",
+              strerror(conn->gso_disabled));
+    }
+    /* single aggregate counter — the server has no per-path bytes_tx (that's
+     * a client-only concept) — matching svr_do_send's s->bytes_tx accounting.
+     * (bytes==0 when r<0 per udp_offload.h) */
+    s->bytes_tx += tx.bytes;
+    s->tx_sends += tx.sends;
+    s->tx_datagrams += tx.datagrams;
+    if (r >= 0) return r;
+    if (r == MQVPN_SEND_EAGAIN) return XQC_SOCKET_EAGAIN;
+    /* xquic's own |error send mmsg| log carries no errno, and XQC_SOCKET_ERROR
+     * from this callback can escalate to connection close; GSO-class errors
+     * are absorbed by the sticky fallback in mqvpn_udp_send_batch, so this
+     * branch is rare — no spam risk. */
+    LOG_E(s, "batch send: %s", strerror(send_errno));
+    return XQC_SOCKET_ERROR; /* same convention as svr_do_send's hard-error path */
+}
+#endif
 
 static ssize_t
 cb_write_before_accept(const unsigned char *buf, size_t size, const struct sockaddr *peer,
@@ -1472,6 +1557,20 @@ svr_log(mqvpn_server_t *s, mqvpn_log_level_t level, const char *fmt, ...)
 }
 #endif /* MQVPN_HYBRID_TCP_EGRESS_ENABLED */
 
+/* Compiled unconditionally — NOT part of the egress helper block above:
+ * mqvpn_server_destroy calls this on every platform (the deferred-flush
+ * batching is a UDP-GSO concern, independent of the Linux-only TCP egress;
+ * defining it under MQVPN_HYBRID_TCP_EGRESS_ENABLED broke the Darwin link). */
+void
+svr_flush_deferred_sends(mqvpn_server_t *s)
+{
+    /* Gated on tx_batch so pre-deferral behavior is untouched: without the
+     * batch callback every send already flushed at accept time and there is
+     * nothing to push out. Contract (re-entrancy no-op, may destroy flows)
+     * documented at the declaration in mqvpn_server_internal.h. */
+    if (s->tx_batch && s->engine) xqc_engine_main_logic(s->engine);
+}
+
 /* ─── Per-iface downlink weight/dscp_mask persistence (svr_path_label_t) ───
  * See mqvpn_path_label.h and the struct's own doc comment for the why. */
 
@@ -2117,6 +2216,27 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     if (xqc_engine_get_default_config(&xconfig, XQC_ENGINE_SERVER) < 0) goto cleanup;
     xconfig.cfg_log_level = (xqc_log_level_t)xqc_log_level;
 
+#if defined(__linux__)
+    /* `cfg` is mqvpn_server_new's own parameter, holding the same udp_gso
+     * value as s->config.udp_gso (memcpy'd above; never touched by the
+     * [Hybrid]-only sanitize pass). tx_batch is recorded rather than
+     * re-derived: the cs_input below feeds this same flag to
+     * conn_settings.defer_send_flush, so the deferred flush cannot outlive
+     * the batch callback it exists to fill. Registration mechanics and the
+     * e2e-pinned marker strings are shared with the client via
+     * mqvpn_tx_batch_register (mqvpn_conn_settings.h). xquic requires
+     * XQC_CONN_FLAG_SERVER_ACCEPT for batch sends on server conns, so
+     * pre-accept traffic (cb_write_before_accept) keeps using
+     * conn_send_packet_before_accept unaffected by this registration. */
+    if (mqvpn_tx_batch_register(cfg->udp_gso, cb_write_mmsg_ex, &tcbs, &xconfig,
+                                &s->gso_available)) {
+        s->tx_batch = 1;
+        LOG_I(s, "%s",
+              s->gso_available ? MQVPN_UDP_GSO_MARKER_ENABLED
+                               : MQVPN_UDP_GSO_MARKER_UNAVAILABLE);
+    }
+#endif
+
     s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
@@ -2136,26 +2256,21 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .cc = cfg->cc,
         .init_max_path_id = cfg->init_max_path_id,
         /* recv_rate_bytes_per_sec: intentionally absent (=0) — client-only knob */
+        .reinjection = cfg->reinjection,
+        .reinj_srtt_factor_pct = cfg->reinj_srtt_factor_pct,
+        .reinj_hard_deadline_ms = cfg->reinj_hard_deadline_ms,
+        .reinj_deadline_lower_bound_ms = cfg->reinj_deadline_lower_bound_ms,
+        /* set by the batched-send registration a few lines above; 0 on
+         * non-Linux, where that block is compiled out entirely */
+        .defer_send_flush = (s->tx_batch != 0),
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
 
-    /* mp_enable_reinjection / reinj_ctl / fec_enable: mqvpn-specific knobs not
-     * covered by the shared builder (multipath reinjection control + a
+    /* fec_enable: mqvpn-specific knob not covered by the shared builder (a
      * configurable FEC that can run independently of the backup_fec
-     * scheduler) — layered on top, mirroring the client-side block below. */
-    conn_settings.mp_enable_reinjection = cfg->reinjection_enable ?
-                                          (XQC_REINJ_UNACK_AFTER_SCHED |
-                                           XQC_REINJ_UNACK_BEFORE_SCHED |
-                                           XQC_REINJ_UNACK_AFTER_SEND)
-                                          : 0;
-
-    if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DEADLINE)
-        conn_settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
-    else if (cfg->reinj_ctl == MQVPN_REINJ_CTL_DGRAM)
-        conn_settings.reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
-    else
-        conn_settings.reinj_ctl_callback = xqc_default_reinj_ctl_cb;
-
+     * scheduler) — layered on top, mirroring the client-side block below.
+     * mp_enable_reinjection / reinj_ctl_callback are set by
+     * mqvpn_build_conn_settings() above via cs_input.reinjection. */
     if (cfg->fec_enable) {
 #ifdef XQC_ENABLE_FEC
 #ifdef XQC_ENABLE_RSC
@@ -2195,6 +2310,28 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
 #endif
     }
     xqc_server_set_conn_settings(s->engine, &conn_settings);
+
+    if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {
+        /* Read back from the just-built conn_settings, not the raw config:
+         * this reflects the 0->default fallback AND the lower<=hard clamp
+         * applied in mqvpn_apply_reinjection(). */
+        LOG_I(s,
+              "reinjection enabled: mode=deadline factor_pct=%d hard_ms=%d lower_ms=%d",
+              (int)(conn_settings.reinj_flexible_deadline_srtt_factor * 100 + 0.5),
+              (int)(conn_settings.reinj_hard_deadline / 1000),
+              (int)(conn_settings.reinj_deadline_lower_bound / 1000));
+        if (!s->config.hybrid.enabled) {
+            LOG_W(s, "reinjection mode=deadline protects only stream traffic; hybrid "
+                     "lane is disabled, effect limited to control streams");
+        }
+    } else if (cfg->reinjection == MQVPN_REINJ_IDLE ||
+               cfg->reinjection == MQVPN_REINJ_DGRAM) {
+        LOG_I(s, "reinjection enabled: mode=%s", mqvpn_reinj_to_name(cfg->reinjection));
+        if (cfg->reinjection == MQVPN_REINJ_DGRAM) {
+            LOG_I(s, "reinjection mode=dgram duplicates every datagram: datagram-lane "
+                     "goodput is capped at one path's capacity");
+        }
+    }
 
     /* H3 callbacks */
     xqc_h3_callbacks_t h3_cbs = {
@@ -2248,6 +2385,19 @@ void
 mqvpn_server_destroy(mqvpn_server_t *s)
 {
     if (!s) return;
+
+    /* Flush before the engine teardown when the deferred flush is engaged:
+     * xqc_engine_destroy tears down queued connections without processing
+     * them, so datagrams mqvpn_server_on_tun_packet already accepted would
+     * be dropped. Best-effort, like the client side (see the comment in
+     * mqvpn_client_disconnect): EAGAIN residue is still dropped below. */
+    svr_flush_deferred_sends(s);
+
+    /* Transmit-side offload summary; see the matching comment in
+     * mqvpn_client_destroy — emitted after the flush above so a short run's
+     * final deferred burst is counted, before the engine teardown whose few
+     * close-frame sends fall outside the count. */
+    LOG_I(s, MQVPN_UDP_TX_LINE_FMT, s->tx_sends, s->tx_datagrams, s->config.udp_gso);
 
     /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
     if (s->engine) {
@@ -2626,6 +2776,8 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_total = s->tcp_egress_flows_total_opened;
     out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
 #endif
+    out->udp_tx_sends = s->tx_sends;
+    out->udp_tx_datagrams = s->tx_datagrams;
     return MQVPN_OK;
 }
 
@@ -3156,6 +3308,9 @@ mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const ch
     return MQVPN_OK;
 }
 
+/* Iteration order and the tunnel_established guard here are load-bearing:
+ * mqvpn_server_get_client_reinject() below mirrors this walk and must stay
+ * index-aligned — change both together. */
 int
 mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *out,
                              int max_clients, int *n_clients)
@@ -3237,6 +3392,41 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
 
     *n_clients = count;
     return MQVPN_OK;
+}
+
+int
+mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                 mqvpn_internal_client_reinject_t *out, int max)
+{
+    if (!s || !out || max <= 0) return -1;
+
+    mqvpn_server_t *srv = (mqvpn_server_t *)s;
+    int count = 0;
+
+    /* Same iteration order + tunnel_established guard as
+     * mqvpn_server_get_client_info() so out[] stays index-aligned with that
+     * call's client array within one control-command handler. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX && count < max; i++) {
+        svr_conn_t *conn = srv->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+
+        mqvpn_internal_client_reinject_t *e = &out[count];
+        e->n_paths = 0;
+
+        xqc_conn_stats_t st = xqc_conn_get_stats(srv->engine, &conn->cid);
+        for (uint32_t p = 0;
+             st.paths_info && p < st.paths_info_count && e->n_paths < MQVPN_MAX_PATHS;
+             p++) {
+            xqc_path_metrics_t *pm = &st.paths_info[p];
+            e->paths[e->n_paths].path_id = pm->path_id;
+            e->paths[e->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;
+            e->n_paths++;
+        }
+        free(st.paths_info);
+        count++;
+    }
+
+    return count;
 }
 
 int

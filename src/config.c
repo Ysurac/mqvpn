@@ -483,6 +483,18 @@ cfgk_int_mtu(int v)
     return v == 0 || (v >= 1280 && v <= 9000);
 }
 
+static int
+cfgk_int_reinj_factor_pct(int v)
+{
+    return v >= 100 && v <= 1000;
+}
+
+static int
+cfgk_int_reinj_deadline_ms(int v)
+{
+    return v >= 1 && v <= 60000;
+}
+
 /* post_set hooks */
 static void
 cfgk_post_mark_server(mqvpn_file_config_t *cfg)
@@ -602,6 +614,14 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_CONTROL, "ControlAddr", NULL, control_addr),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
+    CFG_STR(SEC_MULTIPATH, "Reinjection", "reinjection", reinjection),
+    CFG_INT_FB(SEC_MULTIPATH, "ReinjectionSrttFactorPct", "reinjection_srtt_factor_pct",
+               reinjection_srtt_factor_pct, cfgk_int_reinj_factor_pct, 110),
+    CFG_INT_FB(SEC_MULTIPATH, "ReinjectionHardDeadlineMs", "reinjection_hard_deadline_ms",
+               reinjection_hard_deadline_ms, cfgk_int_reinj_deadline_ms, 500),
+    CFG_INT_FB(SEC_MULTIPATH, "ReinjectionDeadlineLowerBoundMs",
+               "reinjection_deadline_lower_bound_ms", reinjection_deadline_lower_bound_ms,
+               cfgk_int_reinj_deadline_ms, 20),
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_STR(SEC_MULTIPATH, "CongestionControl", "congestion_control", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
@@ -653,6 +673,8 @@ static const cfg_key_desc_t cfg_keys[] = {
      * u64 window product overflows (see MQVPN_RECV_RATE_LIMIT_MAX). */
     CFG_U64(SEC_ADVANCED, "RecvRateLimit", "recv_rate_limit", recv_rate_limit,
             MQVPN_RECV_RATE_LIMIT_MAX),
+    CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso),
+    CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -1313,10 +1335,17 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->reinjection_mode, sizeof(cfg->reinjection_mode), "default");
     snprintf(cfg->fec_scheme, sizeof(cfg->fec_scheme), "reed_solomon");
     snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
+    snprintf(cfg->reinjection, sizeof(cfg->reinjection), "off");
+    cfg->reinjection_srtt_factor_pct = 110;
+    cfg->reinjection_hard_deadline_ms = 500;
+    cfg->reinjection_deadline_lower_bound_ms = 20;
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
     cfg->no_routes = 0;
+    cfg->manage_routes = 1;
+    cfg->udp_gso = 1;
+    cfg->udp_gro = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }

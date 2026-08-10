@@ -936,7 +936,22 @@ tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f)
 /* RST the H3 side (best-effort — the caller has already decided the flow is
  * dead regardless of the outcome) and guard against a double-close: once
  * called, f->h3_request/f->stream are cleared so a later teardown call on
- * the same (about-to-be-removed) flow is a no-op here. */
+ * the same (about-to-be-removed) flow is a no-op here.
+ *
+ * KNOWN LIMITATION (defer_send_flush): with the batched send path engaged,
+ * body bytes send_body() accepted earlier in the same invocation may still
+ * be queued, and the close drops them before RESET_STREAM (the
+ * write-then-abort limitation documented on defer_send_flush in xquic.h) —
+ * up to one uplink chunk the local application already handed to the
+ * tunnel. The server egress twin (svr_tcp_egress_on_relay_error) flushes
+ * before its close; here that is NOT safe by construction: this funnel is
+ * reached from inside lwIP callback frames (tcp_input err/recv/sent), and
+ * driving the engine there can re-enter lwIP through the downlink
+ * notifies — lwIP is not re-entrant. The exposure is the abort path only
+ * (peer sees RESET_STREAM, truncation is visible), and inner-TCP RST
+ * semantics never promised delivery of buffered data. A systemic fix
+ * belongs in the fork (keep queued STREAM data ahead of RESET instead of
+ * dropping it), not here. */
 static void
 tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
 {

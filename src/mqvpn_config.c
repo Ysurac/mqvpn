@@ -103,6 +103,30 @@ parse_cc_name(const char *s, mqvpn_cc_t *out)
 }
 
 static int
+parse_reinj_name(const char *s, mqvpn_reinjection_t *out)
+{
+    if (!s || !out) return MQVPN_ERR_INVALID_ARG;
+    int v = mqvpn_reinj_from_name(s);
+    if (v < 0) return MQVPN_ERR_INVALID_ARG;
+    *out = (mqvpn_reinjection_t)v;
+    return MQVPN_OK;
+}
+
+/* Shared by the JSON loader and the public setter (ranges must not drift
+ * between the two; the INI layer keeps its own cfgk_* validators). */
+static int
+reinj_factor_pct_ok(int v)
+{
+    return v >= 100 && v <= 1000;
+}
+
+static int
+reinj_deadline_ms_ok(int v)
+{
+    return v >= 1 && v <= 60000;
+}
+
+static int
 is_valid_scheduler(mqvpn_scheduler_t sched)
 {
     return mqvpn_sched_is_valid(sched);
@@ -125,7 +149,6 @@ mqvpn_config_new(void)
     /* Defaults */
     cfg->server_port = 443;
     cfg->scheduler = MQVPN_SCHED_WLB;
-    cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
     cfg->fec_scheme = MQVPN_FEC_SCHEME_REED_SOLOMON;
     cfg->log_level = MQVPN_LOG_INFO;
     cfg->multipath = 1;
@@ -135,6 +158,7 @@ mqvpn_config_new(void)
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
     cfg->tun_mtu = 0; /* 0 = auto */
+    cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
@@ -374,40 +398,74 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->cc = cc;
     }
 
+    /* Reinjection — hard error on unrecognized mode / out-of-range numeric
+     * params (unlike the INI/main.c surface, which warns and falls back to
+     * "off"; the JSON surface follows the same hard-error precedent as
+     * "scheduler"/"cc" above). Absent keys keep the off/110/500/20 defaults. */
+    int reinjection_set = 0;
+    v = json_find_key(json_text, "reinjection");
+    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+        mqvpn_reinjection_t reinj = MQVPN_REINJ_OFF;
+        if (parse_reinj_name(tmp, &reinj) != MQVPN_OK) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinjection = reinj;
+        reinjection_set = 1;
+    }
+
+    v = json_find_key(json_text, "reinjection_srtt_factor_pct");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || !reinj_factor_pct_ok(iv)) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinj_srtt_factor_pct = iv;
+    }
+
+    v = json_find_key(json_text, "reinjection_hard_deadline_ms");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || !reinj_deadline_ms_ok(iv)) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinj_hard_deadline_ms = iv;
+    }
+
+    v = json_find_key(json_text, "reinjection_deadline_lower_bound_ms");
+    if (v) {
+        if (json_read_int_strict(v, &iv) != 0 || !reinj_deadline_ms_ok(iv)) {
+            return MQVPN_ERR_INVALID_ARG;
+        }
+        cfg->reinj_deadline_lower_bound_ms = iv;
+    }
+
     v = json_find_key(json_text, "reconnect_enable");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
         cfg->reconnect_enable = iv;
     }
 
-    v = json_find_key(json_text, "reinjection_enable");
-    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
-        cfg->reinjection_enable = iv;
-    }
+    /* Back-compat aliases for the old (pre-unification) reinjection_enable +
+     * reinjection_mode/reinj_ctl pair: translated into the modern
+     * mqvpn_reinjection_t enum above, ignored if "reinjection" was already
+     * set explicitly. "default" maps to IDLE — the closest modern
+     * equivalent of the old always-on, xqc_default_reinj_ctl_cb behavior. */
+    if (!reinjection_set) {
+        int legacy_enable = 0;
+        v = json_find_key(json_text, "reinjection_enable");
+        if (v && json_read_bool(v, &iv) == MQVPN_OK) legacy_enable = iv;
+        v = json_find_key(json_text, "reinjection_control");
+        if (v && json_read_bool(v, &iv) == MQVPN_OK) legacy_enable = iv;
 
-    v = json_find_key(json_text, "reinjection_control");
-    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
-        cfg->reinjection_enable = iv;
-    }
-
-    v = json_find_key(json_text, "reinjection_mode");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
-        if (strcmp(tmp, "deadline") == 0) {
-            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEADLINE;
-        } else if (strcmp(tmp, "dgram") == 0) {
-            cfg->reinj_ctl = MQVPN_REINJ_CTL_DGRAM;
-        } else {
-            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
-        }
-    }
-
-    v = json_find_key(json_text, "reinj_ctl");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
-        if (strcmp(tmp, "deadline") == 0) {
-            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEADLINE;
-        } else if (strcmp(tmp, "dgram") == 0) {
-            cfg->reinj_ctl = MQVPN_REINJ_CTL_DGRAM;
-        } else {
-            cfg->reinj_ctl = MQVPN_REINJ_CTL_DEFAULT;
+        const char *mode_key = json_find_key(json_text, "reinj_ctl");
+        if (!mode_key) mode_key = json_find_key(json_text, "reinjection_mode");
+        if (legacy_enable && mode_key && json_read_string(mode_key, tmp, sizeof(tmp)) == MQVPN_OK) {
+            if (strcmp(tmp, "deadline") == 0) {
+                cfg->reinjection = MQVPN_REINJ_DEADLINE;
+            } else if (strcmp(tmp, "dgram") == 0) {
+                cfg->reinjection = MQVPN_REINJ_DGRAM;
+            } else {
+                cfg->reinjection = MQVPN_REINJ_IDLE;
+            }
+        } else if (legacy_enable) {
+            cfg->reinjection = MQVPN_REINJ_IDLE;
         }
     }
 
@@ -516,18 +574,11 @@ mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc)
 }
 
 int
-mqvpn_config_set_reinjection(mqvpn_config_t *cfg, int enable)
+mqvpn_config_set_reinjection(mqvpn_config_t *cfg, mqvpn_reinjection_t mode)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
-    cfg->reinjection_enable = enable ? 1 : 0;
-    return MQVPN_OK;
-}
-
-int
-mqvpn_config_set_reinj_ctl(mqvpn_config_t *cfg, mqvpn_reinj_ctl_t ctl)
-{
-    if (!cfg) return MQVPN_ERR_INVALID_ARG;
-    cfg->reinj_ctl = ctl;
+    if (!mqvpn_reinj_is_valid(mode)) return MQVPN_ERR_INVALID_ARG;
+    cfg->reinjection = mode;
     return MQVPN_OK;
 }
 
@@ -544,6 +595,21 @@ mqvpn_config_set_fec_scheme(mqvpn_config_t *cfg, mqvpn_fec_scheme_t scheme)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->fec_scheme = scheme;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg, int srtt_factor_pct,
+                                             int hard_deadline_ms,
+                                             int deadline_lower_bound_ms)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (!reinj_factor_pct_ok(srtt_factor_pct)) return MQVPN_ERR_INVALID_ARG;
+    if (!reinj_deadline_ms_ok(hard_deadline_ms)) return MQVPN_ERR_INVALID_ARG;
+    if (!reinj_deadline_ms_ok(deadline_lower_bound_ms)) return MQVPN_ERR_INVALID_ARG;
+    cfg->reinj_srtt_factor_pct = srtt_factor_pct;
+    cfg->reinj_hard_deadline_ms = hard_deadline_ms;
+    cfg->reinj_deadline_lower_bound_ms = deadline_lower_bound_ms;
     return MQVPN_OK;
 }
 
@@ -821,6 +887,14 @@ mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg, uint64_t bytes_per_sec)
      * window product — see MQVPN_RECV_RATE_LIMIT_MAX (libmqvpn.h). */
     if (bytes_per_sec > MQVPN_RECV_RATE_LIMIT_MAX) return MQVPN_ERR_INVALID_ARG;
     cfg->recv_rate_limit = bytes_per_sec;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->udp_gso = enabled ? 1 : 0;
     return MQVPN_OK;
 }
 

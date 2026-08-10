@@ -5,9 +5,11 @@
  * test_control_response_bound.c — verifies CTRL_MAX_RESP_BYTES upper-bounds
  * the worst-case get_status JSON for MQVPN_MAX_USERS × MQVPN_MAX_PATHS.
  *
- * The JSON format strings are duplicated from control_socket.c:207-239 with a
- * comment anchor. If the format changes there, update both — the test will
- * fail loudly if the worst-case bound is exceeded.
+ * The JSON format strings are duplicated from ctrl_cmd_get_status() in
+ * control_socket.c (the outer envelope, the per-user envelope, and the
+ * path-object APPEND) with a comment anchor. If the format changes there,
+ * update both — the test will fail loudly if the worst-case bound is
+ * exceeded.
  */
 
 #include "libmqvpn.h"
@@ -22,23 +24,28 @@
 static int
 per_path_entry_bytes(void)
 {
-    /* Mirrors control_socket.c:226-233 with leading "," (separator between
-     * paths). The trailing %s is the longest path state label currently
-     * returned by mqvpn_path_state_label() — "validating" (10 chars). */
+    /* Mirrors the path-object APPEND in ctrl_cmd_get_status (control_socket.c)
+     * with leading "," (separator between paths). The trailing %s is the
+     * longest path state label currently returned by mqvpn_path_state_label()
+     * — "validating" (10 chars). "reinject_tx_bytes" mirrors the
+     * reinject-snapshot lookup appended to the same path object. */
     return snprintf(
         NULL, 0,
         ",{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
         ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
         ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
-        ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\"}",
+        ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
+        "\"reinject_tx_bytes\":%" PRIu64 "}",
         UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
-        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX, "validating");
+        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX, "validating",
+        UINT64_MAX);
 }
 
 static int
 per_user_envelope_bytes(int paths_inner_bytes)
 {
-    /* Mirrors control_socket.c:216-221 + 236 with leading "," (separator
+    /* Mirrors the per-user envelope (opening APPEND + closing "]}") in
+     * ctrl_cmd_get_status (control_socket.c) with leading "," (separator
      * between users). username[64]/endpoint[64] in mqvpn_client_info_t →
      * 63 max printable chars each. */
     char username[64];
@@ -59,7 +66,8 @@ per_user_envelope_bytes(int paths_inner_bytes)
 static int
 outer_envelope_bytes(void)
 {
-    /* Mirrors control_socket.c:207 + 239. n_clients is %d (INT_MAX = 10
+    /* Mirrors the outer envelope (opening APPEND + closing "]}") in
+     * ctrl_cmd_get_status (control_socket.c). n_clients is %d (INT_MAX = 10
      * digits) and the array is the only variable-width content. */
     return snprintf(NULL, 0, "{\"ok\":true,\"n_clients\":%d,\"clients\":[]}", 2147483647);
 }

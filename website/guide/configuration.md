@@ -170,8 +170,13 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
+| `Reinjection` | Speculative duplication mode (`off`, `deadline`, `idle`, or `dgram`) | `off` |
+| `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
+| `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
+| `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
 
-See [Multipath](./multipath) for scheduler details.
+See [Multipath](./multipath) for scheduler details and
+[Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.
 
 > `backup_fec` is experimental and requires both peers to run mqvpn ≥ 0.4.0
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
@@ -311,8 +316,8 @@ the cap is hit, both differ.
 | Checked | **before lwIP ever sees the SYN** | when the CONNECT-TCP request arrives |
 | Inner TCP terminated | yes, by lwIP inside the lane | no — relayed over ordinary kernel sockets |
 | **Over the cap** | **degraded to the RAW lane** — the connection still works | **HTTP `503`**, and the client then **resets** that inner connection; no RAW fallback at that point |
-| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~8 KiB** (two lazily-allocated 4 KiB relay chunks) plus one fd |
-| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first |
+| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~32 KiB** (two lazily-allocated 16 KiB relay chunks) plus one fd |
+| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first, but size the RAM too: worst case `TcpMaxGlobalFlows` × 32 KiB (≈ 128 MiB at 4096) once every admitted flow has paused once in each direction |
 | Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
 
 **Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —
@@ -335,8 +340,10 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | Key | Description | Default |
 |-----|-------------|---------|
 | `RecvRateLimit` | Conn-level receive-rate cap in bytes/sec; bounds the aggregate QUIC receive window to `rate x RTT`. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0`. Leave `0` unless memory-constrained (mobile clients set this internally) | `0` (off) |
+| `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
+| `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
 
-In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`).
+In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`).
 
 ## MTU Guidelines
 

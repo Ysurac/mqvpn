@@ -211,6 +211,8 @@ datagram counters and uptime.
   "pkts_lane_raw":0,"pkts_lane_tcp_dropped":0,
   "tcp_flows_active":1,"tcp_flows_total":7,
   "tcp_flows_rejected":2,"raw_markers_active":0,
+  "udp_tx_sends":54120,"udp_tx_datagrams":889304,
+  "udp_rx_receives":812004,"udp_rx_datagrams":1031887,
   "uptime_sec":3601
 }
 ```
@@ -232,6 +234,10 @@ datagram counters and uptime.
 | `tcp_flows_total`    | uint64 | Hybrid mode: cumulative TCP-lane flows opened since start (never decrements). Client: SYNs the flow table admitted. Server: egress flows admitted. |
 | `tcp_flows_rejected` | uint64 | Hybrid mode: cumulative flows refused by a cap. Client: SYNs rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503 rejections (whole-server fd-budget cap + per-session `TcpMaxFlows` cap; ACL 403s and 5xx syscall failures are not caps and are not counted). |
 | `raw_markers_active` | uint64 | Hybrid mode: sticky-RAW markers currently held in the client's TCP-lane flow table (5-tuples pinned to RAW under `tcp=auto`). Client-only; always 0 server-side. |
+| `udp_tx_sends` | uint64 | Outer-UDP send syscalls that placed at least one datagram on the wire. |
+| `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
+| `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |
+| `udp_rx_datagrams` | uint64 | Outer-UDP datagrams delivered to the library. `udp_rx_datagrams / udp_rx_receives` is the achieved receive coalescing factor. Exactly 1.0 with `UdpGro = false`; it also stays near 1.0 when the peer is not batching its sends, since the kernel then has nothing to coalesce, and over a loopback/veth path regardless of the peer. |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
 Notes:
@@ -519,6 +525,19 @@ mqvpn follows semantic versioning for the control API:
   struct producers write `sizeof(mqvpn_stats_t)` bytes, so binaries linked
   against the shared library must be recompiled against the new header. The
   shared-library SOVERSION was bumped 1 → 2 for exactly this reason.
+- `get_stats` was extended in v0.16.0 with the outer-UDP offload counters
+  `udp_tx_sends`, `udp_tx_datagrams`, `udp_rx_receives`, and
+  `udp_rx_datagrams`. Existing JSON consumers remain unaffected. The two
+  transmit-side fields also grow `mqvpn_stats_t`, so the same C-API caveat as
+  the v0.9.0 entry above applies: `mqvpn_client_get_stats` /
+  `mqvpn_server_get_stats` write `sizeof(mqvpn_stats_t)` bytes without
+  consulting the caller's `struct_size`, so binaries linked against the shared
+  library must be recompiled against the new header — the shared-library
+  SOVERSION was bumped 2 → 3 for exactly this reason.
+  The receive-side pair is deliberately NOT in `mqvpn_stats_t`:
+  UDP GRO is configured and un-coalesced entirely in the platform layer, which
+  the library never observes, so those two are read straight from the platform
+  by the control socket (`ctrl_socket_create`) instead.
 - `get_status` paths gained a `state_label` string in v0.5.0 alongside the
   existing numeric `state`; `get_fec_stats` gained `mp_state_label` similarly.
   Consumers that only read the numeric fields remain unaffected, but new code

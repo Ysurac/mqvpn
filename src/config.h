@@ -77,6 +77,11 @@ typedef struct mqvpn_file_config_s {
     char fec_scheme[32]; /* galois_calculation|packet_mask|reed_solomon|xor */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
+    char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
+    int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */
+    int reinjection_hard_deadline_ms;        /* deadline mode only; [1,60000] */
+    int reinjection_deadline_lower_bound_ms; /* deadline mode only; [1,60000] */
+
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;
 
@@ -89,6 +94,7 @@ typedef struct mqvpn_file_config_s {
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
     int route_via_server;   /* 1=default via server tunnel IP, 0=0/1+128/1 trick (default) */
     int no_routes;          /* 1=skip automatic route setup entirely, 0=auto (default) */
+    int manage_routes;      /* 1=manage host routes (default), 0=skip routing table setup */
 
     /* [Control] — server */
     int control_port;           /* TCP port for JSON control API (0 = disabled) */
@@ -108,6 +114,18 @@ typedef struct mqvpn_file_config_s {
      * conn-level receive-rate cap in bytes/sec, 0 = library default (off).
      * CLIENT-ONLY by policy — see mqvpn_conn_settings.c. */
     uint64_t recv_rate_limit;
+
+    /* [Advanced] UdpGso — Linux TX UDP GSO/batched send; 1 (default) =
+     * engage when the kernel supports it, 0 = per-packet send path. Applies
+     * to both client and server (unlike recv_rate_limit). */
+    int udp_gso;
+
+    /* [Advanced] UdpGro — Linux RX UDP GRO (kernel-coalesced receive);
+     * 1 (default) = set SOL_UDP/UDP_GRO on every path/listen socket when the
+     * kernel supports it, 0 = one datagram per recvmsg. Applies to both
+     * client and server. Platform-side only: unlike udp_gso it never crosses
+     * the library ABI. */
+    int udp_gro;
 
     /* Inferred mode: 1=server, 0=client */
     int is_server;

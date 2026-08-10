@@ -298,6 +298,34 @@ print_stats_summary(const char *buf)
            raw_markers);
 }
 
+/* ── Print the outer-UDP offload summary line ── */
+
+/* Separate line and separately gated: this answers a different question from
+ * the lane summary above, and a server can report either without the other
+ * (that one needs hybrid mode; these counters are unconditional on a server
+ * new enough to have them). Printed as a ratio because that is the form which
+ * answers the operator's actual question — whether the offload is batching —
+ * and which the startup "udp-gso:"/"udp-gro:" markers cannot, since those
+ * only report the kernel capability probe. x1.00 means every datagram cost
+ * its own syscall. */
+static void
+print_offload_summary(const char *buf)
+{
+    const char *ok = json_find_key(buf, "ok");
+    if (!ok || strncmp(ok, "true", 4) != 0) return;  /* older server / error */
+    if (!json_find_key(buf, "udp_tx_sends")) return; /* pre-offload server */
+
+    uint64_t tx_s = (uint64_t)json_read_int64(json_find_key(buf, "udp_tx_sends"));
+    uint64_t tx_d = (uint64_t)json_read_int64(json_find_key(buf, "udp_tx_datagrams"));
+    uint64_t rx_r = (uint64_t)json_read_int64(json_find_key(buf, "udp_rx_receives"));
+    uint64_t rx_d = (uint64_t)json_read_int64(json_find_key(buf, "udp_rx_datagrams"));
+
+    printf("server: udp tx=%" PRIu64 "/%" PRIu64 " (x%.2f) rx=%" PRIu64 "/%" PRIu64
+           " (x%.2f)\n",
+           tx_d, tx_s, tx_s ? (double)tx_d / (double)tx_s : 0.0, rx_d, rx_r,
+           rx_r ? (double)rx_d / (double)rx_r : 0.0);
+}
+
 /* ── Main entry point ── */
 
 int
@@ -312,6 +340,7 @@ run_status(const char *addr, int port)
     char *stats_buf = ctrl_query(addr, port, "{\"cmd\":\"get_stats\"}\n");
     if (!stats_buf) return 1; /* server unreachable — error already printed */
     print_stats_summary(stats_buf);
+    print_offload_summary(stats_buf);
     free(stats_buf);
 
     char *buf = ctrl_query(addr, port, "{\"cmd\":\"get_status\"}\n");

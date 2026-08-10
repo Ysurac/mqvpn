@@ -9,6 +9,7 @@
 #include "mqvpn_conn_settings.h"
 
 #include "libmqvpn.h"
+#include "mqvpn_internal.h"
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h"
 
@@ -70,6 +71,55 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     }
 }
 
+/* Wires the stock xquic reinjection ctls. Never touches scheduler_callback:
+ * Scheduler and Reinjection are orthogonal axes (see the design doc; the
+ * xquic datagram_redundancy switch is NOT used precisely because it would
+ * override the scheduler). */
+static void
+mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *cs)
+{
+    /* Invalid/out-of-range values fall back to OFF (same treatment as
+     * mqvpn_apply_scheduler above). */
+    mqvpn_reinjection_t mode = in->reinjection;
+    if (!mqvpn_reinj_is_valid(mode)) mode = MQVPN_REINJ_OFF;
+
+    switch (mode) {
+    case MQVPN_REINJ_OFF: break;
+    case MQVPN_REINJ_IDLE:
+        cs->reinj_ctl_callback = xqc_default_reinj_ctl_cb;
+        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SCHED;
+        break;
+    case MQVPN_REINJ_DEADLINE:
+        cs->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
+        /* AFTER_SEND set explicitly rather than relying on xquic's
+         * BEFORE_SCHED auto-add (xqc_conn.c) so the intent is visible here. */
+        cs->mp_enable_reinjection =
+            XQC_REINJ_UNACK_BEFORE_SCHED | XQC_REINJ_UNACK_AFTER_SEND;
+        cs->reinj_flexible_deadline_srtt_factor =
+            (in->reinj_srtt_factor_pct > 0 ? in->reinj_srtt_factor_pct : 110) / 100.0;
+        cs->reinj_hard_deadline =
+            (uint64_t)(in->reinj_hard_deadline_ms > 0 ? in->reinj_hard_deadline_ms
+                                                      : 500) *
+            1000;
+        cs->reinj_deadline_lower_bound =
+            (uint64_t)(in->reinj_deadline_lower_bound_ms > 0
+                           ? in->reinj_deadline_lower_bound_ms
+                           : 20) *
+            1000;
+        /* xquic computes max(min(factor*min_srtt, hard), lower) — an
+         * unclamped lower > hard would silently dominate the max() and
+         * defeat the documented "hard is the upper clamp" semantics. */
+        if (cs->reinj_deadline_lower_bound > cs->reinj_hard_deadline) {
+            cs->reinj_deadline_lower_bound = cs->reinj_hard_deadline;
+        }
+        break;
+    case MQVPN_REINJ_DGRAM:
+        cs->reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
+        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SEND;
+        break;
+    }
+}
+
 void
 mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settings_t *out)
 {
@@ -79,11 +129,22 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->max_datagram_frame_size = 65535;
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
-    out->max_pkt_out_size = 1400;
+    out->max_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
     out->init_idle_time_out = 10000;
+
+    /* Caller-gated, never derived here: see the field comment in
+     * mqvpn_conn_settings.h for why this must equal the batched-send
+     * registration decision rather than any locally recomputed condition.
+     * Guarded: some pinned xquic forks predate this field (see the
+     * MQVPN_XQUIC_HAS_DEFER_SEND_FLUSH probe in CMakeLists.txt) — omitting
+     * it only forgoes the deferred-flush optimization, never a correctness
+     * issue, since mqvpn's own tx_batch bookkeeping is independent of it. */
+#ifdef MQVPN_XQUIC_HAS_DEFER_SEND_FLUSH
+    out->defer_send_flush = in->defer_send_flush ? 1 : 0;
+#endif
 
     /* --- congestion control ---
      * Invalid/out-of-range values fall back to BBR2, matching the old
@@ -163,9 +224,41 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     /* --- scheduler / FEC params --- */
     mqvpn_apply_scheduler(out, in->scheduler);
 
+    /* --- reinjection --- */
+    mqvpn_apply_reinjection(in, out);
+
     /* --- init_max_path_id: 0 = keep xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID=8) ---
      */
     if (in->init_max_path_id > 0) {
         out->init_max_path_id = in->init_max_path_id;
     }
 }
+
+#if defined(__linux__)
+
+#  include "udp_offload.h"
+
+/* The fallback sendmmsg path hands xquic's whole burst to one
+ * mqvpn_udp_send_batch() call; its mmsghdr array must cover it. Pinned here,
+ * next to the one registration site, rather than per caller. */
+_Static_assert(XQC_MAX_SEND_MSG_ONCE <= MQVPN_OFFLOAD_MAX_BATCH,
+               "fallback mmsghdr array must cover xquic's burst size");
+
+int
+mqvpn_tx_batch_register(int udp_gso, xqc_send_mmsg_ex_pt cb,
+                        xqc_transport_callbacks_t *tcbs, xqc_config_t *xconfig,
+                        int *gso_available)
+{
+    /* mqvpn_tx_batch_enabled's MQVPN_MAX_PKT_OUT_SIZE <= 1500 term guards
+     * mqvpn_udp_send_batch()'s single-run/no-splitting contract
+     * (udp_offload.h) — a future raise of the constant above ~2KB must
+     * revisit run-splitting before this registration can stay
+     * unconditional. */
+    if (!mqvpn_tx_batch_enabled(udp_gso)) return 0;
+    *gso_available = mqvpn_udp_gso_probe();
+    tcbs->write_mmsg_ex = cb;
+    xconfig->sendmmsg_on = 1;
+    return 1;
+}
+
+#endif /* __linux__ */

@@ -71,6 +71,9 @@ typedef struct path_entry_s {
     uint64_t path_stable_since_us;
     uint64_t state_entered_at_us;       /* PR1 — Phase 1 observability */
     uint64_t last_residence_warn_at_us; /* PR1 — residence-warn debounce, used in B10 */
+    int gso_disabled;                   /* runtime sticky: 0 = GSO usable, else the
+                                         * GSO-class errno that disabled it (see
+                                         * udp_offload.h); reset on fd assignment */
 } path_entry_t;
 
 #endif /* MQVPN_PATH_ENTRY_INTERNAL_H */

@@ -170,8 +170,13 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
 | `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
+| `Reinjection` | 投機的複製モード（`off`, `deadline`, `idle`, または `dgram`） | `off` |
+| `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
+| `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
+| `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
 
-スケジューラの詳細は[マルチパス](./multipath)を参照してください。
+スケジューラの詳細は[マルチパス](./multipath)、Reinjection のモード別ガイドは
+[マルチパスの Reinjection 節](./multipath)を参照してください。
 
 > `backup_fec` は実験的機能で、両ピアが mqvpn 0.4.0 以降かつ FEC ビルド
 > (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
@@ -309,8 +314,8 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | 判定タイミング | **lwIP が SYN を見る前** | CONNECT-TCP 要求の到着時 |
 | 内側 TCP の終端 | lwIP (レーン内) | しない (通常のカーネルソケットで中継) |
 | **上限超過時** | **RAW レーンに降格** — 接続は成立する (失敗ではない) | **HTTP `503`** → client はその内側コネクションを **RST**。この時点で RAW 降格はない |
-| per-flow メモリ | **~0.75 MiB** (uplink キューの上限) | **~8 KiB** (遅延確保の 4 KiB 中継バッファ × 2) + fd 1 本 |
-| 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される |
+| per-flow メモリ | **~0.75 MiB** (uplink キューの上限) | **~32 KiB** (遅延確保の 16 KiB 中継バッファ × 2) + fd 1 本 |
+| 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される。ただし RAM も見積もっておくこと: worst case は `TcpMaxGlobalFlows` × 32 KiB (4096 で約 128 MiB、全フローが両方向で一度ずつ pause した場合) |
 | 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
 
 **client の clamp:** 実効値は lwIP TCP pcb プールの半分に制限されます。
@@ -332,8 +337,10 @@ JSON では `"hybrid"` オブジェクトに snake_case キーで指定します
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `RecvRateLimit` | コネクションレベルの受信レート上限（バイト/秒）。QUIC の集約受信ウィンドウを `rate × RTT` に制限します。クライアント側のみ有効 — サーバは無視します（サーバ側で制限するとクライアントのアップロードを絞ってしまうため）。最大値は `10000000000`（10 GB/s）で、それを超える値は警告とともに拒否され `0` にフォールバックします。メモリ制約がある場合を除き `0` のままにしてください（モバイルクライアントは内部で設定します） | `0`（無効） |
+| `UdpGso` | 高スループット時に UDP 送信をカーネル GSO でバッチ化し、CPU 使用率を下げます。非対応カーネル（4.18 未満）では通常のバッチ送信に自動的にフォールバックします。Linux / Android のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のパケット単位の送信経路に戻ります | `true` |
+| `UdpGro` | 高スループット時に受信 UDP パケットをカーネル GRO でまとめて受け取り、CPU 使用率を下げます。非対応カーネル（5.0 未満）では 1 パケットずつの受信に自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前の受信経路に戻ります | `true` |
 
-JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`）。
+JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`）。
 
 ## MTU ガイドライン
 

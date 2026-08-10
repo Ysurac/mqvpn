@@ -34,10 +34,46 @@
 #define MQVPN_XQC_PATH_STATE_CLOSING    3
 #define MQVPN_XQC_PATH_STATE_CLOSED     4
 
+/* Outer QUIC/UDP payload bound handed to xquic (single source of truth —
+ * also the TX-batch registration guard; the fork's batch enc buffer is
+ * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
+#define MQVPN_MAX_PKT_OUT_SIZE 1400
+
+/* Is the Linux batched-send path engaged for this config?
+ *
+ * ONE definition, used by both the client and the server for two decisions
+ * that must never disagree: registering the write_mmsg_ex callback (with
+ * xconfig.sendmmsg_on), and setting conn_settings.defer_send_flush. With no
+ * batch callback registered xquic sends one packet per syscall regardless, so
+ * deferring the flush there would move it for no benefit at all. Spelling the
+ * condition out per call site is what would let the two drift — notably if
+ * MQVPN_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
+ * bound that mqvpn_udp_send_batch() documents in udp_offload.h.
+ *
+ * Callers still record the result on the client/server struct (tx_batch) and
+ * read THAT when building conn settings: the stored flag also carries the
+ * platform guard, since the registration block is Linux-only. */
+static inline int
+mqvpn_tx_batch_enabled(int udp_gso)
+{
+    return udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500;
+}
+
+/* Teardown TX-offload telemetry line, emitted by mqvpn_client_destroy and
+ * mqvpn_server_destroy. ONE format definition so the two endpoints'
+ * script-parsed wording (benchmarks/bench_stream_gso.sh,
+ * scripts/ci_e2e/run_udp_gso_bench.sh, run_udp_gso_config_test.sh's
+ * check_teardown_line) cannot drift — same hazard class the
+ * MQVPN_UDP_GSO_MARKER_* strings solve for the enablement marker.
+ * Callers pass (sends, datagrams, gso_config) as PRIu64/PRIu64/int and
+ * must include <inttypes.h>. */
+#define MQVPN_UDP_TX_LINE_FMT \
+    "udp-tx: sends=%" PRIu64 " datagrams=%" PRIu64 " gso_config=%d"
+
 /* Server "auto" TUN MTU.  The true MASQUE datagram MSS is per-connection
  * (peer TPs, CID length, FEC headroom, PMTUD) and unknowable at server
  * startup, so "auto" uses the typical negotiated value on a 1500-MTU path
- * with default engine settings (max_pkt_out_size 1400 − QUIC short header
+ * with default engine settings (MQVPN_MAX_PKT_OUT_SIZE − QUIC short header
  * − DATAGRAM/MASQUE headers = 1382).  Clients that negotiated less are
  * handled per-client via ICMP PTB in mqvpn_server_on_tun_packet(), so a
  * high default is safe. */
@@ -59,10 +95,18 @@ struct mqvpn_config_s {
 
     mqvpn_scheduler_t scheduler;
     mqvpn_cc_t        cc;
-    int reinjection_enable;
-    mqvpn_reinj_ctl_t reinj_ctl;
     int fec_enable;
     mqvpn_fec_scheme_t fec_scheme;
+
+    /* Reinjection (speculative multipath duplication). 0 = OFF (default,
+     * matches calloc). The three numeric fields are only consulted in
+     * DEADLINE mode; 0 there means "engine default" (110/500/20) — see
+     * mqvpn_conn_settings.c. */
+    mqvpn_reinjection_t reinjection;
+    int reinj_srtt_factor_pct;
+    int reinj_hard_deadline_ms;
+    int reinj_deadline_lower_bound_ms;
+
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;
@@ -101,6 +145,8 @@ struct mqvpn_config_s {
     mqvpn_hybrid_config_t hybrid;
 
     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
+
+    int udp_gso; /* TX GSO/batch enable; default 1 */
 };
 
 /* ─── State transition validation (M0-5) ─── */
@@ -235,5 +281,33 @@ MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
                                                   mqvpn_reorder_stats_t *out);
 MQVPN_INTERNAL int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c,
                                                   mqvpn_reorder_stats_t *out);
+
+/* Per-client snapshot of per-path reinjection TX byte counters
+ * (xqc_path_metrics_t.path_send_reinject_bytes). INTERNAL — not in public
+ * libmqvpn.h. mqvpn_path_stats_t (the public per-path struct embedded in
+ * mqvpn_client_info_t) cannot grow a field without breaking ABI (fixed
+ * array stride), so this snapshot is control_socket.c's own side channel.
+ * Index-alignment contract: see mqvpn_server_get_client_reinject() below. */
+typedef struct {
+    int n_paths;
+    struct {
+        uint64_t path_id;
+        uint64_t reinject_tx_bytes;
+    } paths[MQVPN_MAX_PATHS];
+} mqvpn_internal_client_reinject_t;
+
+/* Fills out[0..max) with each active (tunnel-established) session's
+ * per-path reinject_tx_bytes, in the SAME session-iteration order and with
+ * the SAME tunnel_established guard as mqvpn_server_get_client_info(), so
+ * the two result arrays are index-aligned within one control-command
+ * handler (the session set cannot change between the two calls — both run
+ * inside a single-threaded control-command handler). out[i] corresponds to
+ * the i-th entry of that call's client array.
+ *
+ * Returns the number of entries filled (clamped to max). Callers should
+ * still match by path_id when emitting, not rely on array-order alone. */
+MQVPN_INTERNAL int mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                                    mqvpn_internal_client_reinject_t *out,
+                                                    int max);
 
 #endif /* MQVPN_INTERNAL_H */
