@@ -45,8 +45,12 @@ jobs:
           sudo apt-get install -y cmake gcc make libevent-dev golang \
             iptables iproute2 openssl
 
-      - name: Build BoringSSL
+      - name: Clone BoringSSL (pinned)
         run: |
+          # xquic vendors its own boringssl submodule now, so the recursive
+          # checkout above already populated this path; wipe it first so we
+          # always get a full, unshallow clone pinned at the commit below.
+          rm -rf third_party/xquic/third_party/boringssl
           git clone https://github.com/google/boringssl.git \
             third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
