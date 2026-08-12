@@ -17,6 +17,7 @@
 #include "libmqvpn.h"          /* for MQVPN_MAX_PATHS, MQVPN_MAX_USERS */
 #include "reorder.h"           /* for embedded mqvpn_reorder_config_t (§16.1 INI) */
 #include "hybrid/classifier.h" /* for embedded mqvpn_hybrid_config_t ([Hybrid]) */
+#include "mqvpn_path_label.h"  /* for MQVPN_PATH_LABEL_IFACE_MAX (path_policy.iface cap) */
 
 #define MQVPN_CONFIG_MAX_PATHS 8
 #define MQVPN_CONFIG_MAX_DNS   4
@@ -25,6 +26,22 @@ _Static_assert(MQVPN_CONFIG_MAX_PATHS == MQVPN_MAX_PATHS,
                "Config path cap must equal library cap (libmqvpn.h)");
 _Static_assert(MQVPN_CONFIG_MAX_USERS == MQVPN_MAX_USERS,
                "Config user cap must equal library cap (libmqvpn.h)");
+
+/* [Multipath] — persisted per-(user,iface) downlink weight/dscp_mask
+ * overrides, JSON-only (array of objects; no INI equivalent yet, same as
+ * reorder_rules). */
+#define MQVPN_CONFIG_MAX_PATH_POLICY 128
+_Static_assert(MQVPN_CONFIG_MAX_PATH_POLICY == MQVPN_MAX_PATH_POLICY,
+               "Config path_policy cap must equal library cap (libmqvpn.h)");
+
+typedef struct {
+    char     user[64];                              /* matches user_names[][64] */
+    char     iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+    int      has_weight;
+    uint32_t weight;
+    int      has_dscp_mask;
+    uint64_t dscp_mask;
+} mqvpn_path_policy_t;
 
 typedef struct mqvpn_file_config_s {
     /* [Interface] — common */
@@ -82,6 +99,20 @@ typedef struct mqvpn_file_config_s {
      * mqvpn_path_label.h); 1 (default) = historical always-on behavior,
      * 0 = client and server weight/dscp_mask are configured independently. */
     int sync_path_labels;
+
+    /* Reverse direction of sync_path_labels above: push an operator-pinned
+     * per-(user,iface) weight/dscp_mask SERVER -> CLIENT so it also
+     * governs that client's own uplink scheduling (see mqvpn_path_label.h's
+     * "Problem 3" and MQVPN_CAPSULE_PATH_LABEL_PUSH). 0 (default) =
+     * pre-existing behavior, a server-side pin never reaches the client.
+     * Server: whether to ever push. Client: whether to adopt a push it
+     * receives. Unlike sync_path_labels, BOTH sides must opt in. */
+    int push_path_labels;
+
+    /* Server-only: persisted per-(user,iface) weight/dscp_mask overrides —
+     * see mqvpn_path_policy_t's doc comment above. */
+    mqvpn_path_policy_t path_policy[MQVPN_CONFIG_MAX_PATH_POLICY];
+    int n_path_policy;
 
     char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
     int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */

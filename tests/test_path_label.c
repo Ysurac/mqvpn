@@ -369,6 +369,51 @@ test_capsule_type_distinct(void)
     PASS();
 }
 
+static void
+test_capsule_push_type_distinct(void)
+{
+    TEST(push capsule type constant is distinct from IETF types and from PATH_LABEL);
+
+    /* DATAGRAM/ADDRESS_ASSIGN/ADDRESS_REQUEST/ROUTE_ADVERTISEMENT = 0x00-0x03 */
+    assert(MQVPN_CAPSULE_PATH_LABEL_PUSH > 0x03);
+    assert(MQVPN_CAPSULE_PATH_LABEL_PUSH != MQVPN_CAPSULE_PATH_LABEL);
+
+    PASS();
+}
+
+static void
+test_push_direction_roundtrip_via_shared_codec(void)
+{
+    TEST(push direction (path_id=0) round-trips through the same encode/decode);
+
+    /* The server -> client push direction reuses mqvpn_path_label_encode/
+     * decode verbatim with path_id=0 (see mqvpn_path_label.h's "Problem 3"
+     * doc) — this pins that contract: path_id survives as exactly 0, and
+     * iface/weight/dscp_mask round-trip normally. */
+    uint8_t buf[MQVPN_PATH_LABEL_PAYLOAD_MAX];
+    int n = mqvpn_path_label_encode(buf, sizeof(buf), 0, "wan1", 50, 1ULL << 46);
+    if (n <= 0) {
+        FAIL("encode failed");
+        return;
+    }
+
+    uint64_t path_id = 999, dscp_mask = 0; /* pre-dirty path_id */
+    uint32_t weight = 0;
+    char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface), &weight,
+                                     &dscp_mask);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(path_id, 0); /* meaningless in this direction; always 0 on the wire */
+    ASSERT_EQ(weight, 50);
+    ASSERT_EQ(dscp_mask, 1ULL << 46);
+    if (strcmp(iface, "wan1") != 0) {
+        FAIL("iface mismatch");
+        return;
+    }
+
+    PASS();
+}
+
 int
 main(void)
 {
@@ -390,6 +435,8 @@ main(void)
     test_decode_rejects_small_out_buffer();
     test_decode_ignores_trailing_bytes();
     test_capsule_type_distinct();
+    test_capsule_push_type_distinct();
+    test_push_direction_roundtrip_via_shared_codec();
 
     printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

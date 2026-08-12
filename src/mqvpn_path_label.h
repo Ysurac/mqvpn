@@ -57,6 +57,40 @@
  * sufficient on its own; path_id tracking (problem 1) is unaffected
  * either way — only the value-adoption/announcement step is gated.
  *
+ * Problem 3 (server-driven control): everything above flows CLIENT ->
+ * SERVER — a value only ever originates on the client (or a value the
+ * operator pins on the server via _by_iface(), which affects that
+ * server's own downlink only). There was no way for an operator managing
+ * the SERVER to make a per-user pin also govern that user's CLIENT-side
+ * (uplink) scheduling, short of separately configuring every router by
+ * hand. MQVPN_CAPSULE_PATH_LABEL_PUSH is the reverse-direction capsule
+ * that closes this gap: same {iface, weight, dscp_mask} payload (encoded/
+ * decoded by the same mqvpn_path_label_encode()/_decode() below — the
+ * path_id field is meaningless in this direction and always 0 on the
+ * wire, since the client already knows its own path_id for its own
+ * iface), but sent SERVER -> CLIENT on the same CONNECT-IP request stream,
+ * whenever an operator's pin exists for a given (user, iface) — an
+ * explicit mqvpn_server_set_path_weight_by_iface() / _dscp_mask_by_iface()
+ * call, or a persisted server.json "path_policy" entry. The client adopts
+ * it into its OWN path_entry_t (same effect as calling
+ * mqvpn_client_set_path_weight()/_dscp_mask() locally), so "pin it once on
+ * the server, by user" is enough for both directions to agree — the
+ * mirror image of what PATH_LABEL (client -> server) already does.
+ *
+ * Gated independently in each direction, via mqvpn_config_set_push_path_labels()
+ * (see libmqvpn.h): on the SERVER config, whether it ever sends this
+ * capsule at all (source gate); on the CLIENT config, whether it adopts
+ * one it receives (destination gate). Unlike sync_path_labels (default
+ * ON, either side alone disables it), push_path_labels defaults OFF on
+ * BOTH sides — this is new, opt-in, server-driven control over the
+ * client's own scheduling, not a preservation of historical behavior, so
+ * both ends must deliberately turn it on before it does anything. The
+ * server only ever pushes an operator-pinned value (never a value it
+ * merely adopted from that same client's own PATH_LABEL announcement) —
+ * pushing an echo back would be a pointless round trip, and the client's
+ * adoption handler never re-announces what it just adopted, so the two
+ * capsule types can never ping-pong each other.
+ *
  * This header is deliberately xquic-free (mirrors flow_sched.h) so it can
  * be unit tested without linking xquic; mqvpn_client.c/mqvpn_server.c wrap
  * it with the actual xqc_h3_ext_capsule_encode/decode +
@@ -75,6 +109,16 @@
  * collision vanishingly unlikely: ASCII "MQPL" read as a big-endian u32. */
 #define MQVPN_CAPSULE_PATH_LABEL 0x4d51504cULL
 
+/* Same payload shape as MQVPN_CAPSULE_PATH_LABEL above, sent in the
+ * opposite direction: SERVER -> CLIENT, to push an operator-pinned
+ * weight/dscp_mask down so it also governs the client's own uplink
+ * scheduling (see this header's "Problem 3" doc above). Distinct type
+ * value so a peer that only understands one direction cannot misparse
+ * the other's capsule as its own — both fall under the same "unrecognized
+ * capsule types are skipped, never torn down over" rule if the peer
+ * predates this feature. ASCII "MQPP" read as a big-endian u32. */
+#define MQVPN_CAPSULE_PATH_LABEL_PUSH 0x4d515050ULL
+
 /* Matches path_entry_t.name / mqvpn_path_desc_t.iface (both char[16]). */
 #define MQVPN_PATH_LABEL_IFACE_MAX 15
 
@@ -92,7 +136,12 @@
  * zero". `iface` must be a NUL-terminated string of at most
  * MQVPN_PATH_LABEL_IFACE_MAX bytes. Returns the number of bytes written
  * (always <= MQVPN_PATH_LABEL_PAYLOAD_MAX), or -1 if iface is NULL/empty/
- * too long or buf is too small. */
+ * too long or buf is too small.
+ *
+ * Shared verbatim by MQVPN_CAPSULE_PATH_LABEL_PUSH (server -> client):
+ * that direction has no meaningful path_id (the client already knows its
+ * own path_id for its own iface), so the sender always passes 0 and the
+ * receiver ignores path_id_out. */
 int mqvpn_path_label_encode(uint8_t *buf, size_t buf_len, uint64_t path_id,
                             const char *iface, uint32_t weight, uint64_t dscp_mask);
 

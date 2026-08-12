@@ -68,6 +68,20 @@ mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_len)
     return result != 0;
 }
 
+void
+mqvpn_auth_debug_fingerprint(const char *key, size_t key_len, char *dst, size_t dst_len)
+{
+    if (dst_len < 9) return;
+
+    /* FNV-1a, 32-bit. Diagnostic only — see doc comment in auth.h. */
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < key_len; i++) {
+        h ^= (unsigned char)key[i];
+        h *= 16777619u;
+    }
+    snprintf(dst, dst_len, "%08x", h);
+}
+
 /* ---- Key generation ---- */
 
 int

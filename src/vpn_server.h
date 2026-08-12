@@ -15,6 +15,21 @@
 #include "reorder.h"           /* mqvpn_reorder_config_t (INI [Reorder] bridge) */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t (INI [Hybrid] bridge) */
 
+/* Persisted per-(user,iface) downlink weight/dscp_mask override — bridge
+ * copy of config.h's mqvpn_path_policy_t. Kept as its own type (rather than
+ * including config.h here) so this header never pulls in the INI/JSON
+ * file-config parsing layer; main.c copies field-by-field from
+ * mqvpn_file_config_t.path_policy[] into this array. iface[16] mirrors
+ * MQVPN_PATH_LABEL_IFACE_MAX(15)+1 from mqvpn_path_label.h. */
+typedef struct {
+    char     user[64];
+    char     iface[16];
+    int      has_weight;
+    uint32_t weight;
+    int      has_dscp_mask;
+    uint64_t dscp_mask;
+} mqvpn_path_policy_entry_t;
+
 typedef struct mqvpn_server_cfg_s {
     const char *listen_addr;        /* bind address (e.g. "0.0.0.0") */
     int listen_port;                /* bind port (e.g. 443) */
@@ -52,6 +67,17 @@ typedef struct mqvpn_server_cfg_s {
                                     * client-announced weight/dscp_mask (mqvpn_path_label.h);
                                     * 0 = client/server weight/dscp_mask configured
                                     * independently */
+    int push_path_labels;         /* [Multipath] PushPathLabels; default 0 — push an
+                                    * operator-pinned per-(user,iface) weight/dscp_mask down
+                                    * to that user's client (MQVPN_CAPSULE_PATH_LABEL_PUSH);
+                                    * 0 = never push (pre-existing behavior) */
+    /* [Multipath] persisted per-(user,iface) weight/dscp_mask overrides;
+     * JSON "path_policy" array only (config.h), no CLI/INI equivalent.
+     * Matches MQVPN_CONFIG_MAX_PATH_POLICY (config.h), hardcoded here the
+     * same way user_names[64]/user_keys[64] above mirror MQVPN_MAX_USERS
+     * without including that header. */
+    mqvpn_path_policy_entry_t path_policy[128];
+    int n_path_policy;
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

@@ -58,6 +58,10 @@ typedef struct mqvpn_client_cfg_s {
                                     * client's own weight/dscp_mask (mqvpn_path_label.h) to
                                     * the server; 0 = never announce (client/server
                                     * weight/dscp_mask configured independently) */
+    int push_path_labels;         /* [Multipath] PushPathLabels; default 0 — adopt a
+                                    * server-pushed weight/dscp_mask (MQVPN_CAPSULE_
+                                    * PATH_LABEL_PUSH) into the matching local path; 0 =
+                                    * ignore any such capsule received */
 } mqvpn_client_cfg_t;
 
 #endif /* MQVPN_VPN_CLIENT_H */

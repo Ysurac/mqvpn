@@ -2147,6 +2147,180 @@ test_multipath_sync_path_labels(void)
     ASSERT_EQ_INT(cfg.sync_path_labels, 0, "json sync_path_labels=false");
 }
 
+static void
+test_multipath_push_path_labels(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.push_path_labels, 0, "push_path_labels default 0 (absent)");
+
+    char *p = write_tmp("[Multipath]\nPushPathLabels = true\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "multipath ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.push_path_labels, 1, "ini PushPathLabels=true");
+
+    p = write_tmp("{\"push_path_labels\": true}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "multipath json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.push_path_labels, 1, "json push_path_labels=true");
+}
+
+/* ── "path_policy" JSON array (persisted per-(user,iface) weight/dscp_mask
+ * overrides) — JSON-only, no INI equivalent, same as reorder_rules. ────── */
+
+static void
+test_path_policy_default_empty(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.n_path_policy, 0, "path_policy default empty");
+}
+
+static void
+test_path_policy_json_parse(void)
+{
+    const char *json = "{"
+                       "\"path_policy\":["
+                       "{\"user\":\"alice\",\"iface\":\"wan1\",\"weight\":100,"
+                       "\"dscp_mask\":70368744177664},"
+                       "{\"user\":\"alice\",\"iface\":\"wan2\",\"weight\":50},"
+                       "{\"user\":\"bob\",\"iface\":\"wan1\",\"dscp_mask\":42}"
+                       "]}";
+
+    char *p = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "path_policy json load ok");
+    ASSERT_EQ_INT(cfg.n_path_policy, 3, "3 path_policy entries parsed");
+
+    ASSERT_EQ_STR(cfg.path_policy[0].user, "alice", "entry[0] user");
+    ASSERT_EQ_STR(cfg.path_policy[0].iface, "wan1", "entry[0] iface");
+    ASSERT_EQ_INT(cfg.path_policy[0].has_weight, 1, "entry[0] has_weight");
+    ASSERT_EQ_INT((int)cfg.path_policy[0].weight, 100, "entry[0] weight");
+    ASSERT_EQ_INT(cfg.path_policy[0].has_dscp_mask, 1, "entry[0] has_dscp_mask");
+    ASSERT_EQ_ULL(cfg.path_policy[0].dscp_mask, 70368744177664ULL, "entry[0] dscp_mask");
+
+    ASSERT_EQ_STR(cfg.path_policy[1].iface, "wan2", "entry[1] iface");
+    ASSERT_EQ_INT(cfg.path_policy[1].has_weight, 1, "entry[1] has_weight");
+    ASSERT_EQ_INT((int)cfg.path_policy[1].weight, 50, "entry[1] weight");
+    ASSERT_EQ_INT(cfg.path_policy[1].has_dscp_mask, 0, "entry[1] no dscp_mask");
+
+    ASSERT_EQ_STR(cfg.path_policy[2].user, "bob", "entry[2] user");
+    ASSERT_EQ_INT(cfg.path_policy[2].has_weight, 0, "entry[2] no weight");
+    ASSERT_EQ_INT(cfg.path_policy[2].has_dscp_mask, 1, "entry[2] has_dscp_mask");
+    ASSERT_EQ_ULL(cfg.path_policy[2].dscp_mask, 42ULL, "entry[2] dscp_mask");
+}
+
+static void
+test_path_policy_missing_user_or_iface_skipped(void)
+{
+    const char *json = "{"
+                       "\"path_policy\":["
+                       "{\"iface\":\"wan1\",\"weight\":10},"
+                       "{\"user\":\"alice\",\"weight\":10},"
+                       "{\"user\":\"alice\",\"iface\":\"wan1\",\"weight\":10}"
+                       "]}";
+
+    char *p = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "path_policy missing-field json load ok");
+    ASSERT_EQ_INT(cfg.n_path_policy, 1, "only the complete entry is kept");
+    ASSERT_EQ_STR(cfg.path_policy[0].user, "alice", "kept entry user");
+}
+
+static void
+test_path_policy_neither_field_dropped(void)
+{
+    /* An entry with neither weight nor dscp_mask has nothing to apply, so
+     * it isn't kept as a no-op slot. */
+    const char *json = "{\"path_policy\":[{\"user\":\"alice\",\"iface\":\"wan1\"}]}";
+
+    char *p = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "path_policy empty-fields json load ok");
+    ASSERT_EQ_INT(cfg.n_path_policy, 0, "no-op entry dropped");
+}
+
+static void
+test_path_policy_weight_out_of_range_ignored(void)
+{
+    /* weight must be 0-65535 (same range as the control socket's
+     * set_path_weight); an out-of-range value is ignored, but the entry is
+     * still kept for its (valid) dscp_mask. */
+    const char *json = "{\"path_policy\":["
+                       "{\"user\":\"alice\",\"iface\":\"wan1\",\"weight\":99999,"
+                       "\"dscp_mask\":7}"
+                       "]}";
+
+    char *p = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "path_policy out-of-range weight json load ok");
+    ASSERT_EQ_INT(cfg.n_path_policy, 1, "entry kept for its dscp_mask");
+    ASSERT_EQ_INT(cfg.path_policy[0].has_weight, 0, "out-of-range weight ignored");
+    ASSERT_EQ_INT(cfg.path_policy[0].has_dscp_mask, 1, "valid dscp_mask still applied");
+}
+
+static void
+test_path_policy_zero_weight_is_valid(void)
+{
+    /* 0 means "use the scheduler's default" — not out of range. */
+    const char *json =
+        "{\"path_policy\":[{\"user\":\"alice\",\"iface\":\"wan1\",\"weight\":0}]}";
+
+    char *p = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "path_policy zero weight json load ok");
+    ASSERT_EQ_INT(cfg.n_path_policy, 1, "zero-weight entry kept");
+    ASSERT_EQ_INT(cfg.path_policy[0].has_weight, 1, "zero weight is valid");
+    ASSERT_EQ_INT((int)cfg.path_policy[0].weight, 0, "weight value is 0");
+}
+
+static void
+test_path_policy_json_cap_enforced(void)
+{
+    /* MQVPN_CONFIG_MAX_PATH_POLICY entries fit; the (cap+1)th is dropped. */
+    char json[16384];
+    size_t off = 0;
+    off += (size_t)snprintf(json + off, sizeof(json) - off, "{\"path_policy\":[");
+    for (int i = 0; i < MQVPN_CONFIG_MAX_PATH_POLICY + 1; i++) {
+        off += (size_t)snprintf(json + off, sizeof(json) - off,
+                                "%s{\"user\":\"u%d\",\"iface\":\"if%d\",\"weight\":%d}",
+                                i ? "," : "", i, i % 8, i + 1);
+    }
+    off += (size_t)snprintf(json + off, sizeof(json) - off, "]}");
+
+    char *p = write_tmp(json);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+
+    ASSERT_EQ_INT(rc, 0, "path_policy over-cap json load ok");
+    ASSERT_EQ_INT(cfg.n_path_policy, MQVPN_CONFIG_MAX_PATH_POLICY,
+                  "capped at MQVPN_CONFIG_MAX_PATH_POLICY entries");
+}
+
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
@@ -2297,6 +2471,7 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionHardDeadlineMs = 300\n"
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
                       "SyncPathLabels = false\n"
+                      "PushPathLabels = true\n"
                       "[Reorder]\n"
                       "Enabled = on\n"
                       "MaxWaitMs = 55\n"
@@ -2353,6 +2528,7 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_hard_deadline_ms\":300,"
                        "\"reinjection_deadline_lower_bound_ms\":10,"
                        "\"sync_path_labels\":false,"
+                       "\"push_path_labels\":true,"
                        "\"reorder\":{"
                        "\"enabled\":\"on\","
                        "\"max_wait_ms\":55,"
@@ -2414,6 +2590,7 @@ test_ini_json_scalar_parity(void)
                   b.reinjection_deadline_lower_bound_ms,
                   "parity reinjection_deadline_lower_bound_ms");
     ASSERT_EQ_INT(a.sync_path_labels, b.sync_path_labels, "parity sync_path_labels");
+    ASSERT_EQ_INT(a.push_path_labels, b.push_path_labels, "parity push_path_labels");
     ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
     ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
     ASSERT_EQ_INT(a.reorder.mode, b.reorder.mode, "parity reorder mode");
@@ -2453,6 +2630,7 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms, 10,
                   "parity reinjection_deadline_lower_bound_ms is non-default");
     ASSERT_EQ_INT(a.sync_path_labels, 0, "parity sync_path_labels is non-default");
+    ASSERT_EQ_INT(a.push_path_labels, 1, "parity push_path_labels is non-default");
     ASSERT_EQ_INT((int)a.reorder.max_flows, 77,
                   "parity reorder max_flows is non-default");
     ASSERT_EQ_INT((int)a.reorder.classify_window, 33,
@@ -2747,6 +2925,16 @@ main(void)
     test_advanced_udp_gso();
     test_advanced_udp_gro();
     test_multipath_sync_path_labels();
+    test_multipath_push_path_labels();
+
+    /* "path_policy" JSON array (persisted per-(user,iface) weight/dscp_mask) */
+    test_path_policy_default_empty();
+    test_path_policy_json_parse();
+    test_path_policy_missing_user_or_iface_skipped();
+    test_path_policy_neither_field_dropped();
+    test_path_policy_weight_out_of_range_ignored();
+    test_path_policy_zero_weight_is_valid();
+    test_path_policy_json_cap_enforced();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
     test_hybrid_egress_acl_ini_v6();

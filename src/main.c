@@ -102,6 +102,11 @@ usage(const char *prog)
         "                            for downlink scheduling. Client: don't announce\n"
         "                            its own value to the server. (default: sync\n"
         "                            enabled; either side alone is enough to disable it)\n"
+        "  --push-path-labels        Push an operator-pinned per-path weight/dscp_mask\n"
+        "                            from server to client (reverse of the above), so\n"
+        "                            it also governs that client's own uplink, keyed by\n"
+        "                            user. Server: send the push. Client: adopt one\n"
+        "                            received. (default: off; BOTH sides must enable it)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
         "  --help                    Show this help\n"
@@ -194,6 +199,7 @@ main(int argc, char *argv[])
         {"noroutes", no_argument, NULL, 'W'},
         {"tls-server-name", required_argument, NULL, 0x104},
         {"no-sync-path-labels", no_argument, NULL, 0x105},
+        {"push-path-labels", no_argument, NULL, 0x106},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -239,6 +245,7 @@ main(int argc, char *argv[])
     int route_via_server = -1;   /* -1 = not set by CLI */
     int no_routes = -1;          /* -1 = not set by CLI */
     int sync_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
+    int push_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
     int control_port = 0;
     int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
@@ -359,6 +366,7 @@ main(int argc, char *argv[])
         case 'W': no_routes = 1; break;
         case 0x104: tls_server_name = optarg; break;
         case 0x105: sync_path_labels = 0; break;
+        case 0x106: push_path_labels = 1; break;
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -442,6 +450,8 @@ main(int argc, char *argv[])
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
     int eff_sync_path_labels =
         sync_path_labels >= 0 ? sync_path_labels : file_cfg.sync_path_labels;
+    int eff_push_path_labels =
+        push_path_labels >= 0 ? push_path_labels : file_cfg.push_path_labels;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -694,6 +704,10 @@ main(int argc, char *argv[])
              * gates whether it announces its own weight/dscp_mask to the
              * server at all (mqvpn_client.c's client_announce_path_label). */
             .sync_path_labels = eff_sync_path_labels,
+            /* [Multipath] PushPathLabels; default 0. On the client this
+             * gates whether it adopts a server-pushed weight/dscp_mask
+             * (mqvpn_client.c's process_capsules PATH_LABEL_PUSH handler). */
+            .push_path_labels = eff_push_path_labels,
         };
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
@@ -763,11 +777,28 @@ main(int argc, char *argv[])
             .udp_gro = file_cfg.udp_gro,
             /* [Multipath] SyncPathLabels; default 1. Server-only. */
             .sync_path_labels = eff_sync_path_labels,
+            /* [Multipath] PushPathLabels; default 0. Server-only: gates
+             * whether it pushes an operator-pinned weight/dscp_mask down
+             * to the client at all (mqvpn_server.c's
+             * svr_push_path_label_to_client). */
+            .push_path_labels = eff_push_path_labels,
+            /* [Multipath] path_policy; JSON-only, no CLI equivalent. */
+            .n_path_policy = file_cfg.n_path_policy,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
             cfg.user_keys[i] = eff_user_keys[i];
             cfg.user_fixed_ips[i] = eff_user_fixed_ips[i];
+        }
+        for (int i = 0; i < file_cfg.n_path_policy; i++) {
+            mqvpn_copy_str(cfg.path_policy[i].user, sizeof(cfg.path_policy[i].user),
+                           file_cfg.path_policy[i].user);
+            mqvpn_copy_str(cfg.path_policy[i].iface, sizeof(cfg.path_policy[i].iface),
+                           file_cfg.path_policy[i].iface);
+            cfg.path_policy[i].has_weight = file_cfg.path_policy[i].has_weight;
+            cfg.path_policy[i].weight = file_cfg.path_policy[i].weight;
+            cfg.path_policy[i].has_dscp_mask = file_cfg.path_policy[i].has_dscp_mask;
+            cfg.path_policy[i].dscp_mask = file_cfg.path_policy[i].dscp_mask;
         }
 #ifdef _WIN32
         return win_platform_run_server(&cfg);

@@ -824,6 +824,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Unconditional: 0 is a meaningful explicit-disable, not "unset". */
     mqvpn_config_set_udp_gso(lib_cfg, cfg->udp_gso);
     mqvpn_config_set_sync_path_labels(lib_cfg, cfg->sync_path_labels);
+    mqvpn_config_set_push_path_labels(lib_cfg, cfg->push_path_labels);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1486,6 +1487,12 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
                                                cfg->user_fixed_ips[i]);
         }
     }
+    for (int i = 0; i < cfg->n_path_policy; i++) {
+        mqvpn_config_add_path_policy(
+            lib_cfg, cfg->path_policy[i].user, cfg->path_policy[i].iface,
+            cfg->path_policy[i].has_weight, cfg->path_policy[i].weight,
+            cfg->path_policy[i].has_dscp_mask, cfg->path_policy[i].dscp_mask);
+    }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
     mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
     switch (cfg->scheduler) {
@@ -1516,6 +1523,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     /* Unconditional: 0 is a meaningful explicit-disable, not "unset". */
     mqvpn_config_set_udp_gso(lib_cfg, cfg->udp_gso);
     mqvpn_config_set_sync_path_labels(lib_cfg, cfg->sync_path_labels);
+    mqvpn_config_set_push_path_labels(lib_cfg, cfg->push_path_labels);
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 

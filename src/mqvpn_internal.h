@@ -166,6 +166,41 @@ struct mqvpn_config_s {
      * stop that client's weight/dscp_mask from reaching the server's
      * downlink; both sides default on for the historical behavior. */
     int sync_path_labels;
+
+    /* MQVPN_CAPSULE_PATH_LABEL_PUSH — the reverse direction of
+     * sync_path_labels above (mqvpn_path_label.h's "Problem 3"); default 0
+     * (opt-in on both sides, not a historical-behavior default). Meaning
+     * is again per-side:
+     *   - SERVER: whether to ever push an operator-pinned per-(user,iface)
+     *     weight/dscp_mask down to that user's client (source gate). Only
+     *     pins — an explicit _by_iface() call, or a persisted path_policy
+     *     entry — are ever pushed; a value merely adopted from that same
+     *     client's own PATH_LABEL announcement is never echoed back. See
+     *     svr_push_path_label_to_client() in mqvpn_server.c.
+     *   - CLIENT: whether to adopt a pushed weight/dscp_mask it receives
+     *     into its own path_entry_t (destination gate) — same effect as
+     *     calling mqvpn_client_set_path_weight()/_dscp_mask() locally. 0 =
+     *     ignore any such capsule. See process_capsules() in
+     *     mqvpn_client.c.
+     * Unlike sync_path_labels, BOTH sides must opt in for this to do
+     * anything: the server must want to push AND the client must be
+     * willing to accept a server-driven override of its own scheduling. */
+    int push_path_labels;
+
+    /* Server-only: persisted per-(user,iface) weight/dscp_mask overrides —
+     * see mqvpn_config_add_path_policy() / config.h's mqvpn_path_policy_t
+     * (this file's JSON-parsing counterpart). Parallel arrays, mirroring
+     * user_names/user_keys/user_fixed_ips above rather than an
+     * array-of-struct, for the same reason those are parallel arrays.
+     * Consulted in mqvpn_server.c's svr_connect_ip_on_body() the first time
+     * a connection announces a PATH_LABEL for a matching iface. */
+    char     path_policy_user[MQVPN_MAX_PATH_POLICY][64];
+    char     path_policy_iface[MQVPN_MAX_PATH_POLICY][16]; /* MQVPN_PATH_LABEL_IFACE_MAX+1 */
+    int      path_policy_has_weight[MQVPN_MAX_PATH_POLICY];
+    uint32_t path_policy_weight[MQVPN_MAX_PATH_POLICY];
+    int      path_policy_has_dscp_mask[MQVPN_MAX_PATH_POLICY];
+    uint64_t path_policy_dscp_mask[MQVPN_MAX_PATH_POLICY];
+    int      n_path_policy;
 };
 
 /* ─── State transition validation (M0-5) ─── */

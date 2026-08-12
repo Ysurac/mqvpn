@@ -795,6 +795,100 @@ test_bridge_ini_reaches_libmqvpn_config(void)
     mqvpn_config_free(lib);
 }
 
+/* ── mqvpn_config_add_path_policy() (persisted per-(user,iface) weight/
+ * dscp_mask override; config.h's "path_policy" JSON array is this
+ * function's file-config counterpart, tested in test_config.c) ────────── */
+
+static void
+test_path_policy_add_and_update(void)
+{
+    mqvpn_config_t *lib = mqvpn_config_new();
+    ASSERT_TRUE(lib != NULL, "config_new");
+    ASSERT_EQ_INT(lib->n_path_policy, 0, "lib starts with no path_policy entries");
+
+    int rc = mqvpn_config_add_path_policy(lib, "alice", "wan1", 1, 100, 0, 0);
+    ASSERT_EQ_INT(rc, MQVPN_OK, "add weight-only entry ok");
+    ASSERT_EQ_INT(lib->n_path_policy, 1, "one entry after first add");
+    ASSERT_EQ_INT(lib->path_policy_has_weight[0], 1, "entry[0] has_weight");
+    ASSERT_EQ_INT((int)lib->path_policy_weight[0], 100, "entry[0] weight");
+    ASSERT_EQ_INT(lib->path_policy_has_dscp_mask[0], 0, "entry[0] no dscp_mask yet");
+
+    /* Same (user, iface) again: updates in place, does not append. */
+    rc = mqvpn_config_add_path_policy(lib, "alice", "wan1", 0, 0, 1, 42);
+    ASSERT_EQ_INT(rc, MQVPN_OK, "update existing entry ok");
+    ASSERT_EQ_INT(lib->n_path_policy, 1, "still one entry after update");
+    ASSERT_EQ_INT(lib->path_policy_has_weight[0], 0, "entry[0] weight cleared by update");
+    ASSERT_EQ_INT(lib->path_policy_has_dscp_mask[0], 1, "entry[0] now has_dscp_mask");
+    ASSERT_EQ_INT((int)lib->path_policy_dscp_mask[0], 42, "entry[0] dscp_mask");
+
+    /* A different iface for the same user appends a second entry. */
+    rc = mqvpn_config_add_path_policy(lib, "alice", "wan2", 1, 50, 0, 0);
+    ASSERT_EQ_INT(rc, MQVPN_OK, "add second iface ok");
+    ASSERT_EQ_INT(lib->n_path_policy, 2, "two entries for two ifaces");
+
+    mqvpn_config_free(lib);
+}
+
+static void
+test_path_policy_add_requires_weight_or_dscp_mask(void)
+{
+    mqvpn_config_t *lib = mqvpn_config_new();
+    int rc = mqvpn_config_add_path_policy(lib, "alice", "wan1", 0, 0, 0, 0);
+    ASSERT_EQ_INT(rc, MQVPN_ERR_INVALID_ARG, "neither field set is rejected");
+    ASSERT_EQ_INT(lib->n_path_policy, 0, "rejected call adds nothing");
+    mqvpn_config_free(lib);
+}
+
+static void
+test_path_policy_add_rejects_missing_user_or_iface(void)
+{
+    mqvpn_config_t *lib = mqvpn_config_new();
+    ASSERT_EQ_INT(mqvpn_config_add_path_policy(lib, "", "wan1", 1, 10, 0, 0),
+                  MQVPN_ERR_INVALID_ARG, "empty user rejected");
+    ASSERT_EQ_INT(mqvpn_config_add_path_policy(lib, "alice", "", 1, 10, 0, 0),
+                  MQVPN_ERR_INVALID_ARG, "empty iface rejected");
+    ASSERT_EQ_INT(lib->n_path_policy, 0, "rejected calls add nothing");
+    mqvpn_config_free(lib);
+}
+
+/* Bridge: JSON "path_policy" -> file_cfg.path_policy[] -> lib config, via
+ * the same per-entry mqvpn_config_add_path_policy() loop main.c/
+ * platform_linux.c run (there is no single mqvpn_config_apply_path_policy()
+ * helper -- unlike reorder/hybrid, path_policy has no INI form to bridge,
+ * so the loop is the whole bridge). */
+static void
+test_bridge_json_path_policy_reaches_libmqvpn_config(void)
+{
+    const char *json = "{\"path_policy\":["
+                       "{\"user\":\"alice\",\"iface\":\"wan1\",\"weight\":100,"
+                       "\"dscp_mask\":42}"
+                       "]}";
+    char *path = write_tmp(json);
+    mqvpn_file_config_t fc;
+    mqvpn_config_defaults(&fc);
+    int rc = mqvpn_config_load(&fc, path);
+    if (path) unlink(path);
+    ASSERT_EQ_INT(rc, 0, "parse ok");
+    ASSERT_EQ_INT(fc.n_path_policy, 1, "file_cfg got one path_policy entry");
+
+    mqvpn_config_t *lib = mqvpn_config_new();
+    ASSERT_TRUE(lib != NULL, "config_new");
+    for (int i = 0; i < fc.n_path_policy; i++) {
+        mqvpn_config_add_path_policy(
+            lib, fc.path_policy[i].user, fc.path_policy[i].iface,
+            fc.path_policy[i].has_weight, fc.path_policy[i].weight,
+            fc.path_policy[i].has_dscp_mask, fc.path_policy[i].dscp_mask);
+    }
+
+    ASSERT_EQ_INT(lib->n_path_policy, 1, "bridge: entry reaches lib");
+    ASSERT_EQ_INT(strcmp(lib->path_policy_user[0], "alice") == 0, 1, "bridge: user");
+    ASSERT_EQ_INT(strcmp(lib->path_policy_iface[0], "wan1") == 0, 1, "bridge: iface");
+    ASSERT_EQ_INT((int)lib->path_policy_weight[0], 100, "bridge: weight");
+    ASSERT_EQ_INT((int)lib->path_policy_dscp_mask[0], 42, "bridge: dscp_mask");
+
+    mqvpn_config_free(lib);
+}
+
 /* ──────────────────── Chunk 1: profile→preset helper ─────────────────────── */
 
 static void
@@ -1164,6 +1258,12 @@ main(void)
 
     /* Bridge: INI → file_cfg → libmqvpn config (apply_reorder translation) */
     test_bridge_ini_reaches_libmqvpn_config();
+
+    /* mqvpn_config_add_path_policy() (persisted per-(user,iface) override) */
+    test_path_policy_add_and_update();
+    test_path_policy_add_requires_weight_or_dscp_mask();
+    test_path_policy_add_rejects_missing_user_or_iface();
+    test_bridge_json_path_policy_reaches_libmqvpn_config();
 
     /* Chunk 1: profile→preset helper */
     test_profile_preset();

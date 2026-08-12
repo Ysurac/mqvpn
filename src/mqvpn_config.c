@@ -160,6 +160,7 @@ mqvpn_config_new(void)
     cfg->tun_mtu = 0; /* 0 = auto */
     cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
     cfg->sync_path_labels = 1; /* server: adopt / client: announce weight+dscp, both by default */
+    cfg->push_path_labels = 0; /* server: push / client: adopt an operator pin — opt-in, both sides */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
@@ -288,6 +289,45 @@ mqvpn_config_set_user_fixed_ip(mqvpn_config_t *cfg, const char *username, const 
     }
 
     return MQVPN_ERR_INVALID_ARG; /* user not found */
+}
+
+/* Persisted per-(user,iface) downlink weight/dscp_mask override — see
+ * struct mqvpn_config_s's path_policy_* fields (mqvpn_internal.h) and
+ * config.h's mqvpn_path_policy_t (its JSON-file counterpart, bridged in via
+ * main.c/platform_linux.c). At least one of has_weight/has_dscp_mask must be
+ * set; an existing (username, iface) entry is updated in place, matching
+ * mqvpn_config_add_user()'s update-if-exists behavior. */
+int
+mqvpn_config_add_path_policy(mqvpn_config_t *cfg, const char *username, const char *iface,
+                             int has_weight, uint32_t weight, int has_dscp_mask,
+                             uint64_t dscp_mask)
+{
+    if (!cfg || !username || !iface || username[0] == '\0' || iface[0] == '\0')
+        return MQVPN_ERR_INVALID_ARG;
+    if (!has_weight && !has_dscp_mask) return MQVPN_ERR_INVALID_ARG;
+
+    for (int i = 0; i < cfg->n_path_policy; i++) {
+        if (strcmp(cfg->path_policy_user[i], username) == 0 &&
+            strcmp(cfg->path_policy_iface[i], iface) == 0) {
+            cfg->path_policy_has_weight[i] = has_weight;
+            cfg->path_policy_weight[i] = weight;
+            cfg->path_policy_has_dscp_mask[i] = has_dscp_mask;
+            cfg->path_policy_dscp_mask[i] = dscp_mask;
+            return MQVPN_OK;
+        }
+    }
+
+    if (cfg->n_path_policy >= MQVPN_MAX_PATH_POLICY) return MQVPN_ERR_INVALID_ARG;
+
+    int i = cfg->n_path_policy;
+    snprintf(cfg->path_policy_user[i], sizeof(cfg->path_policy_user[i]), "%s", username);
+    snprintf(cfg->path_policy_iface[i], sizeof(cfg->path_policy_iface[i]), "%s", iface);
+    cfg->path_policy_has_weight[i] = has_weight;
+    cfg->path_policy_weight[i] = weight;
+    cfg->path_policy_has_dscp_mask[i] = has_dscp_mask;
+    cfg->path_policy_dscp_mask[i] = dscp_mask;
+    cfg->n_path_policy++;
+    return MQVPN_OK;
 }
 
 int
@@ -904,6 +944,14 @@ mqvpn_config_set_sync_path_labels(mqvpn_config_t *cfg, int enabled)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->sync_path_labels = enabled ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_push_path_labels(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->push_path_labels = enabled ? 1 : 0;
     return MQVPN_OK;
 }
 

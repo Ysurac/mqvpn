@@ -633,6 +633,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_BOOL(SEC_MULTIPATH, "FecEnable", "fec_enable", fec_enable),
     CFG_STR(SEC_MULTIPATH, "FecScheme", "fec_scheme", fec_scheme),
     CFG_BOOL(SEC_MULTIPATH, "SyncPathLabels", "sync_path_labels", sync_path_labels),
+    CFG_BOOL(SEC_MULTIPATH, "PushPathLabels", "push_path_labels", push_path_labels),
     /* [Reorder] — JSON side lives inside the bounded "reorder" object */
     {SEC_REORDER, "Enabled", "enabled", CFGK_REORDER_MODE, CFGK_OFF(reorder.mode), 0, 0,
      NULL, 0, 0, NULL},
@@ -1013,6 +1014,82 @@ json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
     return (*p == ']') ? 0 : -1;
 }
 
+/* "path_policy" JSON array: [{"user","iface","weight"?,"dscp_mask"?}, ...] —
+ * persisted per-(user,iface) downlink weight/dscp_mask overrides (see
+ * mqvpn_path_policy_t in config.h). No INI equivalent, same as
+ * reorder_rules above, whose bounded-object-span parsing this mirrors.
+ * "weight" alone or "dscp_mask" alone is fine (has_weight/has_dscp_mask
+ * track which); an entry with neither present is dropped rather than kept
+ * as a no-op slot. */
+static int
+json_read_path_policy(mqvpn_file_config_t *cfg, const char *p)
+{
+    if (!cfg || !p || *p != '[') return -1;
+    p = json_skip_ws(p + 1);
+
+    while (*p && *p != ']') {
+        if (*p != '{') return -1;
+        const char *obj_end = json_object_end(p);
+        if (!obj_end) return -1;
+
+        char user[64] = {0};
+        char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1] = {0};
+
+        const char *user_v = json_find_key_bounded(p, obj_end, "user");
+        const char *iface_v = json_find_key_bounded(p, obj_end, "iface");
+        int have_user = user_v && json_read_string(user_v, user, sizeof(user)) == 0 &&
+                        user[0] != '\0';
+        int have_iface = iface_v && json_read_string(iface_v, iface, sizeof(iface)) == 0 &&
+                         iface[0] != '\0';
+
+        if (!have_user || !have_iface) {
+            LOG_WRN("JSON: path_policy entry missing user/iface; skipping");
+        } else if (cfg->n_path_policy >= MQVPN_CONFIG_MAX_PATH_POLICY) {
+            LOG_WRN("JSON: path_policy capped at %d entries; dropping extra",
+                    MQVPN_CONFIG_MAX_PATH_POLICY);
+        } else {
+            mqvpn_path_policy_t entry;
+            memset(&entry, 0, sizeof(entry));
+            mqvpn_copy_str(entry.user, sizeof(entry.user), user);
+            mqvpn_copy_str(entry.iface, sizeof(entry.iface), iface);
+
+            const char *weight_v = json_find_key_bounded(p, obj_end, "weight");
+            if (weight_v) {
+                uint64_t wv = 0;
+                if (json_read_u64_strict(weight_v, &wv) == 0 && wv <= 65535) {
+                    entry.weight = (uint32_t)wv;
+                    entry.has_weight = 1;
+                } else {
+                    LOG_WRN("JSON: path_policy weight must be 0-65535; ignoring");
+                }
+            }
+
+            const char *dscp_v = json_find_key_bounded(p, obj_end, "dscp_mask");
+            if (dscp_v) {
+                uint64_t mv = 0;
+                if (json_read_u64_strict(dscp_v, &mv) == 0) {
+                    entry.dscp_mask = mv;
+                    entry.has_dscp_mask = 1;
+                } else {
+                    LOG_WRN("JSON: path_policy dscp_mask invalid; ignoring");
+                }
+            }
+
+            /* Neither field present: nothing to apply, don't keep the slot. */
+            if (entry.has_weight || entry.has_dscp_mask)
+                cfg->path_policy[cfg->n_path_policy++] = entry;
+        }
+
+        p = json_skip_ws(obj_end + 1);
+        if (*p == ',')
+            p = json_skip_ws(p + 1);
+        else if (*p != ']')
+            return -1;
+    }
+
+    return (*p == ']') ? 0 : -1;
+}
+
 /* Handle a key=value pair in the given section */
 static void
 handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *val,
@@ -1255,6 +1332,9 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     v = json_find_key(json_text, "reorder_rules");
     if (v && json_read_reorder_rules(cfg, v) < 0) return -1;
 
+    v = json_find_key(json_text, "path_policy");
+    if (v && json_read_path_policy(cfg, v) < 0) return -1;
+
     return 0;
 }
 
@@ -1348,6 +1428,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->udp_gso = 1;
     cfg->udp_gro = 1;
     cfg->sync_path_labels = 1;
+    cfg->push_path_labels = 0; /* opt-in; memset above already zeroes this, set explicitly for clarity */
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }

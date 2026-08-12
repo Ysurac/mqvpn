@@ -321,6 +321,9 @@ Server example:
     "fec_enable": true,
     "fec_scheme": "reed_solomon",
     "sync_path_labels": true,
+    "path_policy": [
+        { "user": "alice", "iface": "wan1", "weight": 100 }
+    ],
     "mtu": 1280,
     "control_port": 9090,
     "control_addr": "127.0.0.1"
@@ -367,6 +370,8 @@ Notes:
 - `mode` is optional if it can be inferred (`listen` implies server).
 - `manage_routes` defaults to `true`; set it to `false` on router/embedded integrations where an external orchestrator owns the host routing table and mqvpn should only bring up the TUN.
 - `sync_path_labels` defaults to `true` and is meaningful on **both** client and server configs, each gating its own half of the sync (server: adopt; client: announce); see "Disabling weight/DSCP sync entirely" under [Schedulers](#schedulers) above.
+- `path_policy` is server-only, JSON-only (no INI form): persisted per-(user,iface) `weight`/`dscp_mask` overrides, surviving a server restart or client reconnect. See "Persisting a server-side override" under [Schedulers](#schedulers) above.
+- `push_path_labels` defaults to `false` and, like `sync_path_labels`, is meaningful on **both** client and server configs (server: push a pinned value; client: adopt one received) — but unlike `sync_path_labels`, both sides must opt in. See "Pushing a server-side override down to the client" under [Schedulers](#schedulers) above.
 - **[mqvpn-prometheus-exporter](https://github.com/mp0rta/mqvpn-prometheus-exporter) requires per-user keys.** Using mqvpn-prometheus-exporter, you can correct and visualize mqvpn metrics. If you use it, sharing a single `auth_key` across
   multiple clients works for the VPN data plane, but the control API
   surfaces those sessions as `user="(global)"` and the Prometheus exporter
@@ -475,6 +480,52 @@ sides, since each endpoint only reads its own half of the flag:
 Either side alone is enough to fully decouple that client's weight/dscp_mask
 from the server's downlink. Use this when client and server are operated
 independently and should never inherit each other's per-path tuning.
+
+**Persisting a server-side override (`path_policy`):** the server-mode
+`set_path_weight`/`set_path_dscp_mask` calls above only ever set a live,
+in-process value — restart the server and it's gone. `path_policy` (server
+JSON config only, no INI form) is the persisted equivalent: a list of
+`{"user", "iface", "weight"?, "dscp_mask"?}` entries, applied the first time
+that user's connection announces a PATH_LABEL for the matching `iface` (so it
+survives both a server restart and a client reconnect, unlike the live
+call). At least one of `weight`/`dscp_mask` must be given per entry; either
+takes precedence over the client's own announced value for that iface, same
+as an explicit `set_path_weight`/`set_path_dscp_mask` call — and, like that
+call, only has an effect when the connection's `scheduler` is `wrr`, `wrtt`,
+or `dscp` (`wlb`'s weights are computed automatically, not operator-set):
+
+```json
+{
+    "scheduler": "wrr",
+    "path_policy": [
+        { "user": "alice", "iface": "wan1", "weight": 100 },
+        { "user": "alice", "iface": "wan2", "weight": 50, "dscp_mask": 70368744177664 }
+    ]
+}
+```
+
+**Pushing a server-side override down to the client (`push_path_labels`):**
+everything above flows client→server — a value only ever originates on the
+client, or gets pinned on the server for that server's own downlink only.
+`push_path_labels` closes the reverse direction: with it enabled, a
+server-pinned weight/dscp_mask (from `path_policy` above, or a live
+`set_path_weight`/`set_path_dscp_mask` `_by_iface` call) is also pushed down
+to that user's client and adopted into the client's own uplink scheduling —
+so an operator can set a per-user override once, on the server, and have it
+take effect on **both** directions with no separate action on the router.
+Off by default and, unlike `sync_path_labels`, needs **both** ends to opt in
+before anything happens:
+
+- On the **server**: whether it ever pushes a pinned value at all. Enable
+  with `--push-path-labels` (or `[Multipath] PushPathLabels = true` in INI /
+  `"push_path_labels": true` in JSON config).
+- On the **client**: whether it adopts a value it receives — same flag/flags,
+  set on the client's own config. A server pushing to a client that hasn't
+  opted in is a silent no-op (dropped, logged at debug).
+
+Only ever pushes a value an operator actually pinned; a value the server
+merely adopted from that same client's own announcement is never echoed
+back to it, so this cannot loop with `sync_path_labels`.
 
 ## Reorder buffer (datagram lane)
 
@@ -1042,6 +1093,7 @@ mqvpn [--config PATH] --mode client|server [options]
     --no-fec              Disable FEC
     --fec-scheme galois_calculation|packet_mask|reed_solomon|xor FEC scheme (default: reed_solomon)
     --no-sync-path-labels  Don't sync per-path weight/dscp_mask between client/server (client and/or server, default: sync enabled)
+    --push-path-labels     Push a server-pinned per-path weight/dscp_mask down to the client (client and server, default: off, both must opt in)
   --route-via-server     Add host route to server IP before setting default route (client)
   --no-routes            Skip all automatic route setup; manage routes manually (client)
   --control-port PORT    TCP port for JSON control API (server)

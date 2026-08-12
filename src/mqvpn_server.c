@@ -107,6 +107,13 @@ typedef struct svr_stream_s svr_stream_t;
  * on) — when off, only an operator's explicit call ever populates
  * has_weight/has_dscp_mask, so client and server tune independently.
  *
+ * weight_from_operator / dscp_mask_from_operator additionally mark a value
+ * as eligible for the REVERSE trip: svr_push_path_label_to_client() pushes
+ * exactly these (never a client-adopted value) back down to the client
+ * over MQVPN_CAPSULE_PATH_LABEL_PUSH, gated by s->config.push_path_labels
+ * (mqvpn_config_set_push_path_labels(), default off) — see
+ * mqvpn_path_label.h's "Problem 3".
+ *
  * Scoped to one connection's lifetime, same as everything else in
  * svr_conn_s — mirrors the client side's path_entry_t, which is also only
  * in-process/in-connection state, not persisted across a full restart. */
@@ -135,6 +142,17 @@ struct svr_conn_s {
     /* MASQUE session */
     char username[64]; /* authenticated user name, or empty for global key */
     uint64_t masque_stream_id;
+    /* The CONNECT-IP request stream's h3_request handle, kept around so
+     * svr_push_path_label_to_client() can send a PATH_LABEL_PUSH capsule
+     * at an arbitrary time (e.g. from mqvpn_server_set_path_weight_by_iface(),
+     * called outside any request-read callback) — unlike every other
+     * capsule this server sends, which is always written synchronously
+     * from inside the body-read callback that already has an h3_request
+     * parameter at hand. Set when cb_request_read tags the stream
+     * SVR_STREAM_ROLE_CONNECT_IP; cleared in cb_request_close alongside
+     * tunnel_established, so a stale pointer into a freed request can
+     * never be used. NULL whenever there is no live CONNECT-IP stream. */
+    xqc_h3_request_t *connect_ip_request;
     struct in_addr assigned_ip;
     struct in6_addr assigned_ip6;
     int has_v6;
@@ -193,6 +211,15 @@ typedef enum {
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     SVR_STREAM_ROLE_CONNECT_TCP,
 #endif
+    /* A CONNECT-IP request that was tagged CONNECT_IP at header-parse time
+     * (cb_request_read) but then rejected by svr_connect_ip_on_request()
+     * (bad auth) or svr_masque_send_response() (max_clients) — a final
+     * canned status was already sent on this stream. Body phase must NOT
+     * fall through to svr_connect_ip_on_body() for these: that handler has
+     * no auth gate of its own (it trusts the CONNECT_IP role tag), so an
+     * unauthenticated client could otherwise keep pushing capsule data
+     * after its 403. See cb_request_read's READ_BODY switch. */
+    SVR_STREAM_ROLE_REJECTED,
 } svr_stream_role_t;
 
 struct svr_stream_s {
@@ -969,7 +996,13 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     if (s->n_sessions >= s->max_clients) {
         LOG_W(s, "max clients reached (%d), rejecting", s->max_clients);
         svr_masque_send_403(h3_request);
-        return -1;
+        /* return 0, not -1: this is xquic's H3 request read-notify callback
+         * (cb_request_read -> svr_connect_ip_on_request -> here). A
+         * nonzero return escalates into a connection-level H3_FRAME_ERROR
+         * close (xqc_h3_stream_process_request) instead of just this
+         * stream's clean 403 — see svr_masque_send_403's doc comment. */
+        stream->role = SVR_STREAM_ROLE_REJECTED;
+        return 0;
     }
 
     /* 1. Send 200 response headers */
@@ -1258,9 +1291,20 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
          * closing non-tunnel stream (per-flow connect-tcp, or a 501'd
          * unknown request) on the same H3 connection must not flip the
          * tunnel dead. Mirrors the client-side role gate in
-         * mqvpn_client.c's cb_request_close. */
-        if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
+         * mqvpn_client.c's cb_request_close.
+         *
+         * REJECTED is included here too: cb_request_read sets
+         * conn->connect_ip_request to this stream's h3_request before
+         * svr_connect_ip_on_request() gets a chance to reject it, so a
+         * rejected stream must still clear that pointer on close or it's
+         * left dangling at a freed request. tunnel_established is already
+         * 0 for a rejected stream (never set on the reject path), so
+         * clearing it again here is a no-op. */
+        if (stream->conn && (stream->role == SVR_STREAM_ROLE_CONNECT_IP ||
+                             stream->role == SVR_STREAM_ROLE_REJECTED)) {
             stream->conn->tunnel_established = 0;
+            stream->conn->connect_ip_request = NULL;
+        }
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
         /* A connect-tcp stream can close (client resets it, or the H3
          * connection itself is torn down) while its egress flow is still
@@ -1427,9 +1471,26 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
 
         if (svr_auth_check(s, hdrs->auth_token, hdrs->auth_token_len, username,
                            sizeof(username)) != 0) {
-            LOG_W(s, "authentication failed: invalid or missing PSK");
+            /* len=0/fp=(none) means the request carried no "authorization:
+             * Bearer ..." header at all (svr_parse_request_headers never
+             * populated auth_token) — as opposed to len>0 with a fp that
+             * doesn't match any startup-logged fp above, i.e. present but
+             * wrong. That distinction is the whole point: "invalid or
+             * missing" alone can't tell the two apart, and they point at
+             * different fixes (client-side config vs. a key mismatch). */
+            char fp[9] = "(none)";
+            if (hdrs->auth_token && hdrs->auth_token_len > 0)
+                mqvpn_auth_debug_fingerprint(hdrs->auth_token, hdrs->auth_token_len, fp,
+                                             sizeof(fp));
+            LOG_W(s, "authentication failed: invalid or missing PSK (received len=%zu fp=%s)",
+                  hdrs->auth_token_len, fp);
             svr_masque_send_403(h3_request);
-            return -1;
+            /* return 0, not -1: same H3_FRAME_ERROR escalation as the
+             * max_clients rejection in svr_masque_send_response() above —
+             * a failed auth is a routine, expected client-facing rejection
+             * and must not tear down the whole H3 connection. */
+            stream->role = SVR_STREAM_ROLE_REJECTED;
+            return 0;
         }
 
         stream->conn->connected_at_us = now_us();
@@ -1617,6 +1678,79 @@ svr_path_label_find_or_create(svr_conn_t *conn, const char *iface)
     return e;
 }
 
+/* Push `label`'s operator-pinned weight/dscp_mask down to the client over
+ * a MQVPN_CAPSULE_PATH_LABEL_PUSH capsule on the CONNECT-IP stream — the
+ * reverse direction of client_announce_path_label() (mqvpn_client.c), see
+ * mqvpn_path_label.h's "Problem 3". Best-effort and silent on every
+ * no-op path, mirroring that function's contract:
+ *   - s->config.push_path_labels off (default): never sends anything.
+ *   - Nothing operator-pinned on `label` (weight_from_operator and
+ *     dscp_mask_from_operator both unset): nothing to push — a value
+ *     merely adopted from this same client's own PATH_LABEL announcement
+ *     is never echoed back to it.
+ *   - No live CONNECT-IP stream yet (conn->connect_ip_request NULL, or
+ *     the tunnel isn't up): dropped: nowhere to send it. Whenever the
+ *     stream does come up, the client's own subsequent announcement for
+ *     this iface (if any) re-triggers this from svr_connect_ip_on_body,
+ *     so a pin set before the client even connects is not lost.
+ * Only ever encodes the operator-pinned field(s) — 0 (the "no dedicated
+ * value" sentinel, see mqvpn_path_label_encode()'s doc comment) for
+ * whichever of weight/dscp_mask is NOT operator-pinned, even if `label`
+ * separately has an adopted-from-client value for it. path_id is always 0
+ * on the wire in this direction (meaningless here — the client already
+ * knows its own path_id for its own iface). */
+static void
+svr_push_path_label_to_client(mqvpn_server_t *s, svr_conn_t *conn, const svr_path_label_t *label)
+{
+    if (!s->config.push_path_labels) return;
+    if (!label->weight_from_operator && !label->dscp_mask_from_operator) return;
+    if (!conn->connect_ip_request || !conn->tunnel_established) return;
+
+    uint32_t weight = label->weight_from_operator ? label->weight : 0;
+    uint64_t dscp_mask = label->dscp_mask_from_operator ? label->dscp_mask : 0;
+
+    uint8_t label_payload[MQVPN_PATH_LABEL_PAYLOAD_MAX];
+    int n = mqvpn_path_label_encode(label_payload, sizeof(label_payload), 0, label->iface,
+                                    weight, dscp_mask);
+    if (n <= 0) return;
+
+    uint8_t cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
+    size_t cap_written = 0;
+    xqc_int_t xret = xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
+                                               MQVPN_CAPSULE_PATH_LABEL_PUSH, label_payload,
+                                               (size_t)n);
+    if (xret != XQC_OK) {
+        LOG_W(s, "path_label push capsule encode failed: %d", xret);
+        return;
+    }
+
+    xqc_int_t sret = xqc_h3_request_send_body(conn->connect_ip_request, cap_buf, cap_written, 0);
+    if (sret < 0) {
+        LOG_W(s, "path_label push send failed: user=%s iface=%s ret=%d", conn->username,
+              label->iface, sret);
+    } else {
+        LOG_I(s, "pushed path_label: user=%s iface=%s weight=%u dscp_mask=%" PRIu64,
+              conn->username, label->iface, weight, dscp_mask);
+    }
+}
+
+/* Look up a persisted per-(user,iface) weight/dscp_mask override —
+ * s->config.path_policy_* (mqvpn_internal.h), populated at startup from
+ * config.h's "path_policy" JSON array (mqvpn_config_add_path_policy() via
+ * platform_linux.c). Returns the index into those parallel arrays, or -1 if
+ * this (user, iface) has no persisted override. */
+static int
+svr_path_policy_find(mqvpn_server_t *s, const char *username, const char *iface)
+{
+    for (int i = 0; i < s->config.n_path_policy; i++) {
+        if (strcmp(s->config.path_policy_user[i], username) == 0 &&
+            strcmp(s->config.path_policy_iface[i], iface) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST/PATH_LABEL
  * handling. */
 static int
@@ -1695,6 +1829,12 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                 if (mqvpn_path_label_decode(cap_payload, cap_len, &path_id, iface,
                                             sizeof(iface), &client_weight,
                                             &client_dscp_mask) == 0) {
+                    /* Distinguish "first announcement of this iface this
+                     * session" (label didn't exist yet) from a
+                     * re-announcement (path flap/reconnect within the same
+                     * session), so persisted path_policy below applies
+                     * exactly once per (conn, iface) — see its comment. */
+                    int is_new_label = (svr_path_label_find(stream->conn, iface) == NULL);
                     svr_path_label_t *label =
                         svr_path_label_find_or_create(stream->conn, iface);
                     if (label) {
@@ -1704,6 +1844,41 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                                  " client_weight=%u client_dscp_mask=%" PRIu64,
                               stream->conn->username, iface, path_id, client_weight,
                               client_dscp_mask);
+
+                        /* Apply a persisted server.json path_policy entry
+                         * (config.h's "path_policy" JSON array) exactly
+                         * once, the first time this session sees this
+                         * iface — before client-value adoption below, and
+                         * unconditionally (not gated on sync_path_labels:
+                         * this is explicit operator config, same standing
+                         * as a runtime _by_iface() call, not the client's
+                         * own default). Restricting this to a freshly
+                         * created label means a later runtime
+                         * set_path_weight_by_iface()/_dscp_mask_by_iface()
+                         * call made mid-session still wins for the rest of
+                         * that session — this only ever fires once per
+                         * (conn, iface), so it can never claw back an
+                         * intentional later override on the next path
+                         * flap/reconnect within the same connection. */
+                        if (is_new_label) {
+                            int pi = svr_path_policy_find(s, stream->conn->username, iface);
+                            if (pi >= 0) {
+                                if (s->config.path_policy_has_weight[pi]) {
+                                    label->weight = s->config.path_policy_weight[pi];
+                                    label->has_weight = 1;
+                                    label->weight_from_operator = 1;
+                                }
+                                if (s->config.path_policy_has_dscp_mask[pi]) {
+                                    label->dscp_mask = s->config.path_policy_dscp_mask[pi];
+                                    label->has_dscp_mask = 1;
+                                    label->dscp_mask_from_operator = 1;
+                                }
+                                LOG_I(s, "path_policy: user=%s iface=%s weight=%u "
+                                         "dscp_mask=%" PRIu64 " applied",
+                                      stream->conn->username, iface, label->weight,
+                                      label->dscp_mask);
+                            }
+                        }
 
                         /* Adopt the client's own value by default — this is
                          * what lets "set it once on the client" reach the
@@ -1736,6 +1911,13 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                             xqc_conn_set_path_dscp_mask(s->engine, &stream->conn->cid,
                                                         path_id, label->dscp_mask);
                         }
+
+                        /* Reassert any operator pin to the client too, on
+                         * every (re)announcement — see
+                         * svr_push_path_label_to_client()'s doc comment.
+                         * A no-op unless push_path_labels is on AND this
+                         * label has an operator-pinned field. */
+                        svr_push_path_label_to_client(s, stream->conn, label);
                     } else {
                         LOG_W(s, "path_label table full: user=%s iface=%s",
                               stream->conn->username, iface);
@@ -1782,6 +1964,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
              * (stream reset); harmless — a reset stream's role is never
              * consulted again. */
             stream->role = SVR_STREAM_ROLE_CONNECT_IP;
+            stream->conn->connect_ip_request = h3_request;
             return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
         }
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
@@ -1837,10 +2020,14 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
              * to satisfy -Wswitch. */
             return 0;
 #endif
-        case SVR_STREAM_ROLE_UNKNOWN: {
-            /* 501 already sent at header time. Drain and discard any body
-             * so it doesn't sit in xquic's recv buffers until flow control
-             * stalls. */
+        case SVR_STREAM_ROLE_UNKNOWN:
+        case SVR_STREAM_ROLE_REJECTED: {
+            /* 501/403 already sent at header time. Drain and discard any
+             * body so it doesn't sit in xquic's recv buffers until flow
+             * control stalls. REJECTED must NOT reach
+             * svr_connect_ip_on_body(): that handler has no auth check of
+             * its own, so falling through there would let an unauthenticated
+             * or over-quota client keep feeding it capsule data. */
             unsigned char drain[4096];
             while (xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin) > 0) {
             }
@@ -2098,6 +2285,33 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
     mqvpn_ptb_bucket_init(&s->ptb_bucket);
     s->boot_us = now_us();
+
+    /* Load-time visibility for PSK auth (mirrored at client startup in
+     * mqvpn_client.c's mqvpn_client_new, and re-surfaced per rejected
+     * attempt below in svr_connect_ip_on_request) — this is the one place
+     * that shows what THIS running process actually loaded, as opposed to
+     * what's on disk in server.json right now: there is no config-reload
+     * path in this codebase, so the two can silently diverge after an edit
+     * made since the process last (re)started. Length+fingerprint only —
+     * never the key itself; see mqvpn_auth_debug_fingerprint's doc
+     * comment in auth.h. */
+    if (s->config.auth_key[0] != '\0') {
+        char fp[9];
+        mqvpn_auth_debug_fingerprint(s->config.auth_key, strlen(s->config.auth_key), fp,
+                                     sizeof(fp));
+        LOG_I(s, "auth: global psk loaded len=%zu fp=%s", strlen(s->config.auth_key), fp);
+    } else {
+        LOG_I(s, "auth: no global psk configured");
+    }
+    for (int i = 0; i < s->config.n_users; i++) {
+        const char *k = s->config.user_keys[i];
+        if (k[0] == '\0') continue;
+        char fp[9];
+        mqvpn_auth_debug_fingerprint(k, strlen(k), fp, sizeof(fp));
+        LOG_I(s, "auth: user '%s' psk loaded len=%zu fp=%s", s->config.user_names[i],
+              strlen(k), fp);
+    }
+
     /* Sanitize the [Hybrid] block at its consumer (validate-at-consumer
      * pattern — same as mqvpn_reorder_config_validate run by
      * mqvpn_reorder_rx_new): the INI/JSON loaders store raw scalars (CFG_U32
@@ -3188,6 +3402,11 @@ mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user, const
          * reconnect — see svr_path_label_t's doc comment. */
         label->weight_from_operator = 1;
 
+        /* Push to the client too (no-op unless push_path_labels is on) —
+         * independent of has_path_id below: this direction is keyed by
+         * iface, not path_id, so there is nothing to wait for here. */
+        svr_push_path_label_to_client(s, conn, label);
+
         if (!label->has_path_id) {
             /* No PATH_LABEL announcement for this iface yet (peer predates
              * this feature, or the path just hasn't come up yet) — stored
@@ -3223,6 +3442,9 @@ mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user,
         /* Explicit operator call: pins this value — same reasoning as
          * set_path_weight_by_iface() above. */
         label->dscp_mask_from_operator = 1;
+
+        /* Push to the client too — see set_path_weight_by_iface() above. */
+        svr_push_path_label_to_client(s, conn, label);
 
         if (!label->has_path_id) {
             return MQVPN_OK;

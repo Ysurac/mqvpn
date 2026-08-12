@@ -23,7 +23,12 @@
   "fec_enable": true,
   "fec_scheme": "reed_solomon",
   "sync_path_labels": true,
+  "push_path_labels": false,
   "init_max_path_id": 0,
+  "path_policy": [
+    { "user": "alice", "iface": "wan1", "weight": 100 },
+    { "user": "alice", "iface": "wan2", "weight": 50, "dscp_mask": 70368744177664 }
+  ],
   "control_port": 0,
   "control_addr": "127.0.0.1",
   "hybrid": {

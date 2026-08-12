@@ -1,5 +1,25 @@
 mqvpn (0.16.0-1) UNRELEASED; urgency=medium
 
+  * feat(multipath): add the reverse direction of PATH_LABEL sync -- an
+    operator-pinned per-(user,iface) weight/dscp_mask (from "path_policy"
+    or a live set_path_weight/set_path_dscp_mask _by_iface call) can now
+    be pushed SERVER -> CLIENT and adopted into that client's own uplink
+    scheduling, so a server-side, per-user override no longer requires a
+    separate action on the router. New PushPathLabels key ([Multipath]
+    INI / push_path_labels JSON), --push-path-labels CLI flag, and
+    mqvpn_config_set_push_path_labels() library API; off by default and,
+    unlike SyncPathLabels, requires both sides to opt in. Only ever
+    pushes an operator-pinned value, never an echo of that same client's
+    own announcement, so it cannot loop with the existing sync.
+  * feat(config): add a server-only "path_policy" JSON config array --
+    persisted per-(user,iface) weight/dscp_mask overrides, applied the
+    first time that user's connection announces a PATH_LABEL for the
+    matching iface, so an operator override now survives a server
+    restart and a client reconnect instead of only living in the
+    control socket's in-process state; new
+    mqvpn_config_add_path_policy() library API. Takes effect only under
+    the wrr/wrtt/dscp schedulers, same as the live
+    set_path_weight/set_path_dscp_mask calls it persists.
   * feat(sched): add the dscp policy-routing scheduler -- routes each
     packet by the inner IP header's DSCP class to whichever assigned path
     currently has the best RTT (min-RTT tie-break; falls back to plain
@@ -37,10 +57,11 @@ mqvpn (0.16.0-1) UNRELEASED; urgency=medium
     scheduler, the GRO/GSO wiring, and the server defer-flush fix; bump the
     com.google.devtools.ksp Android dependency.
   * test: dscp scheduler, PATH_LABEL capsule, and control-socket unit
-    tests; ci_bench_dscp_verify.sh integration check; SyncPathLabels
-    config (INI+JSON parity) and control-API unit tests.
+    tests; ci_bench_dscp_verify.sh integration check; SyncPathLabels and
+    PushPathLabels config (INI+JSON parity) and control-API unit tests.
   * docs: document the dscp scheduler, the client->server weight/DSCP
-    auto-sync, and the SyncPathLabels opt-out (README).
+    auto-sync, the SyncPathLabels opt-out, the persisted path_policy
+    override, and the PushPathLabels server->client push (README).
 
  -- mqvpn maintainers <maintainers@example.com>  Mon, 10 Aug 2026 19:00:00 +0200
 

@@ -14,6 +14,7 @@
 #include "mqvpn_scheduler.h"
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
 #include "mqvpn_xquic_err_names.h" /* annotate |err:NNN| in cb_xqc_log_write */
+#include "auth.h" /* mqvpn_auth_debug_fingerprint for the startup log */
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
 #include <stdlib.h>
@@ -573,6 +574,20 @@ find_path_by_handle(mqvpn_client_t *c, mqvpn_path_handle_t h)
 {
     for (int i = 0; i < c->n_paths; i++) {
         if (c->paths[i].handle == h) return &c->paths[i];
+    }
+    return NULL;
+}
+
+/* Find path by iface name (path_entry_t.name — matches mqvpn_path_desc_t.iface
+ * and the iface string a MQVPN_CAPSULE_PATH_LABEL_PUSH carries). Used only by
+ * the server-pushed path_label adopter below: every other lookup in this
+ * file is keyed by handle or xquic path_id, which the server has no way to
+ * know about — iface name is the one identifier both ends share. */
+static path_entry_t *
+find_path_by_name(mqvpn_client_t *c, const char *name)
+{
+    for (int i = 0; i < c->n_paths; i++) {
+        if (strcmp(c->paths[i].name, name) == 0) return &c->paths[i];
     }
     return NULL;
 }
@@ -1755,6 +1770,60 @@ process_capsules(cli_stream_t *stream)
                 return;
             }
             /* Log routes but no action needed */
+        } else if (cap_type == MQVPN_CAPSULE_PATH_LABEL_PUSH) {
+            /* Server -> client push of an operator-pinned weight/dscp_mask
+             * — reverse direction of client_announce_path_label() below;
+             * see mqvpn_path_label.h's "Problem 3". Gated on
+             * push_path_labels (destination-side gate,
+             * mqvpn_config_set_push_path_labels(), default off) — with it
+             * off, this is treated the same as any capsule this build
+             * doesn't act on: silently dropped. */
+            if (c->config.push_path_labels) {
+                uint64_t unused_path_id;
+                char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+                uint32_t weight;
+                uint64_t dscp_mask;
+                if (mqvpn_path_label_decode(payload, cap_len, &unused_path_id, iface,
+                                            sizeof(iface), &weight, &dscp_mask) == 0) {
+                    path_entry_t *p = find_path_by_name(c, iface);
+                    if (p) {
+                        /* Apply locally ONLY — never re-announce via
+                         * client_announce_path_label(). Echoing this back
+                         * to a server that also has push_path_labels on
+                         * would make it reassert the same pin on receipt,
+                         * looping the two capsule types forever; see
+                         * svr_push_path_label_to_client()'s doc comment in
+                         * mqvpn_server.c for the other half of this
+                         * contract. weight=0/dscp_mask=0 mean "not
+                         * operator-pinned for this field" (same sentinel
+                         * as everywhere else, see mqvpn_path_label_encode()) —
+                         * leave that field untouched rather than clobber it
+                         * with a spurious "clear to default". */
+                        if (weight != 0) {
+                            p->weight = weight;
+                            if (p->xquic_path_live && c->engine && c->conn) {
+                                xqc_conn_set_path_weight(c->engine, &c->conn->cid,
+                                                         p->xqc_path_id, weight);
+                            }
+                        }
+                        if (dscp_mask != 0) {
+                            p->dscp_mask = dscp_mask;
+                            if (p->xquic_path_live && c->engine && c->conn) {
+                                xqc_conn_set_path_dscp_mask(c->engine, &c->conn->cid,
+                                                            p->xqc_path_id, dscp_mask);
+                            }
+                        }
+                        LOG_I(c, "adopted server-pushed path_label: iface=%s weight=%u "
+                                 "dscp_mask=%" PRIu64,
+                              iface, weight, dscp_mask);
+                    } else {
+                        LOG_D(c, "server-pushed path_label for unknown iface=%s (ignored)",
+                              iface);
+                    }
+                }
+                /* Malformed payload: silently ignored, same treatment as
+                 * any other unrecognized/invalid capsule. */
+            }
         }
 
         if (consumed < stream->capsule_len)
@@ -3277,6 +3346,28 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     if (!c) return NULL;
 
     client_init_handle(c, cfg, cbs, user_ctx);
+
+    /* Load-time visibility for PSK auth (mirrored at server startup in
+     * mqvpn_server.c's mqvpn_server_new, and re-surfaced per rejected
+     * attempt in svr_connect_ip_on_request) — a rejected CONNECT-IP only
+     * ever logs "invalid or missing PSK" server-side, with no way to tell
+     * "this device sent nothing" apart from "it sent the wrong thing"
+     * without capturing a live attempt on both ends at once. Logging
+     * length+fingerprint once here means an operator can settle "is the
+     * key this process actually loaded the one I think it is" by diffing
+     * this single line against the server's own startup line — the key
+     * itself is never printed, only a non-reversible-in-practice checksum
+     * of it (see mqvpn_auth_debug_fingerprint's doc comment). */
+    if (c->config.auth_key[0] != '\0') {
+        char fp[9];
+        mqvpn_auth_debug_fingerprint(c->config.auth_key, strlen(c->config.auth_key), fp,
+                                     sizeof(fp));
+        LOG_I(c, "auth: psk configured len=%zu fp=%s user=%s", strlen(c->config.auth_key),
+              fp, c->config.auth_username[0] ? c->config.auth_username : "(none)");
+    } else {
+        LOG_W(c, "auth: no psk configured — CONNECT-IP requests will carry no "
+                 "Authorization header (server will log \"missing PSK\")");
+    }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Load-time visibility for the lane's pcb-pool clamp: the value is

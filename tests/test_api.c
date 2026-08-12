@@ -661,6 +661,22 @@ TEST(config_set_sync_path_labels)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_push_path_labels)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(cfg->push_path_labels, 0); /* default off, unlike sync_path_labels */
+    ASSERT_EQ(mqvpn_config_set_push_path_labels(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_push_path_labels(cfg, 1), MQVPN_OK);
+    ASSERT_EQ(cfg->push_path_labels, 1);
+    ASSERT_EQ(mqvpn_config_set_push_path_labels(cfg, 5), MQVPN_OK);
+    ASSERT_EQ(cfg->push_path_labels, 1); /* nonzero normalizes to 1 */
+    ASSERT_EQ(mqvpn_config_set_push_path_labels(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->push_path_labels, 0);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Callback ABI tests ── */
 
 TEST(callbacks_abi_init)
@@ -3342,6 +3358,7 @@ main(void)
     run_config_set_hybrid();
     run_config_set_udp_gso();
     run_config_set_sync_path_labels();
+    run_config_set_push_path_labels();
 
     /* ABI tests */
     run_callbacks_abi_init();

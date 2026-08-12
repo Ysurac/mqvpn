@@ -50,6 +50,11 @@ extern "C" {
 #define MQVPN_MAX_USERS            64
 #define MQVPN_MAX_PATHS            8
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+/* Persisted per-(user,iface) weight/dscp_mask policy entries (server-only,
+ * config.h's "path_policy" JSON array) — not MQVPN_MAX_USERS*MQVPN_MAX_PATHS
+ * since in practice only a handful of paths are ever pinned; see
+ * mqvpn_server_set_path_policy() / config.h's mqvpn_path_policy_t. */
+#define MQVPN_MAX_PATH_POLICY 128
 
 /* ─── Opaque handles ─── */
 
@@ -570,6 +575,18 @@ MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username
  * dynamic pool so other clients cannot receive it.  Pass ip="" to clear. */
 MQVPN_API int mqvpn_config_set_user_fixed_ip(mqvpn_config_t *cfg, const char *username,
                                              const char *ip);
+/* Persist a per-(user,iface) downlink weight and/or dscp_mask override,
+ * applied the first time that user's connection announces a PATH_LABEL for
+ * a matching iface (server-only; see mqvpn_server_set_path_weight_by_iface()
+ * / _dscp_mask_by_iface() below for the live, connection-scoped equivalent
+ * this mirrors at startup/reconnect time). At least one of has_weight/
+ * has_dscp_mask must be non-zero. An existing entry for the same
+ * (username, iface) is updated in place. iface follows the same cap as
+ * mqvpn_path_desc_t.iface (MQVPN_PATH_LABEL_IFACE_MAX, mqvpn_path_label.h). */
+MQVPN_API int mqvpn_config_add_path_policy(mqvpn_config_t *cfg, const char *username,
+                                           const char *iface, int has_weight,
+                                           uint32_t weight, int has_dscp_mask,
+                                           uint64_t dscp_mask);
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
@@ -728,6 +745,40 @@ MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
  * weight/dscp_mask never reach the server's downlink; set it on both for
  * defense in depth. */
 MQVPN_API int mqvpn_config_set_sync_path_labels(mqvpn_config_t *cfg, int enabled);
+
+/* Controls the REVERSE direction: an operator-pinned per-(user,iface)
+ * weight/dscp_mask pushed SERVER -> CLIENT (see mqvpn_path_label.h's
+ * "Problem 3" and MQVPN_CAPSULE_PATH_LABEL_PUSH), so a value the operator
+ * sets once on the server also governs that user's CLIENT-side (uplink)
+ * scheduling, not just the server's own downlink. 0 (default) preserves
+ * the pre-existing behavior — a server-side pin never reaches the client.
+ * Meaning depends on which side's config you call this on:
+ *
+ *   - Called on a SERVER config: whether the server ever pushes this
+ *     capsule at all. The server only ever pushes a value an operator
+ *     actually pinned — an explicit mqvpn_server_set_path_weight_by_iface()
+ *     / _dscp_mask_by_iface() call, or a persisted server.json
+ *     "path_policy" entry — never a value it merely adopted from that
+ *     same client's own PATH_LABEL announcement (that would just echo the
+ *     client's report back to itself). Sent (and re-sent, keeping the
+ *     client aligned across reconnects/path recreates) every time that
+ *     user's client (re)announces the relevant iface, plus once
+ *     immediately whenever the pin itself is set or changed.
+ *
+ *   - Called on a CLIENT config: whether the client adopts a pushed
+ *     weight/dscp_mask it receives, applying it to the matching local
+ *     path (by iface name) exactly as if mqvpn_client_set_path_weight() /
+ *     _dscp_mask() had been called for it locally. 0 means any such
+ *     capsule received is logged and dropped. The client never
+ *     re-announces a value it just adopted this way back to the server —
+ *     that would set up an announce/push/adopt/announce loop with a
+ *     server that also has this enabled.
+ *
+ * Unlike mqvpn_config_set_sync_path_labels() above (default ON, either
+ * side alone can disable it), this defaults OFF on both sides and needs
+ * BOTH the server willing to push AND the client willing to adopt before
+ * a server-side pin has any effect on the client's own scheduling. */
+MQVPN_API int mqvpn_config_set_push_path_labels(mqvpn_config_t *cfg, int enabled);
 
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
@@ -1092,6 +1143,14 @@ MQVPN_API int mqvpn_server_set_path_dscp_mask(mqvpn_server_t *server, const char
  * connection's lifetime, like everything else about a live session — a
  * full reconnect (new QUIC connection) starts this table over, same as
  * the client's own path weights would if its process restarted.
+ *
+ * By default a call here only ever affects the SERVER's own downlink for
+ * this (user, iface) — it does not, by itself, change what the client
+ * does on its own uplink. Enable mqvpn_config_set_push_path_labels(cfg, 1)
+ * on BOTH the server (to send) and that user's client (to adopt) to also
+ * have the pin you set here reach the client's own scheduling, keyed by
+ * user, with no separate action needed on the router — see
+ * mqvpn_path_label.h's "Problem 3" and MQVPN_CAPSULE_PATH_LABEL_PUSH.
  */
 MQVPN_API int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *server, const char *user,
                                                      const char *iface, uint32_t weight);
