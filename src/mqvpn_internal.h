@@ -249,6 +249,18 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
  * Used by control_socket.c for get_build_info JSON. */
 MQVPN_INTERNAL const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s);
 
+/* Client-mode counterpart: the client's own configured multipath scheduler
+ * (mqvpn_config_t.scheduler), same "unknown" convention on NULL. Used by
+ * control_socket.c's client-mode get_build_info branch. */
+MQVPN_INTERNAL const char *mqvpn_client_scheduler_label(const mqvpn_client_t *c);
+
+/* Seconds since this client handle was created (mqvpn_client_new) — the
+ * client-mode counterpart to mqvpn_server_uptime_seconds() below, NOT
+ * "seconds connected" (that's mqvpn_client_info_t.connected_at_us via
+ * mqvpn_client_get_info()). Used by control_socket.c's client-mode
+ * get_stats branch. */
+MQVPN_INTERNAL uint64_t mqvpn_client_uptime_seconds(const mqvpn_client_t *c);
+
 /* Map xquic xqc_path_state_t (uint8) to a stable, operator-readable string.
  * Strings are URL-safe and lowercase to be usable as Prometheus label values.
  * Unknown values map to "unknown". Static storage — do not free.
@@ -299,6 +311,14 @@ MQVPN_INTERNAL int mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s,
                                                      const char *user,
                                                      mqvpn_internal_fec_stats_t *out);
 
+/* Client-mode counterpart, describing the client's own (single) upstream
+ * connection instead of one of the server's users. Same return convention:
+ * -1 FEC not built/bad args, 0 not connected right now, 1 -> out filled.
+ * Used by control_socket.c's client-mode get_fec_stats/get_all_fec_stats
+ * branches (the latter wraps this into a 0- or 1-entry array). */
+MQVPN_INTERNAL int mqvpn_client_get_fec_stats(const mqvpn_client_t *c,
+                                              mqvpn_internal_fec_stats_t *out);
+
 /* Bulk variant: write FEC stats for every active (tunnel-established) session
  * into out[]. Used by control_socket.c::get_all_fec_stats to collapse the
  * per-user N+1 RPC pattern into a single call.
@@ -336,6 +356,20 @@ MQVPN_INTERNAL int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s,
 MQVPN_INTERNAL int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c,
                                                   mqvpn_reorder_stats_t *out);
 
+/* Client-mode counterpart to mqvpn_server_get_client_info(): describes the
+ * client's own (single) upstream connection using the exact same public
+ * mqvpn_client_info_t/mqvpn_path_stats_t shape the server fills for each of
+ * its connected clients, so control_socket.c's get_status handler can reuse
+ * one JSON-serialization code path for both modes.
+ *
+ * Returns:
+ *    1  -> *out filled (tunnel established)
+ *    0  -> *out zeroed, not connected right now (not an error — same as a
+ *          server nobody has connected to yet)
+ *   MQVPN_ERR_INVALID_ARG -> bad arguments */
+MQVPN_INTERNAL int mqvpn_client_get_info(const mqvpn_client_t *c,
+                                         mqvpn_client_info_t *out);
+
 /* Per-client snapshot of per-path reinjection TX byte counters
  * (xqc_path_metrics_t.path_send_reinject_bytes). INTERNAL — not in public
  * libmqvpn.h. mqvpn_path_stats_t (the public per-path struct embedded in
@@ -363,5 +397,13 @@ typedef struct {
 MQVPN_INTERNAL int mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
                                                     mqvpn_internal_client_reinject_t *out,
                                                     int max);
+
+/* Client-mode counterpart: this client's own per-path reinject_tx_bytes,
+ * always at out[0] (there is only ever one upstream connection). Same
+ * index-alignment contract with mqvpn_client_get_info() as the server-mode
+ * pair has with mqvpn_server_get_client_info(). Returns 1 (filled,
+ * possibly n_paths==0) or 0 (not connected); -1 only for bad arguments. */
+MQVPN_INTERNAL int mqvpn_client_get_reinject(const mqvpn_client_t *c,
+                                             mqvpn_internal_client_reinject_t *out);
 
 #endif /* MQVPN_INTERNAL_H */

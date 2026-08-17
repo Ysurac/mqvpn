@@ -226,12 +226,32 @@ static int
 ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
+    platform_ctx_t *cli_ctx = cs->cli_ctx;
     (void)req;
     mqvpn_stats_t st = {0};
     st.struct_size = sizeof(st);
-    mqvpn_server_get_stats(server, &st);
-    int nc = mqvpn_server_get_n_clients(server);
-    uint64_t uptime = mqvpn_server_uptime_seconds(server);
+    int nc;
+    uint64_t uptime;
+
+    /* Client mode: cs->server is NULL by design (platform_linux.c passes
+     * NULL there, non-NULL cli_ctx — see ctrl_cmd_add_path's identical
+     * gate). mqvpn_server_get_stats/get_n_clients/uptime_seconds all read
+     * ONLY the (NULL) server pointer, so this branch is required, not
+     * optional -- without it every field below silently reads 0 in client
+     * mode despite a live, traffic-carrying tunnel (found live on an
+     * OpenMPTCProuter bench: real udp_rx_* counters alongside all-zero
+     * bytes_tx/rx, dgram_*, uptime_sec). n_clients here means "is the
+     * tunnel established" (0 or 1), matching the server's "how many peers
+     * are connected to me" semantics from this side's point of view. */
+    if (cli_ctx) {
+        mqvpn_client_get_stats(cli_ctx->client, &st);
+        nc = (mqvpn_client_get_state(cli_ctx->client) == MQVPN_STATE_ESTABLISHED) ? 1 : 0;
+        uptime = mqvpn_client_uptime_seconds(cli_ctx->client);
+    } else {
+        mqvpn_server_get_stats(server, &st);
+        nc = mqvpn_server_get_n_clients(server);
+        uptime = mqvpn_server_uptime_seconds(server);
+    }
     return snprintf(
         resp, resp_len,
         "{\"ok\":true,\"n_clients\":%d,"
@@ -263,17 +283,36 @@ static int
 ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
+    platform_ctx_t *cli_ctx = cs->cli_ctx;
     (void)req;
     mqvpn_client_info_t clients[MQVPN_MAX_USERS];
     int n_clients = 0;
-    mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
 
     /* Index-aligned with clients[] above — contract is on
      * mqvpn_server_get_client_reinject() in mqvpn_internal.h. Matched by
      * path_id below anyway, not by array position alone. */
     mqvpn_internal_client_reinject_t reinj[MQVPN_MAX_USERS];
-    int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
-    if (n_reinj < 0) n_reinj = 0;
+    int n_reinj = 0;
+
+    /* Client mode: mqvpn_server_get_client_info(NULL, ...) always yields
+     * n_clients=0 -- found live on a bench router genuinely mid-tunnel
+     * (real traffic flowing) yet get_status reported an empty client list.
+     * mqvpn_client_get_info()/get_reinject() fill the exact same public
+     * mqvpn_client_info_t/mqvpn_internal_client_reinject_t shapes for this
+     * client's own upstream connection (one synthetic "client" entry, or
+     * zero while not yet connected), so the serialization loop below is
+     * unchanged either way. */
+    if (cli_ctx) {
+        n_clients = (mqvpn_client_get_info(cli_ctx->client, &clients[0]) > 0) ? 1 : 0;
+        if (n_clients) {
+            n_reinj = mqvpn_client_get_reinject(cli_ctx->client, &reinj[0]);
+            if (n_reinj < 0) n_reinj = 0;
+        }
+    } else {
+        mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
+        n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
+        if (n_reinj < 0) n_reinj = 0;
+    }
 
     uint64_t now = 0;
     struct timeval tv;
@@ -368,9 +407,15 @@ static int
 ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
+    platform_ctx_t *cli_ctx = cs->cli_ctx;
     (void)req;
     const char *ver = mqvpn_version_string();
-    const char *sched = mqvpn_server_scheduler_label(server);
+    /* Client mode: mqvpn_server_scheduler_label(NULL) degrades to the
+     * generic "unknown" fallback rather than an error, which is how this
+     * was found live -- the scheduler always read "unknown" on a
+     * client-mode router regardless of its real configured scheduler. */
+    const char *sched = cli_ctx ? mqvpn_client_scheduler_label(cli_ctx->client)
+                                 : mqvpn_server_scheduler_label(server);
 #ifdef XQC_ENABLE_FEC
     int fec_enabled = 1;
 #else
@@ -386,13 +431,30 @@ static int
 ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
+    platform_ctx_t *cli_ctx = cs->cli_ctx;
     char user[64] = {0};
     const char *uv = json_find_key(req, "user");
     if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user required\"}");
 
     mqvpn_internal_fec_stats_t fs;
-    int rc = mqvpn_server_get_client_fec_stats(server, user, &fs);
+    int rc;
+
+    /* Client mode: there is only ever one possible identity (this client's
+     * own upstream connection, not one of many server-side users), so
+     * "user not found" here means either not connected at all, or the
+     * caller asked for a username that isn't this client's own
+     * configured auth_username -- checked via mqvpn_client_get_info()'s
+     * username field rather than adding a separate getter. */
+    if (cli_ctx) {
+        mqvpn_client_info_t info;
+        int got = mqvpn_client_get_info(cli_ctx->client, &info);
+        if (got <= 0 || strncmp(info.username, user, sizeof(info.username)) != 0)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
+        rc = mqvpn_client_get_fec_stats(cli_ctx->client, &fs);
+    } else {
+        rc = mqvpn_server_get_client_fec_stats(server, user, &fs);
+    }
     if (rc < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
     if (rc == 0)
@@ -423,15 +485,37 @@ ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
+    platform_ctx_t *cli_ctx = cs->cli_ctx;
     (void)req;
     /* Bulk variant collapsing the per-user N+1 RPC pattern in scrapers
      * (Prometheus exporter) to a single call. Same XQC_ENABLE_FEC guard
      * as get_fec_stats — we surface "fec not built" so the consumer can
      * stop probing for the rest of the scrape. */
     mqvpn_internal_fec_entry_t entries[MQVPN_MAX_USERS];
-    int n = mqvpn_server_get_all_fec_stats(server, entries, MQVPN_MAX_USERS);
-    if (n < 0)
-        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
+    int n;
+
+    /* Client mode: at most one entry, this client's own connection. */
+    if (cli_ctx) {
+        mqvpn_internal_fec_stats_t fs;
+        int rc = mqvpn_client_get_fec_stats(cli_ctx->client, &fs);
+        if (rc < 0)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
+        if (rc == 1) {
+            mqvpn_client_info_t info;
+            if (mqvpn_client_get_info(cli_ctx->client, &info) > 0)
+                snprintf(entries[0].user, sizeof(entries[0].user), "%s", info.username);
+            else
+                entries[0].user[0] = '\0';
+            entries[0].stats = fs;
+            n = 1;
+        } else {
+            n = 0;
+        }
+    } else {
+        n = mqvpn_server_get_all_fec_stats(server, entries, MQVPN_MAX_USERS);
+        if (n < 0)
+            return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"fec not built\"}");
+    }
 
     char buf[CTRL_MAX_RESP_BYTES];
     int pos = 0;
@@ -483,14 +567,26 @@ ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
                            ctrl_socket_t *cs)
 {
     mqvpn_server_t *server = cs->server;
+    platform_ctx_t *cli_ctx = cs->cli_ctx;
     (void)req;
     /* Aggregate reorder-shim RX counters across all live conns (§17). One
      * fixed-shape object, no per-conn array, so a single snprintf with a
      * bounded resp_len is sufficient — no APPEND/truncation dance needed.
      * The getter zero-fills when no conn has reorder enabled, so the JSON
-     * is always well-formed (all-zero counters). */
+     * is always well-formed (all-zero counters).
+     *
+     * Client mode: mqvpn_server_get_reorder_stats(NULL, ...) unconditionally
+     * fails (-1 on a NULL server), which is exactly what this command did
+     * on every client-mode router before this branch existed --
+     * mqvpn_client_get_reorder_stats() already existed (wired into the
+     * Android/iOS bridges) but was never connected to the Linux control
+     * socket, a merge-artifact gap confirmed via git history (b88642c's
+     * pre-cli_ctx origin, merged in bcce90c without adding the branch
+     * add_path/list_paths already gate on). */
     mqvpn_reorder_stats_t rs;
-    if (mqvpn_server_get_reorder_stats(server, &rs) < 0)
+    int rc = cli_ctx ? mqvpn_client_get_reorder_stats(cli_ctx->client, &rs)
+                     : mqvpn_server_get_reorder_stats(server, &rs);
+    if (rc < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"internal error\"}");
 
     return snprintf(

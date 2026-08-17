@@ -200,6 +200,17 @@ struct mqvpn_client_s {
     /* State machine */
     mqvpn_client_state_t state;
 
+    /* boot_us: stamped once in mqvpn_client_new(), mirrors the server's
+     * s->boot_us / mqvpn_server_uptime_seconds() — read by
+     * mqvpn_client_uptime_seconds() (control_socket.c's client-mode
+     * get_stats branch). connected_at_us: stamped in client_set_state()
+     * on entering MQVPN_STATE_ESTABLISHED, mirrors svr_conn_t's
+     * connected_at_us — read by mqvpn_client_get_info() (client-mode
+     * get_status branch). Both use client_now_us() so Android's injected
+     * CLOCK_BOOTTIME clock is honored the same as handshake_started_us. */
+    uint64_t boot_us;
+    uint64_t connected_at_us;
+
     /* xquic engine (Level 1) */
     xqc_engine_t *engine;
 
@@ -514,6 +525,14 @@ client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
         c->handshake_started_us = client_now_us(c);
     } else if (old == MQVPN_STATE_CONNECTING) {
         c->handshake_started_us = 0;
+    }
+    if (new_state == MQVPN_STATE_ESTABLISHED) {
+        c->connected_at_us = client_now_us(c);
+    } else if (old == MQVPN_STATE_ESTABLISHED) {
+        /* Cleared so a stale connected_at_us from a previous session can't
+         * leak into mqvpn_client_get_info()'s connected_sec after a
+         * reconnect drops back through CONNECTING/AUTHENTICATING. */
+        c->connected_at_us = 0;
     }
     c->state = new_state;
     if (c->cbs.state_changed) c->cbs.state_changed(old, new_state, c->user_ctx);
@@ -3346,6 +3365,7 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     if (!c) return NULL;
 
     client_init_handle(c, cfg, cbs, user_ctx);
+    c->boot_us = client_now_us(c);
 
     /* Load-time visibility for PSK auth (mirrored at server startup in
      * mqvpn_server.c's mqvpn_server_new, and re-surfaced per rejected
@@ -4591,6 +4611,206 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
     *n_paths = count;
     free(xstats.paths_info);
     return MQVPN_OK;
+}
+
+uint64_t
+mqvpn_client_uptime_seconds(const mqvpn_client_t *c)
+{
+    /* Mirrors mqvpn_server_uptime_seconds() exactly (mqvpn_server.c) --
+     * "seconds since the handle was created", not "seconds connected".
+     * See mqvpn_client_get_info() for the latter (connected_at_us). */
+    if (!c) return 0;
+    uint64_t cur = client_now_us(c);
+    if (cur <= c->boot_us) return 0;
+    return (cur - c->boot_us) / 1000000;
+}
+
+const char *
+mqvpn_client_scheduler_label(const mqvpn_client_t *c)
+{
+    if (!c) return "unknown";
+    return mqvpn_sched_to_name(c->config.scheduler);
+}
+
+/* Same formatting rules as mqvpn_server.c's svr_format_peer_addr (IPv4,
+ * IPv6, and IPv4-mapped-IPv6 unwrapped to the real v4 form) -- duplicated
+ * rather than shared because that one takes a server-private svr_conn_t,
+ * not a bare sockaddr_storage. */
+static void
+client_format_server_endpoint(const mqvpn_client_t *c, char *buf, size_t buflen)
+{
+    char addr_str[INET6_ADDRSTRLEN] = {0};
+    uint16_t port = 0;
+
+    if (c->server_addr.ss_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)&c->server_addr;
+        inet_ntop(AF_INET, &s4->sin_addr, addr_str, sizeof(addr_str));
+        port = ntohs(s4->sin_port);
+    } else if (c->server_addr.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&c->server_addr;
+        const uint8_t *b = s6->sin6_addr.s6_addr;
+        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0 && b[5] == 0 &&
+            b[6] == 0 && b[7] == 0 && b[8] == 0 && b[9] == 0 && b[10] == 0xff &&
+            b[11] == 0xff) {
+            struct in_addr v4;
+            memcpy(&v4, &b[12], 4);
+            inet_ntop(AF_INET, &v4, addr_str, sizeof(addr_str));
+        } else {
+            inet_ntop(AF_INET6, &s6->sin6_addr, addr_str, sizeof(addr_str));
+        }
+        port = ntohs(s6->sin6_port);
+    } else {
+        /* Not yet resolved/connected (e.g. still in IDLE) -- fall back to
+         * the configured hostname so the control API has something
+         * meaningful to show rather than "(none):0". */
+        snprintf(buf, buflen, "%s:%d", c->config.server_host, c->config.server_port);
+        return;
+    }
+    snprintf(buf, buflen, "%s:%u", addr_str, port);
+}
+
+/* Client-mode counterpart to mqvpn_server_get_client_info(): the server
+ * describes each of ITS connected clients; this describes the client's own
+ * (single) upstream connection to the server, using the exact same public
+ * mqvpn_client_info_t/mqvpn_path_stats_t shape so control_socket.c's
+ * ctrl_cmd_get_status can reuse one JSON-serialization code path for both
+ * modes. Returns 1 with *out filled when the tunnel is established, 0 (out
+ * zeroed) when not connected yet/anymore -- not an error, just "0 clients"
+ * from this side's point of view, same as a server with nobody connected.
+ * MQVPN_ERR_INVALID_ARG only for bad arguments. */
+int
+mqvpn_client_get_info(const mqvpn_client_t *c, mqvpn_client_info_t *out)
+{
+    if (!c || !out) return MQVPN_ERR_INVALID_ARG;
+    memset(out, 0, sizeof(*out));
+    if (c->state != MQVPN_STATE_ESTABLISHED || !c->conn) return 0;
+
+    out->struct_size = sizeof(*out);
+    snprintf(out->username, sizeof(out->username), "%s",
+             c->config.auth_username[0] ? c->config.auth_username : "(self)");
+    client_format_server_endpoint(c, out->endpoint, sizeof(out->endpoint));
+    out->connected_at_us = c->connected_at_us;
+
+    xqc_conn_stats_t st;
+    memset(&st, 0, sizeof(st));
+    if (c->engine) st = xqc_conn_get_stats(c->engine, &c->conn->cid);
+
+    out->bytes_tx = st.total_app_bytes;
+    out->bytes_rx = 0;
+    for (uint32_t p = 0; st.paths_info && p < st.paths_info_count; p++)
+        out->bytes_rx += st.paths_info[p].path_recv_bytes;
+
+    int np = 0;
+    for (uint32_t p = 0;
+         st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS; p++) {
+        const xqc_path_metrics_t *pm = &st.paths_info[p];
+
+        mqvpn_path_stats_t *ps = &out->paths[np];
+        ps->struct_size = sizeof(*ps);
+        ps->path_id = pm->path_id;
+        ps->srtt_us = pm->path_srtt;
+        ps->min_rtt_us = pm->path_min_rtt;
+        ps->cwnd = pm->path_cwnd;
+        ps->bytes_in_flight = pm->path_bytes_in_flight;
+        ps->bytes_tx = pm->path_send_bytes;
+        ps->bytes_rx = pm->path_recv_bytes;
+        ps->pkt_sent = pm->path_pkt_send_count;
+        ps->pkt_recv = pm->path_pkt_recv_count;
+        ps->pkt_lost = pm->path_lost_count;
+        ps->state = (uint8_t)pm->path_state;
+        np++;
+    }
+    out->n_paths = np;
+    free(st.paths_info);
+    return 1;
+}
+
+/* Client-mode counterpart to mqvpn_server_get_client_reinject() -- same
+ * INTERNAL-only side channel (mqvpn_path_stats_t can't grow a field without
+ * breaking ABI, see mqvpn_internal.h), same index-alignment contract:
+ * control_socket.c's client-mode get_status branch fills clients[0] via
+ * mqvpn_client_get_info() and reinj[0] via this function, then matches
+ * per-path reinject_tx_bytes by path_id exactly as it already does
+ * server-side. Returns 1 (one entry, possibly with n_paths==0) or 0 (not
+ * connected); -1 only for bad arguments. */
+int
+mqvpn_client_get_reinject(const mqvpn_client_t *c, mqvpn_internal_client_reinject_t *out)
+{
+    if (!c || !out) return -1;
+    out->n_paths = 0;
+    if (c->state != MQVPN_STATE_ESTABLISHED || !c->conn || !c->engine) return 0;
+
+    xqc_conn_stats_t st = xqc_conn_get_stats(c->engine, &c->conn->cid);
+    for (uint32_t p = 0;
+         st.paths_info && p < st.paths_info_count && out->n_paths < MQVPN_MAX_PATHS; p++) {
+        const xqc_path_metrics_t *pm = &st.paths_info[p];
+        out->paths[out->n_paths].path_id = pm->path_id;
+        out->paths[out->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;
+        out->n_paths++;
+    }
+    free(st.paths_info);
+    return 1;
+}
+
+#ifdef XQC_ENABLE_FEC
+/* Same derivation as mqvpn_server.c's static derive_mp_state_label() --
+ * duplicated rather than shared across the client/server TU boundary
+ * because it takes a real xqc_conn_stats_t (a heavy xquic type mqvpn_
+ * internal.h deliberately does not pull in; control_socket.c and the
+ * control-socket unit test both include that header without xquic
+ * present). Keep any future change to this logic mirrored in both
+ * places. Result classes: single_path / active_with_standby /
+ * standby_only / active_only / unknown (NULL stats). */
+static const char *
+client_derive_mp_state_label(const xqc_conn_stats_t *st)
+{
+    if (!st) return "unknown";
+
+    int available = 0, standby = 0;
+    for (uint32_t i = 0; st->paths_info && i < st->paths_info_count; i++) {
+        const xqc_path_metrics_t *p = &st->paths_info[i];
+        if (p->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
+        if (p->path_app_status == XQC_APP_PATH_STATUS_FROZEN) continue;
+        if (p->path_app_status == XQC_APP_PATH_STATUS_STANDBY) {
+            standby++;
+        } else {
+            available++;
+        }
+    }
+
+    int total = available + standby;
+    if (total <= 1) return "single_path";
+    if (available > 0 && standby > 0) return "active_with_standby";
+    if (standby > 0) return "standby_only";
+    return "active_only";
+}
+#endif
+
+/* Client-mode counterpart to mqvpn_server_get_client_fec_stats(). Return
+ * convention mirrors it exactly: -1 = FEC not built (XQC_ENABLE_FEC unset)
+ * OR bad args, 0 = not connected right now, 1 = *out filled. */
+int
+mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats_t *out)
+{
+    if (!c || !out) return -1;
+    memset(out, 0, sizeof(*out));
+#ifndef XQC_ENABLE_FEC
+    return -1;
+#else
+    if (c->state != MQVPN_STATE_ESTABLISHED || !c->conn || !c->engine) return 0;
+
+    xqc_conn_stats_t st = xqc_conn_get_stats(c->engine, &c->conn->cid);
+    out->enable_fec = (uint8_t)st.enable_fec;
+    out->mp_state = (uint8_t)st.mp_state;
+    out->mp_state_label = client_derive_mp_state_label(&st);
+    out->fec_send_cnt = (uint64_t)st.send_fec_cnt;
+    out->fec_recover_cnt = (uint64_t)st.fec_recover_pkt_cnt;
+    out->lost_dgram_cnt = (uint64_t)st.lost_dgram_count;
+    out->total_app_bytes = st.total_app_bytes;
+    out->standby_app_bytes = st.standby_path_app_bytes;
+    free(st.paths_info);
+    return 1;
+#endif
 }
 
 int

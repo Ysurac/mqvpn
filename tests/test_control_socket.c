@@ -232,6 +232,69 @@ int mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user
     return g_srv_set_dscp_mask_iface_rc;
 }
 
+/* ── Client API stubs (cli_ctx branch, see call_dispatch_client below) ──────
+ * mqvpn_client_t is the same dummy 1-int body as mqvpn_server_t (top of
+ * file) -- these functions never dereference their `c` argument, they read
+ * only the g_cli_* globals below, configured per test exactly like the
+ * g_client_info_tmpl / g_reinject_tmpl / g_client_fec_tmpl stubs above. */
+static const char *g_cli_scheduler_label = "unknown";
+static uint64_t g_cli_uptime = 0;
+static mqvpn_client_state_t g_cli_state = MQVPN_STATE_IDLE;
+static int g_cli_stats_rc = MQVPN_OK;
+static mqvpn_stats_t g_cli_stats_tmpl;
+static int g_cli_info_rc = 0;        /* 0 = not connected, 1 = filled */
+static mqvpn_client_info_t g_cli_info_tmpl;
+static int g_cli_reinject_rc = 0;    /* 0 = not connected, 1 = filled */
+static mqvpn_internal_client_reinject_t g_cli_reinject_tmpl;
+static int g_cli_fec_rc = -1;        /* -1 = not built, 0 = not connected, 1 = filled */
+static mqvpn_internal_fec_stats_t g_cli_fec_tmpl;
+static int g_cli_reorder_rc = 0;
+static mqvpn_reorder_stats_t g_cli_reorder_tmpl;
+
+const char *mqvpn_client_scheduler_label(const mqvpn_client_t *c)
+{ (void)c; return g_cli_scheduler_label; }
+
+uint64_t mqvpn_client_uptime_seconds(const mqvpn_client_t *c)
+{ (void)c; return g_cli_uptime; }
+
+mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *c)
+{ (void)c; return g_cli_state; }
+
+int mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
+{ (void)c; *out = g_cli_stats_tmpl; return g_cli_stats_rc; }
+
+int mqvpn_client_get_info(const mqvpn_client_t *c, mqvpn_client_info_t *out)
+{
+    (void)c;
+    if (g_cli_info_rc == 1) *out = g_cli_info_tmpl;
+    else memset(out, 0, sizeof(*out));
+    return g_cli_info_rc;
+}
+
+int mqvpn_client_get_reinject(const mqvpn_client_t *c,
+                              mqvpn_internal_client_reinject_t *out)
+{
+    (void)c;
+    if (g_cli_reinject_rc == 1) *out = g_cli_reinject_tmpl;
+    else out->n_paths = 0;
+    return g_cli_reinject_rc;
+}
+
+int mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats_t *out)
+{
+    (void)c;
+    memset(out, 0, sizeof(*out));
+    if (g_cli_fec_rc == 1) *out = g_cli_fec_tmpl;
+    return g_cli_fec_rc;
+}
+
+int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c, mqvpn_reorder_stats_t *out)
+{
+    (void)c;
+    if (out) *out = g_cli_reorder_tmpl;
+    return g_cli_reorder_rc;
+}
+
 /* ── Platform stubs ─────────────────────────────────────────────────────── */
 #include "platform_internal.h"
 
@@ -586,6 +649,52 @@ TEST(get_stats)
     g_uptime = 0;
 }
 
+/* Client mode: cs->server is NULL, so this must NOT fall through to the
+ * server-mode stub above (which would read the g_n_clients/g_uptime
+ * globals this test never sets) -- it has to route through
+ * mqvpn_client_get_stats/get_state/uptime_seconds instead. This is the
+ * live-observed regression: bytes_tx, dgram_*, and uptime_sec all read 0
+ * despite a real, traffic-carrying tunnel until this branch existed. */
+TEST(get_stats_client_mode_connected)
+{
+    memset(&g_cli_stats_tmpl, 0, sizeof(g_cli_stats_tmpl));
+    g_cli_stats_tmpl.bytes_tx = 222;
+    g_cli_stats_tmpl.tcp_flows_total = 9;
+    g_cli_stats_tmpl.udp_tx_sends = 4321;
+    g_cli_stats_tmpl.udp_tx_datagrams = 8765;
+    g_cli_state = MQVPN_STATE_ESTABLISHED;
+    g_cli_uptime = 1010;
+
+    char resp[2048];
+    call_dispatch_client("{\"cmd\":\"get_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":true");
+    ASSERT_CONTAINS(resp, "\"n_clients\":1");
+    ASSERT_CONTAINS(resp, "\"bytes_tx\":222");
+    ASSERT_CONTAINS(resp, "\"tcp_flows_total\":9");
+    ASSERT_CONTAINS(resp, "\"uptime_sec\":1010");
+    ASSERT_CONTAINS(resp, "\"udp_tx_sends\":4321");
+    ASSERT_CONTAINS(resp, "\"udp_tx_datagrams\":8765");
+    /* udp_rx_* still come from the borrowed GRO counters regardless of mode */
+    ASSERT_CONTAINS(resp, "\"udp_rx_receives\":61");
+    ASSERT_CONTAINS(resp, "\"udp_rx_datagrams\":83");
+
+    g_cli_state = MQVPN_STATE_IDLE;
+    g_cli_uptime = 0;
+}
+
+/* Not connected right now (IDLE/CONNECTING/etc.) -> n_clients:0, not an
+ * error -- same "nobody connected" semantics a server with zero sessions
+ * has, from this side's point of view. */
+TEST(get_stats_client_mode_not_connected)
+{
+    g_cli_state = MQVPN_STATE_CONNECTING;
+    char resp[2048];
+    call_dispatch_client("{\"cmd\":\"get_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":true");
+    ASSERT_CONTAINS(resp, "\"n_clients\":0");
+    g_cli_state = MQVPN_STATE_IDLE;
+}
+
 TEST(get_status_empty)
 {
     g_client_info_n = 0;
@@ -675,6 +784,49 @@ TEST(get_status_reinject_mismatched_path_id)
     g_client_info_n = 0;
 }
 
+/* Client mode: mqvpn_server_get_client_info(NULL, ...) always yields
+ * n_clients=0/clients:[] regardless of real connection state -- this is
+ * the live-observed regression (get_status reported empty on a bench
+ * router mid-tunnel with real traffic flowing). Must route through
+ * mqvpn_client_get_info()/get_reinject() instead. */
+TEST(get_status_client_mode_not_connected)
+{
+    g_cli_info_rc = 0;
+    char resp[4096];
+    call_dispatch_client("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true,\"n_clients\":0,\"clients\":[]}");
+}
+
+TEST(get_status_client_mode_connected_with_path)
+{
+    memset(&g_cli_info_tmpl, 0, sizeof(g_cli_info_tmpl));
+    strncpy(g_cli_info_tmpl.username, "bob", sizeof(g_cli_info_tmpl.username) - 1);
+    strncpy(g_cli_info_tmpl.endpoint, "5.6.7.8:443",
+            sizeof(g_cli_info_tmpl.endpoint) - 1);
+    g_cli_info_tmpl.n_paths = 1;
+    g_cli_info_tmpl.paths[0].path_id = 3;
+    g_cli_info_tmpl.paths[0].state = 2; /* -> "active" */
+    g_cli_info_rc = 1;
+
+    memset(&g_cli_reinject_tmpl, 0, sizeof(g_cli_reinject_tmpl));
+    g_cli_reinject_tmpl.n_paths = 1;
+    g_cli_reinject_tmpl.paths[0].path_id = 3;
+    g_cli_reinject_tmpl.paths[0].reinject_tx_bytes = 55555;
+    g_cli_reinject_rc = 1;
+
+    char resp[8192];
+    call_dispatch_client("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"n_clients\":1");
+    ASSERT_CONTAINS(resp, "\"user\":\"bob\"");
+    ASSERT_CONTAINS(resp, "\"endpoint\":\"5.6.7.8:443\"");
+    ASSERT_CONTAINS(resp, "\"path_id\":3");
+    ASSERT_CONTAINS(resp, "\"state_label\":\"active\"");
+    ASSERT_CONTAINS(resp, "\"reinject_tx_bytes\":55555");
+
+    g_cli_info_rc = 0;
+    g_cli_reinject_rc = 0;
+}
+
 /* ── get_build_info ───────────────────────────────────────────────────────── */
 
 TEST(get_build_info)
@@ -684,6 +836,21 @@ TEST(get_build_info)
     ASSERT_CONTAINS(resp, "\"version\":\"test\"");
     ASSERT_CONTAINS(resp, "\"scheduler\":\"none\"");
     ASSERT_CONTAINS(resp, "\"fec_enabled\":");
+}
+
+/* Client mode: mqvpn_server_scheduler_label(NULL) degrades to "unknown"
+ * rather than erroring, which is exactly how this was found live -- the
+ * scheduler field always read "unknown" on a client-mode router regardless
+ * of its real configured scheduler (minrtt, in that case). */
+TEST(get_build_info_client_mode)
+{
+    g_cli_scheduler_label = "minrtt";
+    char resp[512];
+    call_dispatch_client("{\"cmd\":\"get_build_info\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"version\":\"test\"");
+    ASSERT_CONTAINS(resp, "\"scheduler\":\"minrtt\"");
+    ASSERT_CONTAINS(resp, "\"fec_enabled\":");
+    g_cli_scheduler_label = "unknown";
 }
 
 /* ── get_fec_stats (per user) ────────────────────────────────────────────── */
@@ -732,6 +899,87 @@ TEST(get_fec_stats_success)
     g_client_fec_rc = -1;
 }
 
+/* Client mode: identity is checked against mqvpn_client_get_info()'s own
+ * username (there is only ever one possible "user" -- this client's own
+ * upstream connection), not looked up in a server-side session table. */
+TEST(get_fec_stats_client_mode_success)
+{
+    memset(&g_cli_info_tmpl, 0, sizeof(g_cli_info_tmpl));
+    strncpy(g_cli_info_tmpl.username, "carol", sizeof(g_cli_info_tmpl.username) - 1);
+    g_cli_info_rc = 1;
+
+    memset(&g_cli_fec_tmpl, 0, sizeof(g_cli_fec_tmpl));
+    g_cli_fec_tmpl.enable_fec = 1;
+    g_cli_fec_tmpl.mp_state_label = "single_path";
+    g_cli_fec_tmpl.fec_send_cnt = 3;
+    g_cli_fec_rc = 1;
+
+    char resp[1024];
+    call_dispatch_client("{\"cmd\":\"get_fec_stats\",\"user\":\"carol\"}", resp,
+                         sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"user\":\"carol\"");
+    ASSERT_CONTAINS(resp, "\"mp_state_label\":\"single_path\"");
+    ASSERT_CONTAINS(resp, "\"fec_send_cnt\":3");
+
+    g_cli_info_rc = 0;
+    g_cli_fec_rc = -1;
+}
+
+TEST(get_fec_stats_client_mode_wrong_username)
+{
+    memset(&g_cli_info_tmpl, 0, sizeof(g_cli_info_tmpl));
+    strncpy(g_cli_info_tmpl.username, "carol", sizeof(g_cli_info_tmpl.username) - 1);
+    g_cli_info_rc = 1;
+    g_cli_fec_rc = 1; /* would succeed if reached -- must not be */
+
+    char resp[512];
+    call_dispatch_client("{\"cmd\":\"get_fec_stats\",\"user\":\"mallory\"}", resp,
+                         sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "user not found");
+
+    g_cli_info_rc = 0;
+    g_cli_fec_rc = -1;
+}
+
+TEST(get_all_fec_stats_client_mode_one_entry)
+{
+    memset(&g_cli_info_tmpl, 0, sizeof(g_cli_info_tmpl));
+    strncpy(g_cli_info_tmpl.username, "dave", sizeof(g_cli_info_tmpl.username) - 1);
+    g_cli_info_rc = 1;
+
+    memset(&g_cli_fec_tmpl, 0, sizeof(g_cli_fec_tmpl));
+    g_cli_fec_tmpl.enable_fec = 1;
+    g_cli_fec_tmpl.mp_state_label = "active_only";
+    g_cli_fec_rc = 1;
+
+    char resp[1024];
+    call_dispatch_client("{\"cmd\":\"get_all_fec_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"n_clients\":1");
+    ASSERT_CONTAINS(resp, "\"user\":\"dave\"");
+    ASSERT_CONTAINS(resp, "\"mp_state_label\":\"active_only\"");
+
+    g_cli_info_rc = 0;
+    g_cli_fec_rc = -1;
+}
+
+TEST(get_all_fec_stats_client_mode_not_connected)
+{
+    g_cli_fec_rc = 0; /* FEC built, but not connected right now */
+    char resp[512];
+    call_dispatch_client("{\"cmd\":\"get_all_fec_stats\"}", resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":true,\"n_clients\":0,\"clients\":[]}");
+    g_cli_fec_rc = -1;
+}
+
+TEST(get_all_fec_stats_client_mode_not_built)
+{
+    g_cli_fec_rc = -1;
+    char resp[512];
+    call_dispatch_client("{\"cmd\":\"get_all_fec_stats\"}", resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":false,\"error\":\"fec not built\"}");
+}
+
 /* ── get_reorder_stats ───────────────────────────────────────────────────── */
 
 TEST(get_reorder_stats)
@@ -755,6 +1003,39 @@ TEST(get_reorder_stats_internal_error)
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "internal error");
     g_reorder_rc = 0;
+}
+
+/* Regression test for the original bug report: on a client-mode router,
+ * get_reorder_stats unconditionally called mqvpn_server_get_reorder_stats
+ * (cs->server), which is NULL by design in client mode
+ * (platform_linux.c's client-mode ctrl_socket_create call passes NULL for
+ * server, non-NULL for cli_ctx) -- so every client-mode get_reorder_stats
+ * request failed with {"ok":false,"error":"internal error"}, live-confirmed
+ * on an OpenMPTCProuter bench (mqvpn 0.16.0) despite the tunnel being up
+ * and passing real traffic. mqvpn_client_get_reorder_stats() already
+ * existed (wired into the Android/iOS bridges) but was never connected to
+ * the Linux control socket -- this pins the fix. */
+TEST(get_reorder_stats_client_mode)
+{
+    memset(&g_cli_reorder_tmpl, 0, sizeof(g_cli_reorder_tmpl));
+    g_cli_reorder_tmpl.delivered_count = 77;
+    g_cli_reorder_rc = 0;
+
+    char resp[2048];
+    call_dispatch_client("{\"cmd\":\"get_reorder_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":true");
+    ASSERT_CONTAINS(resp, "\"reorder\":{");
+    ASSERT_CONTAINS(resp, "\"delivered_count\":77");
+}
+
+TEST(get_reorder_stats_client_mode_internal_error)
+{
+    g_cli_reorder_rc = -1;
+    char resp[512];
+    call_dispatch_client("{\"cmd\":\"get_reorder_stats\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"ok\":false");
+    ASSERT_CONTAINS(resp, "internal error");
+    g_cli_reorder_rc = 0;
 }
 
 /* ── path commands (client mode only) ───────────────────────────────────── */
@@ -1150,6 +1431,9 @@ main(void)
     run_get_all_fec_stats_one_entry();
     run_get_all_fec_stats_two_entries();
     run_get_all_fec_stats_fec_not_built();
+    run_get_all_fec_stats_client_mode_one_entry();
+    run_get_all_fec_stats_client_mode_not_connected();
+    run_get_all_fec_stats_client_mode_not_built();
     run_dispatch_missing_cmd();
     run_dispatch_unknown_cmd();
 
@@ -1177,21 +1461,30 @@ main(void)
 
     /* stats / status / build info */
     run_get_stats();
+    run_get_stats_client_mode_connected();
+    run_get_stats_client_mode_not_connected();
     run_get_status_empty();
     run_get_status_one_client_with_path();
     run_get_status_reinject_matched_path_id();
     run_get_status_reinject_mismatched_path_id();
+    run_get_status_client_mode_not_connected();
+    run_get_status_client_mode_connected_with_path();
     run_get_build_info();
+    run_get_build_info_client_mode();
 
     /* get_fec_stats (per user) */
     run_get_fec_stats_missing_user();
     run_get_fec_stats_user_not_found();
     run_get_fec_stats_not_built();
     run_get_fec_stats_success();
+    run_get_fec_stats_client_mode_success();
+    run_get_fec_stats_client_mode_wrong_username();
 
     /* get_reorder_stats */
     run_get_reorder_stats();
     run_get_reorder_stats_internal_error();
+    run_get_reorder_stats_client_mode();
+    run_get_reorder_stats_client_mode_internal_error();
 
     /* path commands */
     run_add_path_success();

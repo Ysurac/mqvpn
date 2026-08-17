@@ -219,7 +219,7 @@ datagram counters and uptime.
 
 | Field        | Type    | Description                                                    |
 |--------------|---------|----------------------------------------------------------------|
-| `n_clients`  | integer | Number of currently connected clients                          |
+| `n_clients`  | integer | Number of currently connected clients. Client mode: `1` if the tunnel is established, `0` otherwise (this side only ever has one upstream connection). |
 | `bytes_tx`   | uint64  | Total bytes written to the TUN interface (server → clients)    |
 | `bytes_rx`   | uint64  | Total bytes read from the TUN interface (clients → server)     |
 | `dgram_sent` | uint64  | QUIC datagrams the server successfully sent (xret == XQC_OK), all sessions |
@@ -238,12 +238,20 @@ datagram counters and uptime.
 | `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
 | `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |
 | `udp_rx_datagrams` | uint64 | Outer-UDP datagrams delivered to the library. `udp_rx_datagrams / udp_rx_receives` is the achieved receive coalescing factor. Exactly 1.0 with `UdpGro = false`; it also stays near 1.0 when the peer is not batching its sends, since the kernel then has nothing to coalesce, and over a loopback/veth path regardless of the peer. |
-| `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
+| `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called (server) / `mqvpn_client_new` was called (client) — process uptime, not "seconds connected". |
 
 Notes:
+- **All fields in this command are now wired for both modes** (fixed after
+  being silently server-only for several releases — see §7). Previously,
+  every field except `udp_rx_receives`/`udp_rx_datagrams` (sourced from the
+  platform layer, not `mqvpn_stats_t`) read `0` in client mode regardless of
+  real traffic, because the handler unconditionally read the server handle,
+  which is `NULL` by design in client mode. Confirmed live on an
+  OpenMPTCProuter client-mode router with a traffic-carrying tunnel.
 - `bytes_tx`/`bytes_rx` are post-tunnel (TUN-layer) byte counts, not raw UDP
   wire bytes.
-- `dgram_*` counters are server-wide aggregates across all active sessions.
+- `dgram_*` counters are server-wide aggregates across all active sessions
+  (server mode); in client mode they are this connection's own counters.
 - The eight hybrid-mode fields (`pkts_lane_*`, `tcp_flows_*`,
   `raw_markers_active`) are additive and stay 0 whenever the hybrid
   classifier is disabled. `tcp_flows_active`, `tcp_flows_total`, and
@@ -271,6 +279,16 @@ Return per-client and per-path detail for all currently connected clients.
 > `users` in `server.conf`, or register them at runtime via `add_user`
 > (§5.1). Sharing one `auth_key` across multiple clients still works for
 > the VPN data plane but is not supported by the monitoring path.
+
+> **Client mode.** `clients` describes this client's own (single) upstream
+> connection to the server, using the exact same shape the server uses for
+> each of its connected clients: `user` is this client's own configured
+> `auth_username` (or `"(self)"` if none is set), `endpoint` the server's
+> resolved address, `connected_sec` seconds since *this* connection reached
+> `MQVPN_STATE_ESTABLISHED` (resets on reconnect). `n_clients` is `0`
+> (empty `clients` array — not an error, same as a server nobody has
+> connected to) while not yet connected. This was fixed after being
+> silently server-only for several releases — see §7.
 
 **Request**
 
@@ -365,7 +383,7 @@ support was compiled in.
 | Field        | Type    | Description                                                    |
 |--------------|---------|----------------------------------------------------------------|
 | `version`    | string  | Version string from `mqvpn_version_string()`                   |
-| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown` |
+| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown`. Client mode: the client's own configured `Scheduler`/`scheduler` setting (previously always reported `"unknown"` regardless of the real configured value — fixed, see §7). |
 | `fec_enabled`| integer | `1` if built with `XQC_ENABLE_FEC`; `0` otherwise             |
 
 ---
@@ -374,6 +392,15 @@ support was compiled in.
 
 Return per-user FEC and multipath statistics for an active session. Requires
 that the server was built with `XQC_ENABLE_FEC`.
+
+> **Client mode.** There is only ever one possible identity from this side —
+> this client's own upstream connection — so `user` must match this
+> client's own configured `auth_username` (or `"(self)"` if unset); any
+> other value returns `"user not found"`, same as a genuinely unknown
+> username would server-side. `mp_state`/`mp_state_label` are derived from
+> this client's own `xqc_conn_stats_t` snapshot, same derivation as the
+> server uses. Previously always failed with `"fec not built"` regardless
+> of whether FEC was actually compiled in — fixed, see §7.
 
 **Request**
 
@@ -433,6 +460,11 @@ and risk hitting the `CTRL_MAX_CONNS=8` concurrency cap.
 
 Requires that the server was built with `XQC_ENABLE_FEC`.
 
+> **Client mode.** `n_clients`/`clients` describe this client's own
+> connection (0 or 1 entries), same semantics as `get_status`'s client-mode
+> behavior. Previously always failed with `"fec not built"` regardless of
+> whether FEC was actually compiled in — fixed, see §7.
+
 **Request**
 
 ```json
@@ -475,6 +507,76 @@ Requires that the server was built with `XQC_ENABLE_FEC`.
 
 ---
 
+### 5.9 `get_reorder_stats`
+
+Return aggregate reorder-shim RX statistics (§17) — a fixed-shape object
+covering every live connection that has a reorder engine active
+(`[Reorder]`/`reorder.mode != OFF`). Available in both server and client
+mode.
+
+**Request**
+
+```json
+{"cmd":"get_reorder_stats"}
+```
+
+**Response — success**
+
+```json
+{
+  "ok":true,
+  "reorder":{
+    "gap_count":12,"gap_filled_count":9,
+    "gap_timeout_count":2,"gap_overflow_count":1,
+    "gap_demote_count":0,"gap_reset_count":0,
+    "ack_demote_count":3,
+    "too_late_drop_count":0,"too_far_ahead_drop_count":0,
+    "duplicate_drop_count":0,"pool_drop_count":0,
+    "per_flow_limit_drop_count":0,"reset_discard_count":0,
+    "delivered_count":10234,
+    "added_latency_p99_ms":4.230,"added_latency_max_ms":18.500,
+    "added_latency_buffered_p99_ms":2.100
+  }
+}
+```
+
+| Field                          | Type    | Description                                             |
+|--------------------------------|---------|----------------------------------------------------------|
+| `gap_count`                    | uint64  | Gap episodes opened (an out-of-order arrival started a hold) |
+| `gap_filled_count`             | uint64  | Gaps closed by the missing packet arriving in time        |
+| `gap_timeout_count`            | uint64  | Gaps closed by the hold timer expiring                    |
+| `gap_overflow_count`           | uint64  | Gaps closed because the reorder buffer pool overflowed     |
+| `gap_demote_count`             | uint64  | Gaps closed by an ACK-driven demotion                      |
+| `gap_reset_count`              | uint64  | Gaps closed by a connection/flow reset                     |
+| `ack_demote_count`             | uint64  | Flows demoted by ACK signal (not gap-scoped)                |
+| `too_late_drop_count`          | uint64  | Packets dropped: arrived after their sequence window closed |
+| `too_far_ahead_drop_count`     | uint64  | Packets dropped: too far ahead of the expected sequence      |
+| `duplicate_drop_count`         | uint64  | Duplicate packets dropped                                    |
+| `pool_drop_count`              | uint64  | Packets dropped: reorder buffer pool exhausted                |
+| `per_flow_limit_drop_count`    | uint64  | Packets dropped: per-flow buffering cap reached                |
+| `reset_discard_count`          | uint64  | Buffered packets discarded on a flow/connection reset            |
+| `delivered_count`              | uint64  | Packets successfully delivered through the reorder shim (in-order or after a filled gap) |
+| `added_latency_p99_ms`         | double  | P99 latency added by buffering (milliseconds)                    |
+| `added_latency_max_ms`         | double  | Max latency added by buffering (milliseconds)                    |
+| `added_latency_buffered_p99_ms`| double  | P99 latency for packets that were actually held (excludes pass-through), milliseconds |
+
+A server/client with no reorder-enabled connection returns an all-zero
+`reorder` object — this is a valid result, not an error.
+
+**Response — errors**
+
+```json
+{"ok":false,"error":"internal error"}
+```
+
+- `"internal error"` — the underlying getter returned failure (a NULL
+  server/client handle; should not occur in practice). **Client mode: fixed
+  in this release** — every client-mode `get_reorder_stats` request
+  previously failed with this exact error unconditionally, regardless of
+  whether reorder buffering was configured or a tunnel was even up. See §7.
+
+---
+
 ## 6. Error Reference
 
 | Error string             | Returned by                                    |
@@ -489,6 +591,7 @@ Requires that the server was built with `XQC_ENABLE_FEC`.
 | `"user not found"`       | `remove_user`, `get_fec_stats`                 |
 | `"user required"`        | `get_fec_stats`                                |
 | `"fec not built"`        | `get_fec_stats`, `get_all_fec_stats`           |
+| `"internal error"`       | `get_reorder_stats`                            |
 
 ---
 
@@ -544,6 +647,34 @@ mqvpn follows semantic versioning for the control API:
   should prefer the labels — the numeric values are raw xquic enums and may
   shift if upstream re-orders them.
 - `get_all_fec_stats` was added in v0.5.0 as a bulk variant of `get_fec_stats`.
+- **Bugfix, all client-mode consumers:** `get_stats`, `get_status`,
+  `get_build_info`, `get_fec_stats`, `get_all_fec_stats`, and
+  `get_reorder_stats` unconditionally read the server handle (`NULL` by
+  design in client mode — only `add_path`/`remove_path`/`list_paths`/
+  `set_path_weight`/`set_path_dscp_mask` correctly gated on client mode
+  before this fix). Every field documented above as "client-side" or
+  "both modes" was therefore silently wrong on a client-mode process:
+  `get_stats` read all-zero except the two platform-sourced UDP-receive
+  counters, `get_status` always reported `n_clients:0`, `get_build_info`'s
+  `scheduler` always read `"unknown"`, and `get_fec_stats`/
+  `get_all_fec_stats`/`get_reorder_stats` always failed outright
+  (`"fec not built"` / `"internal error"`) regardless of real
+  configuration or connection state. Confirmed live on an OpenMPTCProuter
+  client-mode router with a real, traffic-carrying tunnel (`get_stats`
+  showed real `udp_rx_receives` alongside all-zero `bytes_tx`/`dgram_*`/
+  `uptime_sec`; `get_reorder_stats` returned `{"ok":false,"error":
+  "internal error"}` unconditionally). `mqvpn_client_get_reorder_stats()`
+  already existed and was wired into the Android/iOS bridges but was never
+  connected to the Linux control socket — a merge-artifact gap (that
+  handler's origin branch predates `cli_ctx`; the merge that introduced
+  `cli_ctx` elsewhere never added a branch here). This is purely additive
+  on the wire (no field renamed or removed; `n_clients`/`clients`/`user`
+  keep their existing meaning, just now correctly populated in client mode
+  too) — no version bump required for JSON consumers. New internal C
+  helpers (`mqvpn_client_get_info`, `mqvpn_client_get_reinject`,
+  `mqvpn_client_get_fec_stats`, `mqvpn_client_scheduler_label`,
+  `mqvpn_client_uptime_seconds`) are `MQVPN_INTERNAL`, not part of the
+  public `libmqvpn.h` ABI.
 
 ---
 

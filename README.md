@@ -627,7 +627,7 @@ sudo systemctl enable --now mqvpn-client@home
 
 Both the server and the client can be managed at runtime over a TCP port using newline-delimited JSON.
 
-Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-protocol reference (all 8 commands, request/response schemas, error strings).
+Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-protocol reference (every command, request/response schemas, error strings). `get_stats`/`get_status`/`get_build_info`/`get_fec_stats`/`get_all_fec_stats`/`get_reorder_stats` all work in client mode as well as server mode.
 
 ### Enable
 

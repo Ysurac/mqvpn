@@ -553,7 +553,8 @@ svr_tcp_egress_errno_to_status(int err)
 static void
 svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
 {
-    TLOG_W(server, "connect-tcp: relay I/O error (errno=%d) — closing stream", err);
+    TLOG_W(server, "connect-tcp: relay I/O error (errno=%d) — closing stream (user=%s)",
+           err, ef->username);
 
     /* Flush BEFORE the close when the deferred send flush is engaged:
      * xqc_h3_request_close drops still-queued STREAM packets before
@@ -1117,15 +1118,18 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     }
     if (errno != EINPROGRESS) {
         int err = errno;
-        TLOG_W(server, "connect-tcp: connect() failed synchronously (errno=%d)", err);
+        TLOG_W(server, "connect-tcp: connect() failed synchronously (errno=%d) (user=%s)",
+               err, ef->username);
         svr_tcp_egress_fail_connect(server, ef, err);
         return 0;
     }
 
     if (svr_egress_fd_register(server, fd, 0, 1 /* want_write = connect signal */, ef) !=
         0) {
-        TLOG_W(server, "egress_fd_register callback unset — connect-tcp flow will stall "
-                       "until the connect timeout fires");
+        TLOG_W(server,
+               "egress_fd_register callback unset — connect-tcp flow will stall "
+               "until the connect timeout fires (user=%s)",
+               ef->username);
     }
     return 0; /* response deferred until connect completes or times out */
 }
