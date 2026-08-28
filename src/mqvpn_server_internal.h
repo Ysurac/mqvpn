@@ -41,6 +41,11 @@ typedef struct {
     const char *auth_token; /* Bearer payload, not NUL-terminated */
     size_t auth_token_len;
     char x_user[64]; /* x-user header value, NUL-terminated */
+    int has_reorder_hdr; /* request advertised mqvpn-reorder (§19.3). Applied to
+                          * conn->peer_reorder_supported ONLY when this request
+                          * establishes the CONNECT-IP tunnel — a rejected
+                          * duplicate or unrelated request must not mutate the
+                          * live tunnel's negotiated stamping. */
 } svr_req_headers_t;
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a

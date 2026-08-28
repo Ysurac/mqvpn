@@ -285,6 +285,20 @@ struct mqvpn_client_s {
     int reconnect_attempts;
     uint64_t reconnect_scheduled_us;
     int shutting_down;
+    /* Re-entrancy fence for the UNSAFE window of a connect transaction:
+     * the pre-start slot reset + the connection bootstrap
+     * (cli_start_connection), which fire path_event synchronously while
+     * slots/conn ownership are mid-mutation. A callback calling
+     * mqvpn_client_connect()/mqvpn_client_disconnect() there would
+     * double-start, double-arm the retry backoff, or drive a
+     * CLOSED->CONNECTING resurrection; while set, both entry points
+     * return MQVPN_ERR_INVALID_ARG. Deliberately CLEARED before the
+     * post-outcome callbacks (reconnect_scheduled on failure,
+     * state_changed(CONNECTING) on success): those observe committed
+     * state, and cancelling from them — e.g. disconnect() inside
+     * reconnect_scheduled after a retry limit — must keep working.
+     * Single writer (tick thread). */
+    int in_connect;
 
     /* Log correlation + filtering */
     uint32_t conn_id; /* monotonic, bumped on each connect */
@@ -949,6 +963,40 @@ mqvpn_client_test_force_established(mqvpn_client_t *c)
     c->state = MQVPN_STATE_ESTABLISHED;
     c->multipath_ready = 1;
     return 0;
+}
+
+/* Test-only: kill the live connection through xquic's REAL local-close
+ * machinery WITHOUT the disconnect bookkeeping (shutting_down stays 0 and
+ * the state is not forced to CLOSED). The close notify then runs the same
+ * path as a peer/transport-initiated death — cli_conn_destroy plus the
+ * reconnect arming when enabled — leaving the path slots exactly as a
+ * genuine drop leaves them (stale). Exists because the QUIC idle timeout is
+ * a fixed 120 s (mqvpn_conn_settings.c), far beyond unit-test budgets.
+ * Hidden from libmqvpn.so's dynamic export table (not part of the public
+ * ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+int
+mqvpn_client_test_kill_conn(mqvpn_client_t *c)
+{
+    if (!c || !c->conn || !c->engine) return -1;
+    xqc_conn_close(c->engine, &c->conn->cid);
+    xqc_engine_main_logic(c->engine);
+    return 0;
+}
+
+/* Test-only: read the armed reconnect deadline (0 = disarmed). Lets tests
+ * pin the disarm-on-manual-connect / re-arm-on-failure contract without
+ * exposing the field publicly. Hidden from libmqvpn.so's dynamic export
+ * table (not part of the public ABI). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("hidden")))
+#endif
+uint64_t
+mqvpn_client_test_get_reconnect_scheduled_us(const mqvpn_client_t *c)
+{
+    return c ? c->reconnect_scheduled_us : 0;
 }
 
 /* P1 test-only: seed c->next_wake_us — the xquic-requested wake that
@@ -3056,6 +3104,20 @@ mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_paths)
 static int
 cli_start_connection(mqvpn_client_t *c)
 {
+    /* Invariant: starting requires no live connection. Every legitimate
+     * entry satisfies it — initial connect from IDLE never created one,
+     * and both reconnect entries (tick_reconnect, manual connect from
+     * RECONNECTING) run only after cb_h3_conn_close destroyed and NULLed
+     * c->conn. The reachable violation is a re-entrant lifecycle call: the
+     * pre-start slot reset fires path_event synchronously (documented
+     * contract), and an observer calling mqvpn_client_connect() from there
+     * would otherwise start a SECOND connection whose c->conn overwrite
+     * makes a later close notify free the wrong connection. Refuse instead. */
+    if (c->conn) {
+        LOG_W(c, "connection start refused: a connection already exists");
+        return -1;
+    }
+
     c->conn_id++;
     cli_conn_t *conn = calloc(1, sizeof(*conn));
     if (!conn) return -1;
@@ -3474,8 +3536,36 @@ mqvpn_client_connect(mqvpn_client_t *c)
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
 
+    /* Re-entrancy fence: the reset/bootstrap below fire callbacks
+     * synchronously; a callback re-entering connect() mid-transaction must
+     * be refused (see the in_connect field comment). */
+    if (c->in_connect) {
+        LOG_W(c, "connect() re-entered from a client callback; rejected");
+        return MQVPN_ERR_INVALID_ARG;
+    }
+
     if (!mqvpn_state_transition_valid(c->state, MQVPN_STATE_CONNECTING))
         return MQVPN_ERR_INVALID_ARG;
+
+    c->in_connect = 1;
+
+    /* Manual re-establishment from RECONNECTING (the transition table's only
+     * other entry into CONNECTING): run the same pre-start reset the internal
+     * retry path (tick_reconnect) runs. The dead connection's slots still
+     * carry xquic-side bindings — xquic never fires path_removed_notify on
+     * conn destroy — plus stale ACTIVE/DEGRADED states and multipath_ready=1.
+     * Starting on them force-writes a DEGRADED primary to VALIDATING (Debug
+     * invariant abort) and leaves stale-ACTIVE secondaries permanently
+     * un-activatable (activate_pending_paths is PENDING-only: silent
+     * multipath loss). Also disarm the pending retry so tick_reconnect cannot
+     * start a second connection on top of this one; on start failure below
+     * the timer is re-armed, so a failed manual attempt cannot strand a
+     * RECONNECTING client with automatic retry disabled. */
+    int from_reconnecting = (c->state == MQVPN_STATE_RECONNECTING);
+    if (from_reconnecting) {
+        c->reconnect_scheduled_us = 0;
+        client_reset_paths_for_reconnect(c);
+    }
 
     /* Warn if the scheduler choice has unmet path-count preconditions.
      * This is a snapshot at connect time — adding a second path later via
@@ -3502,7 +3592,31 @@ mqvpn_client_connect(mqvpn_client_t *c)
     }
 #endif
 
-    if (cli_start_connection(c) < 0) return MQVPN_ERR_ENGINE;
+    int start_rc = cli_start_connection(c);
+    /* The unsafe window — slot reset + connection bootstrap — ends here.
+     * Callbacks fired below (reconnect_scheduled on failure, state_changed
+     * on success) observe committed, consistent state, so lifecycle calls
+     * from them are legitimate again: in particular an embedder cancelling
+     * the retry via disconnect() from reconnect_scheduled must keep
+     * working (it did before this fence existed). */
+    c->in_connect = 0;
+
+    if (start_rc < 0) {
+        /* Restore the automatic retry disarmed above — otherwise a failed
+         * manual attempt leaves a RECONNECTING client with a zero timer and
+         * tick_reconnect never fires again (permanent reconnect loss).
+         * Mirrors tick_reconnect's own failure handling. The state re-check
+         * skips the re-arm when a re-entrant connect() already moved the
+         * client to CONNECTING (a connection IS underway then). */
+        if (from_reconnecting && c->state == MQVPN_STATE_RECONNECTING) {
+            int delay = client_arm_reconnect_timer(c);
+            LOG_I(c, "manual reconnect failed, retrying in %ds (attempt %d)", delay,
+                  c->reconnect_attempts);
+            if (c->cbs.reconnect_scheduled)
+                c->cbs.reconnect_scheduled(delay, c->user_ctx);
+        }
+        return MQVPN_ERR_ENGINE;
+    }
 
     client_set_state(c, MQVPN_STATE_CONNECTING);
     /* Platform drives the engine via tick() — no main_logic here */
@@ -3514,6 +3628,15 @@ mqvpn_client_disconnect(mqvpn_client_t *c)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
+
+    /* Re-entrancy fence: disconnecting from inside a callback fired by an
+     * in-progress connect transaction would tear down mid-reset state
+     * (CLOSED->CONNECTING resurrection in release, transition assert in
+     * debug). Refused; disconnect after the connect call returns. */
+    if (c->in_connect) {
+        LOG_W(c, "disconnect() re-entered from a client callback; rejected");
+        return MQVPN_ERR_INVALID_ARG;
+    }
 
     if (c->state == MQVPN_STATE_CLOSED || c->state == MQVPN_STATE_IDLE) return MQVPN_OK;
 
@@ -4214,8 +4337,16 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
                                     mqvpn_dgram_qos_level(c->config.scheduler));
 
     if (xret == -XQC_EAGAIN) {
+        /* Backpressure: xquic returns -XQC_EAGAIN before writing any datagram
+         * frame (xqc_datagram.c bails ahead of xqc_write_datagram_frame_to_packet),
+         * so nothing was sent — do NOT count it in dgram_sent. Note the
+         * platform's MQVPN_ERR_AGAIN contract is "stop reading the TUN until
+         * ready_for_tun"; this packet itself is dropped, not retried
+         * (IP-layer loss under backpressure — inner transports retransmit),
+         * which is exactly why counting it would inflate dgram_sent with
+         * packets that never went out. Matches the server TX tail
+         * (mqvpn_server.c), which counts on XQC_OK only. */
         c->backpressure = 1;
-        c->dgram_sent++;
         return MQVPN_ERR_AGAIN;
     }
     if (xret < 0) {
@@ -4417,6 +4548,11 @@ tick_reconnect(mqvpn_client_t *c)
     c->reconnect_scheduled_us = 0;
     LOG_I(c, "attempting reconnection (attempt %d)...", c->reconnect_attempts);
 
+    /* Same re-entrancy fence as mqvpn_client_connect(): the reset below
+     * fires callbacks synchronously, and a callback calling
+     * connect()/disconnect() mid-transaction must be refused. */
+    c->in_connect = 1;
+
     /* Reset path state for a fresh connection attempt. */
     client_reset_paths_for_reconnect(c);
 
@@ -4436,7 +4572,12 @@ tick_reconnect(mqvpn_client_t *c)
               c->paths[c->primary_path_idx].name);
     }
 
-    if (cli_start_connection(c) < 0) {
+    int start_rc = cli_start_connection(c);
+    /* Unsafe window over (see mqvpn_client_connect): callbacks below run
+     * against committed state and may call lifecycle APIs again. */
+    c->in_connect = 0;
+
+    if (start_rc < 0) {
         int delay = client_arm_reconnect_timer(c);
         LOG_I(c, "reconnect failed, retrying in %ds (attempt %d)", delay,
               c->reconnect_attempts);
@@ -4923,6 +5064,15 @@ mqvpn_client_set_server_addr(mqvpn_client_t *c, const struct sockaddr *addr,
                              socklen_t addrlen)
 {
     if (!c || !addr) return MQVPN_ERR_INVALID_ARG;
+    /* Reject an oversized addrlen instead of copying: this is an exported
+     * FFI/JNI entry point, so a miscomputed socklen_t (or a corrupted
+     * addrinfo ai_addrlen) larger than sockaddr_storage would otherwise
+     * overrun c->server_addr into adjacent fields. Rejecting (rather than
+     * clamping) also avoids memcpy over-reading the caller's real sockaddr
+     * object, which is typically far smaller than the bogus length; every
+     * legitimate sockaddr fits in sockaddr_storage, so an oversized length
+     * is always a caller bug. Mirrors mqvpn_server_set_socket_fd. */
+    if (addrlen > sizeof(c->server_addr)) return MQVPN_ERR_INVALID_ARG;
     memcpy(&c->server_addr, addr, addrlen);
     c->server_addrlen = addrlen;
     return MQVPN_OK;

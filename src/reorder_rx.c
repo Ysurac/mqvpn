@@ -1149,6 +1149,18 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
 void
 mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
 {
+    /* Population early-return: both sweeps below walk all rx->n_buckets
+     * (MQVPN_RX_BUCKETS = 1024) bucket heads every call, and the caller
+     * (mqvpn_client_tick / mqvpn_server_tick) fires per event-loop iteration —
+     * potentially thousands of times per second under load. With no flows
+     * there is nothing to time out or evict, so skip the ungated sweeps
+     * entirely. Same pattern as mqvpn_tcp_lane_tick's n_tcp_flows==0 gate.
+     * (No cadence gate here: the gap-timeout sweep has sub-second deadlines,
+     * so it must run every tick while flows exist.) */
+    if (rx->n_flows == 0) {
+        return;
+    }
+
     /* §12.1: (a) fire gap timeouts for flows whose deadline has passed. */
     for (uint32_t i = 0; i < rx->n_buckets; i++) {
         for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {

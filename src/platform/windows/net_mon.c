@@ -460,7 +460,12 @@ recovery_register_with_lib(platform_win_ctx_t *p, int slot, int fd, const char *
 
 /* Roll back a failed re-add so the next attempt starts from a clean slate.
  *
- * Safe ordering: remove_path() first, then close(fd). The xquic_path_live=0
+ * Safe ordering: remove_path() first, then close(fd), then notify the lib the
+ * fd is closed. remove_path() moves the slot to CLOSED_DROPPED; the
+ * CLOSED_DROPPED -> CLOSED_FREE lazy gate only fires once the lib sees fd<0, so
+ * the on_platform_fd_closed() call is required — without it the slot parks in
+ * CLOSED_DROPPED and never becomes reusable via the FREE path. Mirrors the
+ * close-then-notify handshake in remove_path_by_index. The xquic_path_live=0
  * invariant (enforced by apply_path_activation_failure /
  * apply_path_create_permanent_failure) makes remove_path() skip
  * xqc_conn_close_path(), so xquic never touches this fd during teardown.
@@ -475,6 +480,7 @@ recovery_rollback(platform_win_ctx_t *p, int slot, mqvpn_add_path_outcome_t outc
     mqvpn_socket_close(mp->fd);
     mp->fd = -1;
     mp->platform_attached = 0;
+    mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[slot]);
 
     if (outcome == MQVPN_ADD_PATH_PERMANENT_FAIL) {
         /* Saturate the per-slot counter — recover_dropped_paths_cb will

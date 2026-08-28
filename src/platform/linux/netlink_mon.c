@@ -333,7 +333,12 @@ recovery_register_with_lib(platform_ctx_t *p, int slot, int fd, const char *ifna
 
 /* Roll back a failed re-add so the next attempt starts from a clean slate.
  *
- * Safe ordering: remove_path() first, then close(fd). The xquic_path_live=0
+ * Safe ordering: remove_path() first, then close(fd), then notify the lib the
+ * fd is closed. remove_path() moves the slot to CLOSED_DROPPED; the
+ * CLOSED_DROPPED -> CLOSED_FREE lazy gate only fires once the lib sees fd<0, so
+ * the on_platform_fd_closed() call is required — without it the slot parks in
+ * CLOSED_DROPPED and never becomes reusable via the FREE path. This mirrors the
+ * close-then-notify handshake in remove_path_by_index(). The xquic_path_live=0
  * invariant (enforced by apply_path_activation_failure /
  * apply_path_create_permanent_failure) makes remove_path() skip
  * xqc_conn_close_path(), so xquic never touches this fd during teardown.
@@ -348,6 +353,7 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
     close(mp->fd);
     mp->fd = -1;
     mp->platform_attached = 0;
+    mqvpn_client_on_platform_fd_closed(p->client, p->lib_path_handles[slot]);
 
     if (outcome == MQVPN_ADD_PATH_PERMANENT_FAIL) {
         /* Saturate the per-slot counter — recover_dropped_paths_cb will
@@ -376,10 +382,18 @@ recovery_rollback(platform_ctx_t *p, int slot, mqvpn_add_path_outcome_t outcome)
 /* PR5: replace path_removed_by_platform[] polling with lib state query.
  * The slot is considered "ready for re-add" if its public status is
  * MQVPN_PATH_CLOSED — i.e., lib has fully cleaned up the previous incarnation
- * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED with all xquic-side fields
- * drained). add_path_fd_with_outcome will refuse to reuse a non-CLOSED slot;
- * if cleanup hasn't completed we get TRANSIENT_FAIL and bail — next netlink
- * event will retry. */
+ * (CLOSED_FREE) OR is mid-cleanup (CLOSED_DROPPED). Note the re-add does not
+ * necessarily recycle the same slot: add_path_fd's reuse scan requires a
+ * fully-drained slot (status CLOSED && !platform_attached && !xquic_path_live),
+ * so a CLOSED_DROPPED slot still awaiting xquic-side drain is skipped and a
+ * fresh slot is appended instead — the re-add succeeds on the new slot while
+ * the old one drains and is reclaimed to CLOSED_FREE later. n_paths therefore
+ * grows monotonically under rapid flapping and self-heals; it only fails
+ * (returns -1) if MQVPN_MAX_PATHS is reached before the stale slots drain.
+ *
+ * Not static: platform_linux.c also calls this directly to retry a path
+ * whose earlier synchronous re-add failed once its underlying netlink event
+ * has already fired and won't repeat (see netlink_mon.h). */
 int
 try_readd_removed_path(platform_ctx_t *p, const char *ifname)
 {

@@ -97,7 +97,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 
 ## Key Use Cases
 
-**Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks).
+**Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks). RTMP, which cannot bond links on its own, bonds transparently through the tunnel — see [RTMP live streaming](#rtmp-live-streaming).
 
 **Boosting general-purpose transfer** — not just video: bonding speeds up everyday traffic too. UDP and any other traffic is aggregated across paths over the datagram lane, and with [hybrid mode](#hybrid-mode-tcp-lane) TCP is aggregated as well — even a single TCP connection can use multiple paths at once. Details in [Benchmarks](#benchmarks).
 
@@ -975,6 +975,20 @@ SRT contribution feeds over mqvpn, netns-emulated impaired links, mqvpn defaults
 | Dual cellular (42 Mbps over 40 + 30 Mbit lossy links) | 20–40 % stream loss | **0.9 %** stream loss |
 
 Full report: [`bench_results/srt/REPORT.md`](bench_results/srt/REPORT.md) — data & comparison videos: [`bench_results/srt/`](bench_results/srt/) — bench: [`scripts/benchmark_srt.sh`](scripts/benchmark_srt.sh)
+
+### RTMP live streaming
+
+RTMP runs over a single TCP connection and cannot bond links by itself (commercial bonding products work around this with proprietary protocols and cloud-side conversion). Through mqvpn's [hybrid TCP lane](#hybrid-mode-tcp-lane) it bonds transparently — the encoder and the streaming service stay unmodified. Below, one of two bonded links is cut for 30 seconds mid-stream: direct (left) stops for ~33 s, mqvpn (right) never stops:
+
+https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Two weak uplinks (8 Mbps over 2 × 6 Mbit) | capped at 5.7 Mbps, drifts behind live | **7.8 Mbps, stays live** |
+| Bursty mobile-style loss | repeated disconnects, barely delivers | **stable, no disconnects** |
+| One link cut for 30 s | stream drops until the link returns | **keeps streaming** |
+
+Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md`](docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data & videos: [`bench_results/rtmp/`](bench_results/rtmp/) — bench: [`scripts/benchmark_rtmp.sh`](scripts/benchmark_rtmp.sh)
 
 ## Architecture
 
