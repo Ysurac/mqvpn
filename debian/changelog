@@ -48,6 +48,13 @@ mqvpn (0.16.0-1) UNRELEASED; urgency=medium
     registered, flushing before close/destroy and on every egress path;
     fix svr_flush_deferred_sends being defined only inside the
     egress-only block.
+  * feat(logging): annotate xquic's terse "|err:NNN|" report fields
+    (CONNECTION_CLOSE transport / H3 / QPACK wire codes) with a symbolic
+    name, e.g. "|err:0x106(H3_FRAME_ERROR)|" -- new
+    mqvpn_xquic_err_names.h name table mirrored from xqc_errno.h, wired
+    into cb_xqc_log_write on both client and server; grows the log line
+    buffer 512 -> 600 bytes so the annotation can't truncate the tail of
+    xquic's own report lines.
   * fix: harden udp_offload result codes and the batch cap; preserve UDP
     GRO across a netlink path re-add; pin the exact cmsg length and
     hard-error errno preservation.
@@ -62,6 +69,13 @@ mqvpn (0.16.0-1) UNRELEASED; urgency=medium
   * docs: document the dscp scheduler, the client->server weight/DSCP
     auto-sync, the SyncPathLabels opt-out, the persisted path_policy
     override, and the PushPathLabels server->client push (README).
+  * ci: always wipe and re-clone the pinned BoringSSL checkout in every
+    workflow that builds it (deb-package, perf-fec-reinjection,
+    test-path-api, test-pending-regression, test-standby-backup, test-cc,
+    test-ciphers) -- xquic now vendors its own BoringSSL submodule, so the
+    recursive checkout step already populates that path, sometimes with a
+    stale or shallow copy, before the workflow's own pinned-commit clone
+    step runs.
 
  -- mqvpn maintainers <maintainers@example.com>  Mon, 10 Aug 2026 19:00:00 +0200
 
