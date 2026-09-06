@@ -1,3 +1,69 @@
+mqvpn (0.16.2-1) UNRELEASED; urgency=medium
+
+  * fix(server): one live CONNECT-IP tunnel per connection, stream-scoped
+    session lifetime -- a second Extended CONNECT connect-ip on the same H3
+    connection overwrote conn->assigned_ip and left the old sessions[]
+    entry dangling: heap use-after-free on later TUN routing or server
+    destroy, plus an addr-pool leak and n_sessions drift, reachable by any
+    authenticated client. Reject a duplicate with 409 while the tunnel
+    stream is live; release the whole session when the tunnel stream
+    closes (RFC 9484 S4.1) and allow re-establishment on a fresh stream;
+    drop datagrams not associated with the current tunnel stream (RFC 9297
+    S2.1); give each tunnel generation fresh reorder engines, with reorder
+    negotiation now scoped to the establishing request; addr_pool rejects
+    wrapping bases so 0.0.0.0 can never be assigned.
+  * fix(client): mqvpn_client_connect() called manually from RECONNECTING
+    now runs the same pre-start path-slot reset as the internal retry
+    timer, and the in_connect re-entrancy fence is released right after
+    cli_start_connection() commits (not left held across the callbacks it
+    fires) so a callback cancelling the retry via disconnect() keeps
+    working.
+  * fix: four small correctness fixes -- client no longer counts
+    dgram_sent on -XQC_EAGAIN (xquic wrote no frame); set_server_addr /
+    set_socket_fd reject an oversized addrlen instead of silently
+    clamping it; recovery_rollback now closes the fd before notifying the
+    platform layer on linux/darwin/windows so the CLOSED_DROPPED ->
+    CLOSED_FREE gate can fire; reorder_rx's tick skips its two 1024-bucket
+    sweeps when there are no flows.
+  * fix(windows): route Ctrl+C through the loop thread instead of calling
+    mqvpn_client_disconnect() from the OS signal thread (single-thread
+    contract violation); free platform objects (TUN/events/path fds) after
+    library teardown instead of before, matching the Linux shutdown order;
+    forward InitMaxPathId / --init-max-path-id to the client config, which
+    was silently dropped on Windows only.
+  * fix(control-api): get_stats/get_status/get_build_info/get_fec_stats/
+    get_all_fec_stats/get_reorder_stats were silently server-only -- every
+    field read all-zero counters, "unknown" scheduler, or "fec not built"
+    on a client-mode router regardless of real traffic, because the
+    handlers unconditionally read the (NULL in client mode) server handle;
+    found live on an OpenMPTCProuter client-mode bench mid-tunnel. Add
+    client-mode counterparts (mqvpn_client_get_stats/get_info/
+    scheduler_label/uptime_seconds/get_fec_stats) and dispatch on the
+    control socket's client context; documented in docs/control-api.md.
+  * chore(server): add debug-build invariant checks for the session table
+    (svr_check_session_invariants(), a no-op under NDEBUG) -- asserts every
+    non-NULL sessions[] slot maps back to its own offset, that the
+    non-NULL count equals n_sessions, and that n_sessions stays within
+    [0, max_clients]; checked after establishment, after
+    svr_session_release(), and before the destroy sweep.
+  * chore(deps): bump the xquic fork to cd00481 -- the stream reassembly
+    cap (CWE-770) is now non-fatal: an over-cap STREAM frame is dropped
+    unacked instead of escalating into a FRAME_ENCODING_ERROR connection
+    close, which was killing healthy multipath transfers under cross-path
+    reordering; one slot stays reserved for prefix-extending frames so the
+    hole remains fillable, FIN completion is re-checked on the duplicate
+    path, and the cap is tunable via max_stream_frame_buffered_cnt
+    (0 = default 8192). Also bumps BoringSSL to 0.20260813.0.
+  * bench(rtmp): add an RTMP-over-mqvpn bonding benchmark suite -- tier-1
+    netem matrix and tier-2 real-footage runs comparing a direct RTMP
+    publish against one bonded through mqvpn across link flaps, with lag
+    charts and side-by-side comparison videos; report published to the
+    website and README.
+  * test: double CONNECT-IP regression coverage for the session-lifetime
+    fix; manual-reconnect-from-RECONNECTING regression coverage.
+
+ -- mqvpn maintainers <maintainers@example.com>  Fri, 28 Aug 2026 20:00:00 +0200
+
 mqvpn (0.16.0-1) UNRELEASED; urgency=medium
 
   * feat(multipath): add the reverse direction of PATH_LABEL sync -- an

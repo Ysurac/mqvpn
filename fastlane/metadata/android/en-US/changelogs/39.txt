@@ -3,3 +3,6 @@
   in Android backups or device-to-device transfers.
 - Tapping Connect while an automatic reconnect is pending now restarts
   the connection immediately instead of failing.
+- Fix multipath connections being closed under heavy cross-path
+  reordering: an over-full stream reassembly buffer now drops the
+  offending packet instead of tearing down the connection.
