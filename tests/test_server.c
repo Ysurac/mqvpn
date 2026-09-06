@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -702,7 +703,8 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
 /* Poll-driven pump of both engines until done(lb) or max_ms. QUIC PTO can be
  * 1 s+, hence the generous ceilings at the call sites. (The original phase-1
  * loop also bumped `elapsed` by one per iteration, so its 10000 was ~9.8 s;
- * this is a true max_ms — strictly more generous, never tighter.) */
+ * max_ms is a budget of requested poll waits, charged whether or not poll()
+ * blocked — an upper bound on wall-clock, never tighter than the original.) */
 static void
 loopback_pump_until(loopback_t *lb, int (*done)(loopback_t *lb), int max_ms)
 {
@@ -784,6 +786,7 @@ read_whole_file(const char *path, uint8_t *buf, size_t cap)
     if (!fp) return 0;
     size_t n = fread(buf, 1, cap, fp);
     fclose(fp);
+    if (n == cap) return 0; /* truncated read must not look like success */
     return n;
 }
 
@@ -886,6 +889,83 @@ TEST(client_verifier_reject_signals_tls_once)
     ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_TLS);
     ASSERT_EQ(g_cli_tls_fail_log_count, 1);
     loopback_teardown(&lb);
+}
+
+static void
+tweak_secure_no_verifier(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_insecure(cfg, 0);
+    mqvpn_config_set_reconnect(cfg, 0, 0);
+}
+
+TEST(client_secure_without_verifier_rejects_self_signed_as_closed)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_secure_no_verifier);
+    loopback_pump_until(&lb, done_client_closed, 10000);
+
+    /* Self-signed (X509 error 18) is rejected inside the library and never
+     * reaches cb_cert_verify, so the platform sees the plain connection close
+     * after the drain. (An unknown issuer, error 20, takes xquic's legacy
+     * route through cb_cert_verify and is reported as MQVPN_ERR_TLS instead —
+     * see the comment on cb_cert_verify.) */
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 0);
+    loopback_teardown(&lb);
+}
+
+static void
+tweak_insecure_with_rejecting_verifier(mqvpn_config_t *cfg)
+{
+    /* insecure stays 1 (fixture default); the verifier would reject */
+    mqvpn_config_set_cert_verifier(cfg, recording_verifier, NULL);
+}
+
+static void
+tweak_secure_sni_only(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_insecure(cfg, 0);
+    mqvpn_config_set_tls_server_name(cfg, "mqvpn-test"); /* == SAN of test.crt */
+}
+
+static void
+default_root_paths_body(void)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_secure_sni_only);
+    loopback_pump_until(&lb, done_established, 10000);
+
+    /* No verifier, insecure=0: the library verifies against its default root
+     * paths. With test.crt as the store, the self-signed cert is its own
+     * trust anchor and the CN matches the ServerName. */
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 0);
+    loopback_teardown(&lb);
+}
+
+TEST(client_secure_without_verifier_uses_default_root_paths)
+{
+    /* SSL_CERT_FILE is read once, when the client engine's SSL_CTX is created
+     * (mqvpn_client_new → SSL_CTX_set_default_verify_paths). The fixture's
+     * server engine reads it too; harmless — it never verifies client certs.
+     * ASSERT_* exits the process, so the restore below only matters on the
+     * success path. */
+    const char *prev = getenv("SSL_CERT_FILE");
+    char saved[PATH_MAX];
+    int had = 0;
+    if (prev) {
+        snprintf(saved, sizeof(saved), "%s", prev);
+        had = 1;
+    }
+    ASSERT_EQ(setenv("SSL_CERT_FILE", TEST_CERT_FILE, 1), 0);
+    default_root_paths_body();
+    if (had)
+        setenv("SSL_CERT_FILE", saved, 1);
+    else
+        unsetenv("SSL_CERT_FILE");
 }
 
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
@@ -1004,7 +1084,9 @@ TEST(server_session_on_tun_v6_no_sessions)
 TEST(server_session_quic_loopback)
 {
     loopback_t lb;
-    loopback_setup(&lb, NULL);
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = -1;
+    loopback_setup(&lb, tweak_insecure_with_rejecting_verifier);
 
     /* Phase 1: QUIC handshake + MASQUE tunnel setup (10 s ceiling for slow CI
      * runners). */
@@ -1020,6 +1102,9 @@ TEST(server_session_quic_loopback)
     ASSERT_EQ(g_client_connected_called, 1);
     /* Verify: tunnel_config_ready callback fires */
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    /* insecure=1: xquic never consults cb_cert_verify, so even a rejecting
+     * verifier is never called (premise of cb_cert_verify's shape). */
+    ASSERT_EQ(g_vrec.calls, 0);
     /* Client assigned IP should be 10.0.0.2 (first allocation in /24) */
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[0], 10);
     ASSERT_EQ(g_cli_tunnel_info.assigned_ip[1], 0);
@@ -1626,6 +1711,8 @@ main(void)
     run_client_verifier_accepts_presented_chain();
     run_client_verifier_is_the_hostname_judge();
     run_client_verifier_reject_signals_tls_once();
+    run_client_secure_without_verifier_rejects_self_signed_as_closed();
+    run_client_secure_without_verifier_uses_default_root_paths();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
 
