@@ -538,6 +538,30 @@ mock_cli_tunnel_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     if (info) memcpy(&g_cli_tunnel_info, info, sizeof(g_cli_tunnel_info));
 }
 
+static int g_cli_tunnel_closed_count = 0;
+static mqvpn_error_t g_cli_tunnel_closed_reason = MQVPN_OK;
+
+static void
+mock_cli_tunnel_closed(mqvpn_error_t reason, void *user_ctx)
+{
+    (void)user_ctx;
+    g_cli_tunnel_closed_count++;
+    g_cli_tunnel_closed_reason = reason;
+}
+
+/* Counts the verifier site's own ERROR line; the CONNECT-IP e2e marker is
+ * deliberately silent for TLS, so this line is what an operator sees. */
+static int g_cli_tls_fail_log_count = 0;
+
+static void
+mock_cli_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)user_ctx;
+    if (level == MQVPN_LOG_ERROR && msg &&
+        strstr(msg, "TLS certificate verification failed"))
+        g_cli_tls_fail_log_count++;
+}
+
 /* Packet relay helper: drain sockets and tick both engines */
 
 static void
@@ -574,6 +598,151 @@ drain_and_tick(mqvpn_server_t *svr, int svr_fd, mqvpn_client_t *cli, int cli_fd,
 
     mqvpn_server_tick(svr);
     mqvpn_client_tick(cli);
+}
+
+/* ── Single-path loopback fixture (shared by the TLS verifier cases) ── */
+
+typedef struct {
+    int svr_fd, cli_fd;
+    struct sockaddr_in svr_addr, cli_addr;
+    mqvpn_server_t *svr;
+    mqvpn_client_t *cli;
+    mqvpn_path_handle_t path_h;
+} loopback_t;
+
+/* Sockets, server, client (with every client mock registered, tunnel_closed
+ * and log included), one path, connect. `tweak` edits the client config
+ * before mqvpn_client_new; NULL keeps the historical insecure=1 setup. Resets
+ * the server and client mock counters. ASSERT_* exits the process, so there
+ * is no partial-setup cleanup path. */
+static void
+loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
+{
+    reset_mocks();
+    g_client_connected_called = 0;
+    g_client_disconnected_called = 0;
+    g_cli_tun_output_called = 0;
+    g_cli_tunnel_ready_called = 0;
+    g_cli_tunnel_closed_count = 0;
+    g_cli_tunnel_closed_reason = MQVPN_OK;
+    g_cli_tls_fail_log_count = 0;
+    memset(&g_cli_tunnel_info, 0, sizeof(g_cli_tunnel_info));
+
+    lb->svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(lb->svr_fd, -1);
+    lb->cli_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(lb->cli_fd, -1);
+
+    memset(&lb->svr_addr, 0, sizeof(lb->svr_addr));
+    lb->svr_addr.sin_family = AF_INET;
+    lb->svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    lb->svr_addr.sin_port = htons(0); /* OS picks port */
+    /* Do NOT use assert() for calls with side effects — NDEBUG removes them */
+    ASSERT_EQ(bind(lb->svr_fd, (struct sockaddr *)&lb->svr_addr, sizeof(lb->svr_addr)),
+              0);
+
+    memset(&lb->cli_addr, 0, sizeof(lb->cli_addr));
+    lb->cli_addr.sin_family = AF_INET;
+    lb->cli_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    lb->cli_addr.sin_port = htons(0);
+    ASSERT_EQ(bind(lb->cli_fd, (struct sockaddr *)&lb->cli_addr, sizeof(lb->cli_addr)),
+              0);
+
+    socklen_t alen = sizeof(lb->svr_addr);
+    getsockname(lb->svr_fd, (struct sockaddr *)&lb->svr_addr, &alen);
+    alen = sizeof(lb->cli_addr);
+    getsockname(lb->cli_fd, (struct sockaddr *)&lb->cli_addr, &alen);
+
+    /* Server */
+    mqvpn_config_t *svr_cfg = make_server_config();
+    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    svr_cbs.tun_output = mock_tun_output;
+    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    svr_cbs.on_client_connected = mock_on_client_connected;
+    svr_cbs.on_client_disconnected = mock_on_client_disconnected;
+    lb->svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
+    ASSERT_NOT_NULL(lb->svr);
+    mqvpn_config_free(svr_cfg);
+    ASSERT_EQ(mqvpn_server_set_socket_fd(lb->svr, lb->svr_fd,
+                                         (struct sockaddr *)&lb->svr_addr,
+                                         sizeof(lb->svr_addr)),
+              MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_start(lb->svr), MQVPN_OK);
+
+    /* Client */
+    mqvpn_config_t *cli_cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(lb->svr_addr.sin_port));
+    mqvpn_config_set_insecure(cli_cfg, 1);
+    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_ERROR);
+    if (tweak) tweak(cli_cfg);
+
+    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cli_cbs.tun_output = mock_cli_tun_output;
+    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
+    cli_cbs.tunnel_closed = mock_cli_tunnel_closed;
+    cli_cbs.log = mock_cli_log;
+    /* send_packet = NULL: fd-only mode */
+    lb->cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
+    ASSERT_NOT_NULL(lb->cli);
+    mqvpn_config_free(cli_cfg);
+
+    mqvpn_path_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.struct_size = sizeof(desc);
+    memcpy(desc.local_addr, &lb->cli_addr, sizeof(lb->cli_addr));
+    desc.local_addr_len = sizeof(lb->cli_addr);
+    lb->path_h = mqvpn_client_add_path_fd(lb->cli, lb->cli_fd, &desc);
+    ASSERT_NE(lb->path_h, (mqvpn_path_handle_t)-1);
+
+    mqvpn_client_set_server_addr(lb->cli, (struct sockaddr *)&lb->svr_addr,
+                                 sizeof(lb->svr_addr));
+    ASSERT_EQ(mqvpn_client_connect(lb->cli), MQVPN_OK);
+}
+
+/* Poll-driven pump of both engines until done(lb) or max_ms. QUIC PTO can be
+ * 1 s+, hence the generous ceilings at the call sites. (The original phase-1
+ * loop also bumped `elapsed` by one per iteration, so its 10000 was ~9.8 s;
+ * this is a true max_ms — strictly more generous, never tighter.) */
+static void
+loopback_pump_until(loopback_t *lb, int (*done)(loopback_t *lb), int max_ms)
+{
+    for (int elapsed = 0; elapsed < max_ms;) {
+        drain_and_tick(lb->svr, lb->svr_fd, lb->cli, lb->cli_fd, lb->path_h);
+        if (done(lb)) return;
+
+        mqvpn_interest_t svr_int = {0}, cli_int = {0};
+        mqvpn_server_get_interest(lb->svr, &svr_int);
+        mqvpn_client_get_interest(lb->cli, &cli_int);
+        int wait_ms = 50;
+        if (svr_int.next_timer_ms > 0 && svr_int.next_timer_ms < wait_ms)
+            wait_ms = svr_int.next_timer_ms;
+        if (cli_int.next_timer_ms > 0 && cli_int.next_timer_ms < wait_ms)
+            wait_ms = cli_int.next_timer_ms;
+        if (wait_ms < 1) wait_ms = 1;
+
+        struct pollfd pfds[2] = {
+            {.fd = lb->svr_fd, .events = POLLIN},
+            {.fd = lb->cli_fd, .events = POLLIN},
+        };
+        poll(pfds, 2, wait_ms);
+        elapsed += wait_ms;
+    }
+}
+
+static void
+loopback_teardown(loopback_t *lb)
+{
+    mqvpn_client_destroy(lb->cli);
+    mqvpn_server_destroy(lb->svr);
+    close(lb->svr_fd);
+    close(lb->cli_fd);
+}
+
+static int
+done_established(loopback_t *lb)
+{
+    (void)lb;
+    return g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0;
 }
 
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
@@ -691,110 +860,18 @@ TEST(server_session_on_tun_v6_no_sessions)
  */
 TEST(server_session_quic_loopback)
 {
-    /* Reset all mocks */
-    reset_mocks();
-    g_client_connected_called = 0;
-    g_client_disconnected_called = 0;
-    g_cli_tun_output_called = 0;
-    g_cli_tunnel_ready_called = 0;
-    memset(&g_cli_tunnel_info, 0, sizeof(g_cli_tunnel_info));
+    loopback_t lb;
+    loopback_setup(&lb, NULL);
 
-    /* Create UDP sockets */
-    int svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    ASSERT_NE(svr_fd, -1);
-    int cli_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
-    ASSERT_NE(cli_fd, -1);
+    /* Phase 1: QUIC handshake + MASQUE tunnel setup (10 s ceiling for slow CI
+     * runners). */
+    loopback_pump_until(&lb, done_established, 10000);
 
-    struct sockaddr_in svr_addr, cli_addr;
-    memset(&svr_addr, 0, sizeof(svr_addr));
-    svr_addr.sin_family = AF_INET;
-    svr_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    svr_addr.sin_port = htons(0); /* OS picks port */
-    /* Do NOT use assert() for calls with side effects — NDEBUG removes them */
-    ASSERT_EQ(bind(svr_fd, (struct sockaddr *)&svr_addr, sizeof(svr_addr)), 0);
-
-    memset(&cli_addr, 0, sizeof(cli_addr));
-    cli_addr.sin_family = AF_INET;
-    cli_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    cli_addr.sin_port = htons(0);
-    ASSERT_EQ(bind(cli_fd, (struct sockaddr *)&cli_addr, sizeof(cli_addr)), 0);
-
-    /* Get actual bound addresses */
-    socklen_t alen = sizeof(svr_addr);
-    getsockname(svr_fd, (struct sockaddr *)&svr_addr, &alen);
-    alen = sizeof(cli_addr);
-    getsockname(cli_fd, (struct sockaddr *)&cli_addr, &alen);
-
-    /* Server setup */
-    mqvpn_config_t *svr_cfg = make_server_config();
-    mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
-    svr_cbs.tun_output = mock_tun_output;
-    svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
-    svr_cbs.on_client_connected = mock_on_client_connected;
-    svr_cbs.on_client_disconnected = mock_on_client_disconnected;
-
-    mqvpn_server_t *svr = mqvpn_server_new(svr_cfg, &svr_cbs, NULL);
-    ASSERT_NOT_NULL(svr);
-    mqvpn_config_free(svr_cfg);
-
-    ASSERT_EQ(mqvpn_server_set_socket_fd(svr, svr_fd, (struct sockaddr *)&svr_addr,
-                                         sizeof(svr_addr)),
-              MQVPN_OK);
-    ASSERT_EQ(mqvpn_server_start(svr), MQVPN_OK);
-
-    /* Client setup */
-    mqvpn_config_t *cli_cfg = mqvpn_config_new();
-    mqvpn_config_set_server(cli_cfg, "127.0.0.1", ntohs(svr_addr.sin_port));
-    mqvpn_config_set_insecure(cli_cfg, 1);
-    mqvpn_config_set_log_level(cli_cfg, MQVPN_LOG_ERROR);
-
-    mqvpn_client_callbacks_t cli_cbs = MQVPN_CLIENT_CALLBACKS_INIT;
-    cli_cbs.tun_output = mock_cli_tun_output;
-    cli_cbs.tunnel_config_ready = mock_cli_tunnel_ready;
-    /* send_packet = NULL: fd-only mode */
-
-    mqvpn_client_t *cli = mqvpn_client_new(cli_cfg, &cli_cbs, NULL);
-    ASSERT_NOT_NULL(cli);
-    mqvpn_config_free(cli_cfg);
-
-    /* Add path with client socket */
-    mqvpn_path_desc_t desc;
-    memset(&desc, 0, sizeof(desc));
-    desc.struct_size = sizeof(desc);
-    memcpy(desc.local_addr, &cli_addr, sizeof(cli_addr));
-    desc.local_addr_len = sizeof(cli_addr);
-
-    mqvpn_path_handle_t path_h = mqvpn_client_add_path_fd(cli, cli_fd, &desc);
-    ASSERT_NE(path_h, (mqvpn_path_handle_t)-1);
-
-    /* Set server address and connect */
-    mqvpn_client_set_server_addr(cli, (struct sockaddr *)&svr_addr, sizeof(svr_addr));
-    ASSERT_EQ(mqvpn_client_connect(cli), MQVPN_OK);
-
-    /* Phase 1: QUIC handshake + MASQUE tunnel setup */
-    /* Use poll-based pump with 10s timeout for slow CI runners.
-     * QUIC retransmission PTO can be 1s+, so 500ms was too tight. */
-    for (int elapsed = 0; elapsed < 10000; elapsed++) {
-        drain_and_tick(svr, svr_fd, cli, cli_fd, path_h);
-        if (g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0) break;
-
-        mqvpn_interest_t svr_int = {0}, cli_int = {0};
-        mqvpn_server_get_interest(svr, &svr_int);
-        mqvpn_client_get_interest(cli, &cli_int);
-        int wait_ms = 50;
-        if (svr_int.next_timer_ms > 0 && svr_int.next_timer_ms < wait_ms)
-            wait_ms = svr_int.next_timer_ms;
-        if (cli_int.next_timer_ms > 0 && cli_int.next_timer_ms < wait_ms)
-            wait_ms = cli_int.next_timer_ms;
-        if (wait_ms < 1) wait_ms = 1;
-
-        struct pollfd pfds[2] = {
-            {.fd = svr_fd, .events = POLLIN},
-            {.fd = cli_fd, .events = POLLIN},
-        };
-        poll(pfds, 2, wait_ms);
-        elapsed += wait_ms;
-    }
+    /* Local aliases keep phases 2 and 3 textually unchanged. */
+    mqvpn_server_t *svr = lb.svr;
+    mqvpn_client_t *cli = lb.cli;
+    int svr_fd = lb.svr_fd, cli_fd = lb.cli_fd;
+    mqvpn_path_handle_t path_h = lb.path_h;
 
     /* Verify: on_socket_recv() accepts the client connection */
     ASSERT_EQ(g_client_connected_called, 1);
@@ -890,11 +967,7 @@ TEST(server_session_quic_loopback)
     ASSERT_EQ(g_client_disconnected_called, 1);
     ASSERT_EQ(g_last_disconnected_session_id, g_last_session_id);
 
-    /* Cleanup */
-    mqvpn_client_destroy(cli);
-    mqvpn_server_destroy(svr);
-    close(svr_fd);
-    close(cli_fd);
+    loopback_teardown(&lb);
 }
 
 /* ── Manual reconnect regression helpers ── */

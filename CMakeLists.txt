@@ -978,6 +978,10 @@ if(BUILD_TESTING)
     target_compile_definitions(test_server PRIVATE
         TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
         TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+        # DER form of test.crt for the presented-chain assertion. Derived:
+        # regenerate with `openssl x509 -in test.crt -outform DER -out test.der`
+        # whenever test.crt changes (a stale copy fails the memcmp loudly).
+        TEST_CERT_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.der"
     )
     set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_server COMMAND test_server)
