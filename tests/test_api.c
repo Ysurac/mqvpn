@@ -1877,6 +1877,56 @@ TEST(config_set_cert_verifier)
     mqvpn_config_free(cfg);
 }
 
+/* insecure=1 disables certificate verification entirely (xquic never calls
+ * cert_verify_cb under ALLOW_SELF_SIGNED), so a configured verifier is dead.
+ * Say so at client creation — config is final there and it must not repeat
+ * per reconnect. */
+static int g_insecure_warn_count = 0;
+
+static void
+insecure_warn_log(mqvpn_log_level_t level, const char *msg, void *u)
+{
+    (void)u;
+    if (level == MQVPN_LOG_WARN && strstr(msg, "insecure") != NULL &&
+        strstr(msg, "verifier") != NULL)
+        g_insecure_warn_count++;
+}
+
+static mqvpn_client_t *
+make_client_insecure_verifier(int insecure, int with_verifier)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_insecure(cfg, insecure);
+    if (with_verifier) mqvpn_config_set_cert_verifier(cfg, dummy_verifier, NULL);
+
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.log = insecure_warn_log;
+
+    g_insecure_warn_count = 0;
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    return c;
+}
+
+TEST(client_new_warns_when_insecure_overrides_verifier)
+{
+    mqvpn_client_t *c = make_client_insecure_verifier(1, 1);
+    ASSERT_EQ(c != NULL, 1);
+    ASSERT_EQ(g_insecure_warn_count, 1);
+    mqvpn_client_destroy(c);
+
+    /* controls: either setting alone is silent */
+    c = make_client_insecure_verifier(1, 0);
+    ASSERT_EQ(g_insecure_warn_count, 0);
+    mqvpn_client_destroy(c);
+    c = make_client_insecure_verifier(0, 1);
+    ASSERT_EQ(g_insecure_warn_count, 0);
+    mqvpn_client_destroy(c);
+}
+
 /* ── Callback-ordering once-flag (tunnel_notified latch) ──
  *
  * Two callbacks can witness a pre-establishment failure (non-200 headers vs
@@ -2851,6 +2901,7 @@ main(void)
     run_config_set_init_max_path_id();
     run_config_set_log_level();
     run_config_set_cert_verifier();
+    run_client_new_warns_when_insecure_overrides_verifier();
     run_config_set_reconnect();
     run_config_set_killswitch_hint();
     run_config_set_listen();

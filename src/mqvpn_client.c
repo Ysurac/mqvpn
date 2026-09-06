@@ -2951,6 +2951,13 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
 
     client_init_handle(c, cfg, cbs, user_ctx);
 
+    /* insecure=1 means xquic never consults cert_verify_cb (verify_mode NONE),
+     * so a configured verifier is silently dead. Config is final here, so
+     * warn once at creation rather than on every (re)connect. */
+    if (c->config.insecure && c->config.cert_verify_fn)
+        LOG_W(c, "insecure=1 overrides the configured certificate verifier: "
+                 "the server certificate will not be checked");
+
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Load-time visibility for the lane's pcb-pool clamp: the value is
      * silently reduced at lane creation (by design — see tcp_lane.c), and
