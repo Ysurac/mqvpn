@@ -745,6 +745,149 @@ done_established(loopback_t *lb)
     return g_client_connected_called > 0 && g_cli_tunnel_ready_called > 0;
 }
 
+/* ── TLS: platform verifier (mqvpn_config_set_cert_verifier) ── */
+
+typedef struct {
+    int calls;
+    size_t n_certs;
+    uint8_t leaf[4096];
+    size_t leaf_len;
+    char hostname[256];
+    void *ctx;
+    int ret; /* what the verifier returns: 0 accept, nonzero reject */
+} verifier_rec_t;
+
+static verifier_rec_t g_vrec;
+static int g_verifier_ctx_token; /* identity only: the ctx must round-trip untouched */
+
+static int
+recording_verifier(const uint8_t *const certs[], const size_t cert_len[], size_t n_certs,
+                   const char *hostname, void *ctx)
+{
+    g_vrec.calls++;
+    g_vrec.n_certs = n_certs;
+    g_vrec.leaf_len = 0;
+    if (n_certs > 0 && cert_len[0] <= sizeof(g_vrec.leaf)) {
+        memcpy(g_vrec.leaf, certs[0], cert_len[0]);
+        g_vrec.leaf_len = cert_len[0];
+    }
+    snprintf(g_vrec.hostname, sizeof(g_vrec.hostname), "%s",
+             hostname ? hostname : "(null)");
+    g_vrec.ctx = ctx;
+    return g_vrec.ret;
+}
+
+static size_t
+read_whole_file(const char *path, uint8_t *buf, size_t cap)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    size_t n = fread(buf, 1, cap, fp);
+    fclose(fp);
+    return n;
+}
+
+static void
+tweak_accepting_verifier_with_sni(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_insecure(cfg, 0);
+    mqvpn_config_set_tls_server_name(cfg, "mqvpn-test");
+    mqvpn_config_set_cert_verifier(cfg, recording_verifier, &g_verifier_ctx_token);
+}
+
+static void
+tweak_rejecting_verifier(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_insecure(cfg, 0);
+    mqvpn_config_set_reconnect(cfg, 0, 0); /* settle in CLOSED instead of RECONNECTING */
+    mqvpn_config_set_cert_verifier(cfg, recording_verifier, NULL);
+}
+
+static void
+tweak_accepting_verifier_host_mismatch(mqvpn_config_t *cfg)
+{
+    /* no ServerName: hostname is the server host "127.0.0.1", which the
+     * certificate's CN (mqvpn-test) does not match — only the verifier can
+     * say yes */
+    mqvpn_config_set_insecure(cfg, 0);
+    mqvpn_config_set_cert_verifier(cfg, recording_verifier, NULL);
+}
+
+static int
+done_client_closed(loopback_t *lb)
+{
+    return mqvpn_client_get_state(lb->cli) == MQVPN_STATE_CLOSED;
+}
+
+TEST(client_verifier_accepts_presented_chain)
+{
+    uint8_t der[4096];
+    size_t der_len = read_whole_file(TEST_CERT_DER_FILE, der, sizeof(der));
+    ASSERT_NE(der_len, 0);
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = 0;
+
+    loopback_t lb;
+    loopback_setup(&lb, tweak_accepting_verifier_with_sni);
+    loopback_pump_until(&lb, done_established, 10000);
+
+    /* The verifier is the sole judge: a self-signed cert the library would
+     * reject gets through because the platform said yes. */
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(g_vrec.calls, 1);
+    ASSERT_EQ(g_vrec.n_certs, 1);
+    ASSERT_EQ(g_vrec.leaf_len, der_len);
+    ASSERT_EQ(memcmp(g_vrec.leaf, der, der_len), 0);
+    ASSERT_EQ(strcmp(g_vrec.hostname, "mqvpn-test"), 0); /* ServerName wins over host */
+    ASSERT_EQ(g_vrec.ctx == &g_verifier_ctx_token, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 0);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 0);
+    loopback_teardown(&lb);
+}
+
+TEST(client_verifier_is_the_hostname_judge)
+{
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = 0;
+
+    loopback_t lb;
+    loopback_setup(&lb, tweak_accepting_verifier_host_mismatch);
+    loopback_pump_until(&lb, done_established, 10000);
+
+    /* The library performs no hostname check under APP_VERIFY: the name the
+     * verifier judged is the mismatching host, and the tunnel still came up. */
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(g_vrec.calls, 1);
+    ASSERT_EQ(strcmp(g_vrec.hostname, "127.0.0.1"), 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 0);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 0);
+    loopback_teardown(&lb);
+}
+
+TEST(client_verifier_reject_signals_tls_once)
+{
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = -1;
+
+    loopback_t lb;
+    loopback_setup(&lb, tweak_rejecting_verifier);
+    /* The rejection fails the handshake; xquic sends the alert, drains, and
+     * closes. With reconnect off the client ends in CLOSED. */
+    loopback_pump_until(&lb, done_client_closed, 10000);
+
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
+    ASSERT_EQ(g_vrec.calls, 1);
+    ASSERT_EQ(strcmp(g_vrec.hostname, "127.0.0.1"), 0); /* no ServerName: server host */
+    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
+    /* tunnel_closed(TLS) fired from the verifier site, and the later
+     * connection-close notify was suppressed by the once-gate. The e2e marker
+     * is silent for TLS, so the verifier site's own ERROR line must be there. */
+    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_TLS);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 1);
+    loopback_teardown(&lb);
+}
+
 /* Note: all pump loops below use poll() instead of usleep() for CI robustness.
  * This avoids timing issues on slow CI runners where QUIC PTO (1s+) can expire. */
 
@@ -1480,6 +1623,9 @@ main(void)
 
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
+    run_client_verifier_accepts_presented_chain();
+    run_client_verifier_is_the_hostname_judge();
+    run_client_verifier_reject_signals_tls_once();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
 
