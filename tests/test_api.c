@@ -1906,6 +1906,19 @@ mock_tunnel_closed(mqvpn_error_t reason, void *u)
     g_last_tunnel_closed_reason = reason;
 }
 
+/* "CONNECT-IP request failed" is the marker tests/test_e2e_wrong_psk.sh waits
+ * for; count it so its once-per-conn contract is pinned here (the e2e is not
+ * in CI). */
+static int g_connect_fail_marker_count = 0;
+
+static void
+connect_fail_marker_log(mqvpn_log_level_t level, const char *msg, void *u)
+{
+    (void)u;
+    if (level == MQVPN_LOG_WARN && strstr(msg, "CONNECT-IP request failed") != NULL)
+        g_connect_fail_marker_count++;
+}
+
 /* Helper: make_test_client + counting tunnel_closed callback. */
 static mqvpn_client_t *
 make_test_client_with_closed_cb(void)
@@ -1917,10 +1930,12 @@ make_test_client_with_closed_cb(void)
     cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
     cbs.tunnel_closed = mock_tunnel_closed;
+    cbs.log = connect_fail_marker_log;
 
     mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
     mqvpn_config_free(cfg);
     g_tunnel_closed_count = 0;
+    g_connect_fail_marker_count = 0;
     return c;
 }
 
@@ -1941,6 +1956,22 @@ TEST(connect_fail_signals_tunnel_closed_exactly_once)
     ASSERT_EQ(mqvpn_client_test_signal_connect_fail(c, MQVPN_ERR_PROTOCOL, 0), 0);
     ASSERT_EQ(g_tunnel_closed_count, 1);
     ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
+    /* The e2e marker printed exactly once for the two CONNECT-IP witnesses. */
+    ASSERT_EQ(g_connect_fail_marker_count, 1);
+
+    /* TLS rejection (cb_cert_verify → cli_signal_connect_fail): the platform
+     * still gets tunnel_closed(TLS) once, but no CONNECT-IP request was ever
+     * sent, so the marker must stay silent. Fresh conn: the gate above is
+     * latched. Both assertions matter — with the suppression missing the gate
+     * alone would still pass the count check. */
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    g_tunnel_closed_count = 0;
+    g_connect_fail_marker_count = 0;
+    ASSERT_EQ(mqvpn_client_test_signal_connect_fail(c, MQVPN_ERR_TLS, 0), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_TLS);
+    ASSERT_EQ(g_connect_fail_marker_count, 0);
 
     ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
     mqvpn_client_destroy(c);

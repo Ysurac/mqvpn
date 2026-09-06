@@ -1278,12 +1278,14 @@ cli_classify_status(int status)
     }
 }
 
-/* Fire tunnel_closed exactly once for a CONNECT-IP request that failed BEFORE
- * establishment (observed non-200 status, or the tunnel stream closing before
- * 200). Notifies only — it does not abort the request in-core (cross-platform
- * full-stop and non-iOS reconnect-suppression are a documented follow-up);
- * iOS's onTunnelClosed turns this into a startTunnel throw, and the process
- * teardown that follows stops any reconnect on the iOS target. */
+/* Fire tunnel_closed(reason) exactly once per conn for a pre-establishment
+ * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
+ * or (TLS) the platform verifier rejecting the server certificate from inside
+ * the handshake. Notifies only — it does not abort the request in-core
+ * (cross-platform full-stop and non-iOS reconnect-suppression are a
+ * documented follow-up); iOS's onTunnelClosed turns this into a startTunnel
+ * throw, and the process teardown that follows stops any reconnect on the iOS
+ * target. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
@@ -1291,8 +1293,13 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
-    LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)", status_for_log,
-          (int)reason);
+    /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
+     * and must keep printing once for the CONNECT-IP witnesses. A TLS
+     * rejection never sent a request, so it stays silent here — the verifier
+     * site already logged "TLS certificate verification failed". */
+    if (reason != MQVPN_ERR_TLS)
+        LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)",
+              status_for_log, (int)reason);
     if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(reason, c->user_ctx);
 }
 
