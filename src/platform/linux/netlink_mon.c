@@ -65,6 +65,78 @@ nlmsg_get_operstate(struct nlmsghdr *nh)
     return -1;
 }
 
+/* Extract IFLA_MTU from a link message. Returns 0 when the attribute is
+ * absent (the kernel always includes it in RTM_NEWLINK for a live device). */
+static int
+nlmsg_get_mtu(struct nlmsghdr *nh)
+{
+    struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
+    struct rtattr *rta = IFLA_RTA(ifi);
+    int rtl = (int)IFLA_PAYLOAD(nh);
+    for (; RTA_OK(rta, rtl); rta = RTA_NEXT(rta, rtl)) {
+        if (rta->rta_type == IFLA_MTU && RTA_PAYLOAD(rta) >= sizeof(uint32_t))
+            return (int)*(const uint32_t *)RTA_DATA(rta);
+    }
+    return 0;
+}
+
+#define TUN_MTU_RESTORE_WINDOW_SEC 60
+#define TUN_MTU_RESTORE_MAX        20
+
+/* RTM_NEWLINK for our own TUN device.
+ *
+ * mqvpn owns the TUN MTU: it is derived from the negotiated QUIC/MASQUE
+ * datagram budget (~1382 with the default 1400-byte packets) and re-applied
+ * on every MSS update. Anything larger that reaches the TUN cannot be carried
+ * and is dropped with an ICMP Fragmentation Needed -- which UDP-in-UDP
+ * tunnels such as WireGuard ignore, so a wrong device MTU turns into a
+ * silent one-direction stall for them (TCP recovers via PMTUD, so it goes
+ * unnoticed until UDP traffic is tested).
+ *
+ * Network managers happily raise the MTU behind our back: OpenWrt's netifd
+ * re-applies a static "option mtu" from a netifd device section on every
+ * device or config reload (OpenMPTCProuter shipped network.tun0.mtu=1500 for
+ * years; live-diagnosed 2026-09-04 with 1400-byte UDP payloads going 100%%
+ * lost router->VPS while 1300-byte ones passed). mqvpn only noticed the
+ * change at the next MSS update, i.e. never. Watch the link events we
+ * already subscribe to and put the negotiated value back. Our own
+ * SIOCSIFMTU produces a RTM_NEWLINK carrying the value we want, so this
+ * never loops; the per-window cap guards against a manager that keeps
+ * fighting us in a loop of its own. */
+static void
+handle_tun_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
+{
+    int mtu = nlmsg_get_mtu(nh);
+    int want = p->tun.mtu;
+    if (mtu <= 0 || want <= 0 || mtu == want) return;
+
+    time_t now = time(NULL);
+    if (now - p->tun_mtu_restore_window >= TUN_MTU_RESTORE_WINDOW_SEC) {
+        p->tun_mtu_restore_window = now;
+        p->tun_mtu_restores = 0;
+    }
+    if (++p->tun_mtu_restores > TUN_MTU_RESTORE_MAX) {
+        if (p->tun_mtu_restores == TUN_MTU_RESTORE_MAX + 1)
+            LOG_ERR("TUN %s: MTU changed externally more than %d times in %ds, "
+                    "leaving it at %d until the window expires",
+                    p->tun.name, TUN_MTU_RESTORE_MAX, TUN_MTU_RESTORE_WINDOW_SEC, mtu);
+        return;
+    }
+    /* First hit in a window is an error: it means a misconfiguration that
+     * silently breaks UDP-in-UDP traffic, and OpenMPTCProuter runs the
+     * client at LogLevel error, so a warning would never be seen there. */
+    if (p->tun_mtu_restores == 1)
+        LOG_ERR("TUN %s: MTU changed externally to %d, restoring negotiated %d "
+                "(something else manages this device's MTU; on OpenWrt check "
+                "'uci show network' for a device section with option mtu)",
+                p->tun.name, mtu, want);
+    else
+        LOG_WRN("TUN %s: MTU changed externally to %d again, restoring %d (%d/%d in %ds)",
+                p->tun.name, mtu, want, p->tun_mtu_restores, TUN_MTU_RESTORE_MAX,
+                TUN_MTU_RESTORE_WINDOW_SEC);
+    mqvpn_tun_set_mtu(&p->tun, want);
+}
+
 /* Log wording per reason. Frozen: e2e scripts grep these exact strings
  * ("interface <if> <reason>, closing path"). */
 static const char *
@@ -690,6 +762,12 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     struct ifinfomsg *ifi = (struct ifinfomsg *)NLMSG_DATA(nh);
     const char *ifname = nlmsg_get_ifname(nh);
     if (!ifname) return;
+
+    /* Our TUN is never a WAN path: only its MTU concerns us. */
+    if (p->tun_up && p->tun.fd >= 0 && strcmp(ifname, p->tun.name) == 0) {
+        handle_tun_newlink(p, nh);
+        return;
+    }
 
     int admin_down = !(ifi->ifi_flags & IFF_UP);
     if (admin_down || is_carrier_loss(ifi, nlmsg_get_operstate(nh))) {

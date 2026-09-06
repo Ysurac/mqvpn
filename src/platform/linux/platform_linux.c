@@ -81,6 +81,13 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
 
+    /* Keep a copy: tun_fatal_error() replays this callback to rebuild the
+     * TUN when the kernel device disappears under us. */
+    if (info && info != &p->last_tunnel_info) {
+        p->last_tunnel_info = *info;
+        p->have_tunnel_info = 1;
+    }
+
     /* Clean up stale TUN event from previous connection (reconnect case) */
     if (p->ev_tun) {
         event_del(p->ev_tun);
@@ -421,6 +428,54 @@ on_tick_timer(evutil_socket_t fd, short what, void *arg)
     schedule_next_tick(p);
 }
 
+/* The TUN read failed with something other than EAGAIN. In practice the
+ * kernel device is gone: `ip link del tun0` (or another VPN grabbing the
+ * name) leaves our fd returning EBADFD, a detached device EIO/ENXIO. The
+ * read event is EV_PERSIST and the fd stays "readable", so returning from
+ * on_tun_read would re-fire it immediately and forever -- one instance
+ * logged ~28k "tun read: File descriptor in bad state" lines per second and
+ * filled a 487 MB tmpfs in 3.5 minutes (OpenMPTCProuter bench, 2026-09-04).
+ *
+ * Tear the TUN and everything hung off it down (same order as the
+ * RECONNECTING/CLOSED state handler) and rebuild it in place from the last
+ * tunnel config: the QUIC connection is untouched, so the tunnel is back
+ * within milliseconds. A tight cap on rebuilds per window guards against
+ * something deleting the device in a loop; past it we disconnect and let
+ * the supervisor (procd / omr watchdogs) restart the process. */
+static void
+tun_fatal_error(platform_ctx_t *p)
+{
+    int err = errno;
+
+    if (p->ev_tun) {
+        event_del(p->ev_tun);
+        event_free(p->ev_tun);
+        p->ev_tun = NULL;
+    }
+    cleanup_killswitch(p);
+    if (p->manage_routes) cleanup_routes(p);
+    mqvpn_dns_restore(&p->dns);
+    if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
+    p->tun.fd = -1;
+    p->tun_up = 0;
+    mqvpn_client_set_tun_active(p->client, 0, -1);
+
+    time_t now = time(NULL);
+    if (now - p->tun_rebuild_window > 60) {
+        p->tun_rebuild_window = now;
+        p->tun_rebuilds = 0;
+    }
+    if (p->have_tunnel_info && ++p->tun_rebuilds <= 5) {
+        LOG_ERR("tun read failed (%s): device %s lost, rebuilding it in place (%d/5)",
+                strerror(err), p->tun_name_cfg, p->tun_rebuilds);
+        cb_tunnel_config_ready(&p->last_tunnel_info, p);
+        return;
+    }
+    LOG_ERR("tun read failed (%s): device %s keeps disappearing, disconnecting",
+            strerror(err), p->tun_name_cfg);
+    mqvpn_client_disconnect(p->client);
+}
+
 static void
 on_tun_read(evutil_socket_t fd, short what, void *arg)
 {
@@ -431,7 +486,11 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
 
     for (int i = 0; i < BULK_READ_COUNT; i++) {
         int n = mqvpn_tun_read(&p->tun, buf, sizeof(buf));
-        if (n <= 0) break;
+        if (n == 0) break; /* EAGAIN: drained */
+        if (n < 0) {
+            tun_fatal_error(p);
+            return;
+        }
 
         int ret = mqvpn_client_on_tun_packet(p->client, buf, (size_t)n);
         if (ret == MQVPN_ERR_AGAIN) {

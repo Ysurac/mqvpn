@@ -19,6 +19,7 @@
 
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <time.h>
 
 #include <event2/event.h>
 
@@ -51,6 +52,18 @@ typedef struct {
     mqvpn_tun_t tun;
     char tun_name_cfg[IFNAMSIZ]; /* configured name, survives destroy */
     int tun_up;
+    /* Copy of the last tunnel config handed to cb_tunnel_config_ready, so the
+     * TUN can be rebuilt in place when the device is deleted under a live
+     * connection (see tun_fatal_error). Plain data, safe to copy. */
+    mqvpn_tunnel_info_t last_tunnel_info;
+    int have_tunnel_info;
+    int tun_rebuilds;              /* in-place rebuilds inside the current window */
+    time_t tun_rebuild_window;     /* start of that window (seconds) */
+    /* External MTU change guard (netlink_mon.c handle_tun_newlink): counts
+     * restores inside the current window so a fight with another MTU
+     * manager cannot turn into a busy loop. */
+    int tun_mtu_restores;
+    time_t tun_mtu_restore_window;
 
     /* Server address */
     struct sockaddr_storage server_addr;
