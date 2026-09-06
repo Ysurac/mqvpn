@@ -395,6 +395,9 @@ typedef void (*mqvpn_send_packet_fn)(mqvpn_path_handle_t path, const uint8_t *pk
                                      size_t len, const struct sockaddr *peer,
                                      socklen_t peer_len, void *user_ctx);
 
+/* May be invoked synchronously from inside the TLS handshake (certificate
+ * rejected by the platform verifier) on the thread that drives tick(); the
+ * handler must not re-enter libmqvpn. */
 typedef void (*mqvpn_tunnel_closed_fn)(mqvpn_error_t reason, void *user_ctx);
 
 typedef void (*mqvpn_ready_for_tun_fn)(void *user_ctx);
@@ -644,6 +647,25 @@ MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
                                      void *clock_ctx);
+
+/* Platform certificate verifier. 0 = trusted, nonzero = reject. certs[0] is
+ * the leaf; every entry is DER, in the order the server presented them.
+ * hostname is the name the chain must match: the TLS server name, or the
+ * server host when none is set. Called synchronously on every full TLS
+ * handshake, on the thread that drives tick(); it must not re-enter
+ * libmqvpn. A resumed TLS 1.3 session would reuse the original decision
+ * without calling it again (the client does not feed session tickets back
+ * today, so every handshake is a full one). When set, the verifier is the
+ * sole judge of chain and hostname — the library's root store is not
+ * consulted. When unset, the library verifies against its default root
+ * paths (/etc/ssl/cert.pem and /etc/ssl/certs; on macOS that is the
+ * system-provided bundle, not the Keychain). insecure=1 takes precedence
+ * over a verifier (a WARN is logged at client creation). ctx must stay valid
+ * until the client is destroyed (the config is copied at client creation). */
+typedef int (*mqvpn_cert_verify_fn)(const uint8_t *const certs[], const size_t cert_len[],
+                                    size_t n_certs, const char *hostname, void *ctx);
+MQVPN_API int mqvpn_config_set_cert_verifier(mqvpn_config_t *cfg, mqvpn_cert_verify_fn fn,
+                                             void *ctx);
 
 /* Server-only config */
 MQVPN_API int mqvpn_config_set_listen(mqvpn_config_t *cfg, const char *addr, int port);

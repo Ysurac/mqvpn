@@ -1842,6 +1842,41 @@ TEST(classify_status_zero_is_protocol)
     ASSERT_EQ(mqvpn_client_test_classify_status(0), MQVPN_ERR_PROTOCOL);
 }
 
+/* ── mqvpn_config_set_cert_verifier (platform-owned chain decision) ── */
+
+static int
+dummy_verifier(const uint8_t *const certs[], const size_t cert_len[], size_t n_certs,
+               const char *hostname, void *ctx)
+{
+    (void)certs;
+    (void)cert_len;
+    (void)n_certs;
+    (void)hostname;
+    (void)ctx;
+    return 0;
+}
+
+TEST(config_set_cert_verifier)
+{
+    ASSERT_EQ(mqvpn_config_set_cert_verifier(NULL, dummy_verifier, NULL),
+              MQVPN_ERR_INVALID_ARG);
+
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->cert_verify_fn == NULL, 1); /* default: library-side verification */
+
+    int token;
+    ASSERT_EQ(mqvpn_config_set_cert_verifier(cfg, dummy_verifier, &token), MQVPN_OK);
+    ASSERT_EQ(cfg->cert_verify_fn == dummy_verifier, 1);
+    ASSERT_EQ(cfg->cert_verify_ctx == &token, 1);
+
+    /* NULL fn clears the verifier and never leaves a dangling ctx behind it,
+     * whatever the caller passed as ctx */
+    ASSERT_EQ(mqvpn_config_set_cert_verifier(cfg, NULL, &token), MQVPN_OK);
+    ASSERT_EQ(cfg->cert_verify_fn == NULL, 1);
+    ASSERT_EQ(cfg->cert_verify_ctx == NULL, 1);
+    mqvpn_config_free(cfg);
+}
+
 /* ── Callback-ordering once-flag (tunnel_notified latch) ──
  *
  * Two callbacks can witness a pre-establishment failure (non-200 headers vs
@@ -2784,6 +2819,7 @@ main(void)
     run_config_set_reinjection_deadline_params();
     run_config_set_init_max_path_id();
     run_config_set_log_level();
+    run_config_set_cert_verifier();
     run_config_set_reconnect();
     run_config_set_killswitch_hint();
     run_config_set_listen();
