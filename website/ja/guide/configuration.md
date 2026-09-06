@@ -28,6 +28,8 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 ```
 
+CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) にはサーバー証明書と中間証明書を連結した fullchain を指定します。Let's Encrypt では `cert.pem` ではなく `fullchain.pem` です。クライアントはサーバーが送った chain をそのまま検証し、足りない中間証明書を取りに行かないため、leaf だけのファイルでは、その中間証明書を元から信頼していないクライアントで検証に失敗します。
+
 ### クライアント
 
 ```ini
@@ -79,6 +81,8 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 }
 ```
 
+`cert_file` にも同じく fullchain を指定します (INI のサーバー例の下の注記を参照)。
+
 ### クライアント
 
 ```json
@@ -127,7 +131,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
-| `Insecure` | TLS 証明書検証をスキップ | `false` |
+| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。IP アドレスで接続する場合は `ServerName` に証明書の DNS 名を設定する。 | `false` |
 
 ### `[Interface]`
 

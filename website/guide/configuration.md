@@ -28,6 +28,13 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 ```
 
+When you use a CA-issued certificate, `Cert` (`cert_file` in JSON) must contain
+the full chain: the server certificate followed by its intermediates (for Let's
+Encrypt, `fullchain.pem`, not `cert.pem`). Clients verify the chain exactly as
+the server presents it and do not fetch missing intermediates, so a leaf-only
+file fails verification on any client that does not already trust the
+intermediate.
+
 ### Client
 
 ```ini
@@ -79,6 +86,8 @@ JSON config is useful for structured management and automation tooling.
 }
 ```
 
+`cert_file` takes the full chain as well (see the note under the INI server example).
+
 ### Client
 
 ```json
@@ -127,7 +136,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
-| `Insecure` | Skip TLS certificate verification | `false` |
+| `Insecure` | Skip TLS certificate verification (self-signed test setups only). With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); when connecting by IP address, set `ServerName` to the certificate's DNS name. | `false` |
 
 ### `[Interface]`
 
