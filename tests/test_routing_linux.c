@@ -11,7 +11,9 @@
  * Fixture shared by every scenario: server 203.0.113.9, TUN "mqvpn0".
  * `ip -4 route get 203.0.113.9`'s canned output is set per scenario via
  * $MQVPN_FAKE_IP_ROUTE_GET_FILE ("via <gw> dev <if>" for the gatewayed
- * case, "dev <if>" only for on-link).
+ * case, "dev <if>" only for on-link). With $MQVPN_FAKE_IP_SPLIT_DELAY set,
+ * the fake writes that output one line per write(), pausing that many
+ * seconds between lines (see test_discovery_two_writes).
  */
 #include "platform_internal.h"
 #include "fake_cmd.h"
@@ -20,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 static int g_pass = 0, g_fail = 0;
 
@@ -62,11 +65,24 @@ setup_fixture(fake_cmd_env_t *e)
     /* `ip -4 route get <ip>` prints the canned discovery line; every other
      * verb (route replace/del) just logs and succeeds. Matched on "$*"
      * because the discovery call carries a family flag ("-4 route get ...")
-     * while the catch-all verbs do not ("route replace ..."). */
+     * while the catch-all verbs do not ("route replace ...").
+     *
+     * Split mode prints with the shell's printf builtin, not a child `cat`,
+     * so a write into a closed pipe raises SIGPIPE in the fake itself —
+     * exactly what happens to the real `ip`. */
     fake_cmd_install(e, "ip",
                      "case \"$*\" in\n"
                      "  *\"route get\"*)\n"
-                     "    cat \"$MQVPN_FAKE_IP_ROUTE_GET_FILE\"\n"
+                     "    if [ -n \"$MQVPN_FAKE_IP_SPLIT_DELAY\" ]; then\n"
+                     "      first=1\n"
+                     "      while IFS= read -r l; do\n"
+                     "        [ -n \"$first\" ] || sleep \"$MQVPN_FAKE_IP_SPLIT_DELAY\"\n"
+                     "        first=\n"
+                     "        printf '%s\\n' \"$l\"\n"
+                     "      done < \"$MQVPN_FAKE_IP_ROUTE_GET_FILE\"\n"
+                     "    else\n"
+                     "      cat \"$MQVPN_FAKE_IP_ROUTE_GET_FILE\"\n"
+                     "    fi\n"
                      "    ;;\n"
                      "esac");
 }
@@ -452,6 +468,53 @@ test_discovery_no_dev_token(fake_cmd_env_t *e)
                 "no-dev-token: no route ever added");
 }
 
+/* ================================================================
+ * 5c. discovery output arriving in two writes -> still parsed, rc 0
+ * ================================================================ */
+static void
+test_discovery_two_writes(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    /* Real `ip -4 route get` output: the route line, then the indented
+     * "cache" line. A musl-linked iproute2 (Alpine, OpenWrt) writes these
+     * with two write()s — musl's stdout stays line-buffered until its first
+     * flush — and the pause stands in for `ip` being descheduled between
+     * them. discover_route() must read to EOF: a single read() returns only
+     * the first line, and closing the pipe then kills `ip` with SIGPIPE,
+     * which fails the exit-status check although the answer was complete. */
+    set_route_get_output(e, "203.0.113.9 via 203.0.113.1 dev eth0 src 192.0.2.5 uid 0 \n"
+                            "    cache \n");
+    setenv("MQVPN_FAKE_IP_SPLIT_DELAY", "0.2", 1);
+    /* The Linux client runs with the default SIGPIPE disposition, which the
+     * forked `ip` inherits across exec; pin it so the scenario does not
+     * depend on how the test runner was started. */
+    void (*prev)(int) = signal(SIGPIPE, SIG_DFL);
+
+    platform_ctx_t p;
+    init_ctx(&p);
+
+    int rc = setup_routes(&p);
+    ASSERT_EQ_INT(rc, 0, "two-writes rc");
+    ASSERT_EQ_INT(p.routing_configured, 1, "two-writes routing_configured");
+    ASSERT_TRUE(strcmp(p.orig_iface, "eth0") == 0, "two-writes: orig_iface parsed");
+    ASSERT_TRUE(strcmp(p.orig_gateway, "203.0.113.1") == 0,
+                "two-writes: orig_gateway parsed");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    const char *seq[] = {
+        "ip|-4|route|get|203.0.113.9",
+        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|route|replace|0.0.0.0/1|dev|mqvpn0",
+    };
+    assert_log_order(log, seq, 3, "two-writes setup sequence");
+
+    signal(SIGPIPE, prev);
+    unsetenv("MQVPN_FAKE_IP_SPLIT_DELAY");
+    fake_cmd_reset(e);
+    cleanup_routes(&p);
+}
+
 int
 main(void)
 {
@@ -472,6 +535,7 @@ main(void)
     test_high_catchall_failure_rollback(&e);
     test_discovery_failure(&e);
     test_discovery_no_dev_token(&e);
+    test_discovery_two_writes(&e);
 
     fake_cmd_env_cleanup(&e);
 
