@@ -1203,16 +1203,56 @@ cb_write_mmsg_ex(uint64_t path_id, const struct iovec *msg_iov, unsigned int vle
 
 /* ─── TLS callbacks ─── */
 
+/* The name the server certificate must match: the configured TLS server
+ * name, or the server host when unset. Shared by the connect path (SNI) and
+ * the verifier callback so both sides agree on one name. */
+static const char *
+cli_effective_sni(const mqvpn_config_t *cfg)
+{
+    return cfg->tls_server_name[0] ? cfg->tls_server_name : cfg->server_host;
+}
+
+/* xquic hands us the chain the server presented (leaf first, DER). Reached
+ * on every handshake when a verifier is configured (APP_VERIFY): the verifier
+ * is the sole judge, and its rejection is the one TLS failure the platform
+ * hears about immediately, as MQVPN_ERR_TLS. Without a verifier, xquic's
+ * legacy path routes only an unknown issuer (X509 error 20) here; every
+ * other library-side rejection (self-signed, expired, hostname mismatch) is
+ * refused inside the library and never reaches this callback. Both are one
+ * class of failure — the library verifying — so both surface the same way:
+ * this site only logs and refuses, and the platform sees the plain
+ * connection close (MQVPN_ERR_CLOSED) after the drain, exactly like the
+ * rejections that never get here. Reporting error 20 alone as MQVPN_ERR_TLS
+ * would make the public reason depend on which X509 error the library hit.
+ * insecure never gets here: verify_mode is NONE and xquic installs no
+ * callback. An empty chain is rejected by the ssl library before this point.
+ * conn_user_data is always the cli_conn_t passed to xqc_h3_connect. */
 static int
 cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
                void *conn_user_data)
 {
-    (void)certs;
-    (void)cert_len;
-    (void)certs_len;
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    if (conn && conn->client->config.insecure) return 0;
-    LOG_E(conn->client, "TLS certificate verification failed");
+    mqvpn_client_t *c = conn->client;
+    const mqvpn_config_t *cfg = &c->config;
+
+    if (cfg->cert_verify_fn) {
+        if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
+                                cfg->cert_verify_ctx) == 0)
+            return 0;
+
+        LOG_E(c, "TLS certificate verification failed");
+        /* Tell the platform now, once, instead of after the 3-PTO drain that
+         * follows the handshake alert; the conn-close notify that comes later
+         * is gated by tunnel_notified. Runs inside xqc_engine_main_logic: the
+         * platform handler must not re-enter libmqvpn (documented on
+         * mqvpn_tunnel_closed_fn). */
+        cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
+        return -1;
+    }
+
+    /* Library-side verification (no verifier): refuse and let the connection
+     * close report it, like every other library-side rejection. */
+    LOG_E(c, "TLS certificate verification failed");
     return -1;
 }
 
@@ -1278,12 +1318,14 @@ cli_classify_status(int status)
     }
 }
 
-/* Fire tunnel_closed exactly once for a CONNECT-IP request that failed BEFORE
- * establishment (observed non-200 status, or the tunnel stream closing before
- * 200). Notifies only — it does not abort the request in-core (cross-platform
- * full-stop and non-iOS reconnect-suppression are a documented follow-up);
- * iOS's onTunnelClosed turns this into a startTunnel throw, and the process
- * teardown that follows stops any reconnect on the iOS target. */
+/* Fire tunnel_closed(reason) exactly once per conn for a pre-establishment
+ * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
+ * or (TLS) the platform verifier rejecting the server certificate from inside
+ * the handshake. Notifies only — it does not abort the request in-core
+ * (cross-platform full-stop and non-iOS reconnect-suppression are a
+ * documented follow-up); iOS's onTunnelClosed turns this into a startTunnel
+ * throw, and the process teardown that follows stops any reconnect on the iOS
+ * target. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
@@ -1291,8 +1333,13 @@ cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_l
     if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
-    LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)", status_for_log,
-          (int)reason);
+    /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
+     * and must keep printing once for the CONNECT-IP witnesses. A TLS
+     * rejection never sent a request, so it stays silent here — the verifier
+     * site already logged "TLS certificate verification failed". */
+    if (reason != MQVPN_ERR_TLS)
+        LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)",
+              status_for_log, (int)reason);
     if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(reason, c->user_ctx);
 }
 
@@ -2737,13 +2784,22 @@ cli_start_connection(mqvpn_client_t *c)
         }
     }
 
+    /* One owner of the certificate decision, readable from the config alone:
+     * insecure → none (xquic never calls cb_cert_verify); verifier → the
+     * platform, on every handshake (APP_VERIFY); otherwise the library's root
+     * store + hostname check. insecure must stay first: it takes precedence
+     * over a verifier (mqvpn_client_new warned about that). */
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
-    ssl_cfg.cert_verify_flag = c->config.insecure ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
-                                                  : XQC_TLS_CERT_FLAG_NEED_VERIFY;
+    if (c->config.insecure)
+        ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+    else if (c->config.cert_verify_fn)
+        ssl_cfg.cert_verify_flag =
+            XQC_TLS_CERT_FLAG_NEED_VERIFY | XQC_TLS_CERT_FLAG_APP_VERIFY;
+    else
+        ssl_cfg.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
 
-    const char *sni =
-        c->config.tls_server_name[0] ? c->config.tls_server_name : c->config.server_host;
+    const char *sni = cli_effective_sni(&c->config);
 
     const xqc_cid_t *cid =
         xqc_h3_connect(c->engine, &cs, NULL, 0, sni, 0, &ssl_cfg,
@@ -2943,6 +2999,13 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     if (!c) return NULL;
 
     client_init_handle(c, cfg, cbs, user_ctx);
+
+    /* insecure=1 means xquic never consults cert_verify_cb (verify_mode NONE),
+     * so a configured verifier is silently dead. Config is final here, so
+     * warn once at creation rather than on every (re)connect. */
+    if (c->config.insecure && c->config.cert_verify_fn)
+        LOG_W(c, "insecure=1 overrides the configured certificate verifier: "
+                 "the server certificate will not be checked");
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Load-time visibility for the lane's pcb-pool clamp: the value is

@@ -113,6 +113,10 @@ struct mqvpn_config_s {
     mqvpn_clock_fn clock_fn;
     void *clock_ctx;
 
+    /* Platform certificate verifier (NULL = library root store) */
+    mqvpn_cert_verify_fn cert_verify_fn;
+    void *cert_verify_ctx;
+
     /* Server-only fields */
     char listen_addr[256];
     int listen_port;

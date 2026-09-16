@@ -978,6 +978,17 @@ if(BUILD_TESTING)
     target_compile_definitions(test_server PRIVATE
         TEST_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.crt"
         TEST_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.key"
+        # DER form of test.crt for the presented-chain assertion. Derived:
+        # regenerate with `openssl x509 -in test.crt -outform DER -out test.der`
+        # whenever test.crt changes (a stale copy fails the memcmp loudly).
+        TEST_CERT_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/test.der"
+        # Two-tier chain (leaf <- intermediate <- uncommitted root), generated
+        # by tests/certs/gen_chain.sh: pins the leaf-first presented-chain
+        # contract and the unknown-issuer path.
+        TEST_CHAIN_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-fullchain.crt"
+        TEST_CHAIN_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-leaf.key"
+        TEST_CHAIN_LEAF_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-leaf.der"
+        TEST_CHAIN_INTERMEDIATE_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-intermediate.der"
     )
     set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_server COMMAND test_server)
