@@ -611,6 +611,12 @@ typedef struct {
     mqvpn_path_handle_t path_h;
 } loopback_t;
 
+/* Server certificate for the next loopback_setup. NULL = test.crt (self-
+ * signed). Tests that need the two-tier chain point these at the chain-*
+ * fixture and reset them after teardown. */
+static const char *g_lb_server_cert = NULL;
+static const char *g_lb_server_key = NULL;
+
 /* Sockets, server, client (with every client mock registered, tunnel_closed
  * and log included), one path, connect. `tweak` edits the client config
  * before mqvpn_client_new; NULL keeps the historical insecure=1 setup. Resets
@@ -656,6 +662,9 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
 
     /* Server */
     mqvpn_config_t *svr_cfg = make_server_config();
+    if (g_lb_server_cert)
+        ASSERT_EQ(mqvpn_config_set_tls_cert(svr_cfg, g_lb_server_cert, g_lb_server_key),
+                  MQVPN_OK);
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
     svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
@@ -749,11 +758,13 @@ done_established(loopback_t *lb)
 
 /* ── TLS: platform verifier (mqvpn_config_set_cert_verifier) ── */
 
+#define VREC_MAX_CERTS 2
+
 typedef struct {
     int calls;
     size_t n_certs;
-    uint8_t leaf[4096];
-    size_t leaf_len;
+    uint8_t der[VREC_MAX_CERTS][4096]; /* certs[0..1] as presented (leaf first) */
+    size_t der_len[VREC_MAX_CERTS];
     char hostname[256];
     void *ctx;
     int ret; /* what the verifier returns: 0 accept, nonzero reject */
@@ -768,10 +779,12 @@ recording_verifier(const uint8_t *const certs[], const size_t cert_len[], size_t
 {
     g_vrec.calls++;
     g_vrec.n_certs = n_certs;
-    g_vrec.leaf_len = 0;
-    if (n_certs > 0 && cert_len[0] <= sizeof(g_vrec.leaf)) {
-        memcpy(g_vrec.leaf, certs[0], cert_len[0]);
-        g_vrec.leaf_len = cert_len[0];
+    for (size_t i = 0; i < VREC_MAX_CERTS; i++) {
+        g_vrec.der_len[i] = 0;
+        if (i < n_certs && cert_len[i] <= sizeof(g_vrec.der[i])) {
+            memcpy(g_vrec.der[i], certs[i], cert_len[i]);
+            g_vrec.der_len[i] = cert_len[i];
+        }
     }
     snprintf(g_vrec.hostname, sizeof(g_vrec.hostname), "%s",
              hostname ? hostname : "(null)");
@@ -839,8 +852,8 @@ TEST(client_verifier_accepts_presented_chain)
     ASSERT_EQ(g_cli_tunnel_ready_called, 1);
     ASSERT_EQ(g_vrec.calls, 1);
     ASSERT_EQ(g_vrec.n_certs, 1);
-    ASSERT_EQ(g_vrec.leaf_len, der_len);
-    ASSERT_EQ(memcmp(g_vrec.leaf, der, der_len), 0);
+    ASSERT_EQ(g_vrec.der_len[0], der_len);
+    ASSERT_EQ(memcmp(g_vrec.der[0], der, der_len), 0);
     ASSERT_EQ(strcmp(g_vrec.hostname, "mqvpn-test"), 0); /* ServerName wins over host */
     ASSERT_EQ(g_vrec.ctx == &g_verifier_ctx_token, 1);
     ASSERT_EQ(g_cli_tunnel_closed_count, 0);
@@ -915,6 +928,53 @@ TEST(client_secure_without_verifier_rejects_self_signed_as_closed)
     ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
     ASSERT_EQ(g_cli_tls_fail_log_count, 0);
     loopback_teardown(&lb);
+}
+
+/* ── Two-tier chain: leaf ← intermediate ← (uncommitted, untrusted) root ── */
+
+static void
+use_chain_server_cert(void)
+{
+    g_lb_server_cert = TEST_CHAIN_CERT_FILE;
+    g_lb_server_key = TEST_CHAIN_KEY_FILE;
+}
+
+static void
+use_default_server_cert(void)
+{
+    g_lb_server_cert = NULL;
+    g_lb_server_key = NULL;
+}
+
+TEST(client_verifier_receives_chain_leaf_first)
+{
+    uint8_t leaf[4096], inter[4096];
+    size_t leaf_len = read_whole_file(TEST_CHAIN_LEAF_DER_FILE, leaf, sizeof(leaf));
+    size_t inter_len =
+        read_whole_file(TEST_CHAIN_INTERMEDIATE_DER_FILE, inter, sizeof(inter));
+    ASSERT_NE(leaf_len, 0);
+    ASSERT_NE(inter_len, 0);
+    memset(&g_vrec, 0, sizeof(g_vrec));
+    g_vrec.ret = 0;
+
+    /* The server serves fullchain (leaf + intermediate). The API contract is
+     * certs[0] = leaf, certs[1..] = intermediates as presented, nothing added
+     * (the root is in no store and is not part of the file). */
+    use_chain_server_cert();
+    loopback_t lb;
+    loopback_setup(&lb, tweak_accepting_verifier_with_sni);
+    loopback_pump_until(&lb, done_established, 10000);
+
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    ASSERT_EQ(g_vrec.calls, 1);
+    ASSERT_EQ(g_vrec.n_certs, 2);
+    ASSERT_EQ(g_vrec.der_len[0], leaf_len);
+    ASSERT_EQ(memcmp(g_vrec.der[0], leaf, leaf_len), 0);
+    ASSERT_EQ(g_vrec.der_len[1], inter_len);
+    ASSERT_EQ(memcmp(g_vrec.der[1], inter, inter_len), 0);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 0);
+    loopback_teardown(&lb);
+    use_default_server_cert();
 }
 
 static void
@@ -1713,6 +1773,7 @@ main(void)
     run_client_verifier_reject_signals_tls_once();
     run_client_secure_without_verifier_rejects_self_signed_as_closed();
     run_client_secure_without_verifier_uses_default_root_paths();
+    run_client_verifier_receives_chain_leaf_first();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
 
