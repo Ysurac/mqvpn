@@ -919,9 +919,9 @@ TEST(client_secure_without_verifier_rejects_self_signed_as_closed)
 
     /* Self-signed (X509 error 18) is rejected inside the library and never
      * reaches cb_cert_verify, so the platform sees the plain connection close
-     * after the drain. (An unknown issuer, error 20, takes xquic's legacy
-     * route through cb_cert_verify and is reported as MQVPN_ERR_TLS instead —
-     * see the comment on cb_cert_verify.) */
+     * after the drain. (An unknown issuer, error 20, does reach
+     * cb_cert_verify via xquic's legacy route and ends the same way — see
+     * client_secure_without_verifier_rejects_unknown_issuer_as_closed.) */
     ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
     ASSERT_EQ(g_cli_tunnel_ready_called, 0);
     ASSERT_EQ(g_cli_tunnel_closed_count, 1);
@@ -975,6 +975,49 @@ TEST(client_verifier_receives_chain_leaf_first)
     ASSERT_EQ(g_cli_tunnel_closed_count, 0);
     loopback_teardown(&lb);
     use_default_server_cert();
+}
+
+static void
+unknown_issuer_body(void)
+{
+    use_chain_server_cert();
+    loopback_t lb;
+    loopback_setup(&lb, tweak_secure_no_verifier);
+    loopback_pump_until(&lb, done_client_closed, 10000);
+
+    /* A chain whose root is in no store: unknown issuer (X509 error 20) is
+     * the one library-side failure xquic routes through cb_cert_verify. It
+     * must end exactly like the self-signed case above — one ERROR line from
+     * the verifier site, then the plain connection close — so the public
+     * reason does not depend on which X509 error the library hit. Only a
+     * configured verifier's rejection is MQVPN_ERR_TLS. */
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
+    ASSERT_EQ(g_cli_tls_fail_log_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_CLOSED);
+    loopback_teardown(&lb);
+    use_default_server_cert();
+}
+
+TEST(client_secure_without_verifier_rejects_unknown_issuer_as_closed)
+{
+    /* Pin the client's store to test.crt so the chain's root is provably
+     * absent whatever the host's /etc/ssl holds (same save/restore shape as
+     * client_secure_without_verifier_uses_default_root_paths). */
+    const char *prev = getenv("SSL_CERT_FILE");
+    char saved[PATH_MAX];
+    int had = 0;
+    if (prev) {
+        snprintf(saved, sizeof(saved), "%s", prev);
+        had = 1;
+    }
+    ASSERT_EQ(setenv("SSL_CERT_FILE", TEST_CERT_FILE, 1), 0);
+    unknown_issuer_body();
+    if (had)
+        setenv("SSL_CERT_FILE", saved, 1);
+    else
+        unsetenv("SSL_CERT_FILE");
 }
 
 static void
@@ -1774,6 +1817,7 @@ main(void)
     run_client_secure_without_verifier_rejects_self_signed_as_closed();
     run_client_secure_without_verifier_uses_default_root_paths();
     run_client_verifier_receives_chain_leaf_first();
+    run_client_secure_without_verifier_rejects_unknown_issuer_as_closed();
     run_server_reconnect_manual_connect();
     run_server_reconnect_manual_failure_rearm();
 

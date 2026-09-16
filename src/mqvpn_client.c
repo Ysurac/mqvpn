@@ -1213,13 +1213,17 @@ cli_effective_sni(const mqvpn_config_t *cfg)
 }
 
 /* xquic hands us the chain the server presented (leaf first, DER). Reached
- * on every handshake when a verifier is configured (APP_VERIFY). Without a
- * verifier, xquic's legacy path routes only an unknown issuer (X509 error 20)
- * here — so that case is reported as MQVPN_ERR_TLS from this site — while a
- * self-signed or otherwise invalid chain is rejected inside the library and
- * surfaces as the plain connection close (MQVPN_ERR_CLOSED). That split is
- * deliberate: the library-side reject has no mqvpn log line of its own, and
- * the release note documents both reasons.
+ * on every handshake when a verifier is configured (APP_VERIFY): the verifier
+ * is the sole judge, and its rejection is the one TLS failure the platform
+ * hears about immediately, as MQVPN_ERR_TLS. Without a verifier, xquic's
+ * legacy path routes only an unknown issuer (X509 error 20) here; every
+ * other library-side rejection (self-signed, expired, hostname mismatch) is
+ * refused inside the library and never reaches this callback. Both are one
+ * class of failure — the library verifying — so both surface the same way:
+ * this site only logs and refuses, and the platform sees the plain
+ * connection close (MQVPN_ERR_CLOSED) after the drain, exactly like the
+ * rejections that never get here. Reporting error 20 alone as MQVPN_ERR_TLS
+ * would make the public reason depend on which X509 error the library hit.
  * insecure never gets here: verify_mode is NONE and xquic installs no
  * callback. An empty chain is rejected by the ssl library before this point.
  * conn_user_data is always the cli_conn_t passed to xqc_h3_connect. */
@@ -1231,18 +1235,24 @@ cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t cer
     mqvpn_client_t *c = conn->client;
     const mqvpn_config_t *cfg = &c->config;
 
-    if (cfg->cert_verify_fn &&
-        cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
-                            cfg->cert_verify_ctx) == 0)
-        return 0;
+    if (cfg->cert_verify_fn) {
+        if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
+                                cfg->cert_verify_ctx) == 0)
+            return 0;
 
+        LOG_E(c, "TLS certificate verification failed");
+        /* Tell the platform now, once, instead of after the 3-PTO drain that
+         * follows the handshake alert; the conn-close notify that comes later
+         * is gated by tunnel_notified. Runs inside xqc_engine_main_logic: the
+         * platform handler must not re-enter libmqvpn (documented on
+         * mqvpn_tunnel_closed_fn). */
+        cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
+        return -1;
+    }
+
+    /* Library-side verification (no verifier): refuse and let the connection
+     * close report it, like every other library-side rejection. */
     LOG_E(c, "TLS certificate verification failed");
-    /* Tell the platform now, once, instead of after the 3-PTO drain that
-     * follows the handshake alert; the conn-close notify that comes later is
-     * gated by tunnel_notified. Runs inside xqc_engine_main_logic: the
-     * platform handler must not re-enter libmqvpn (documented on
-     * mqvpn_tunnel_closed_fn). */
-    cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
     return -1;
 }
 
