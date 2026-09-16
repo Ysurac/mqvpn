@@ -522,7 +522,15 @@ on_signal(evutil_socket_t sig, short what, void *arg)
     LOG_INF("received signal, shutting down...");
     p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
-    /* state_changed callback will call event_base_loopbreak on CLOSED */
+    /* Break the loop here rather than from the CLOSED transition:
+     * mqvpn_client_disconnect() returns early when the state is already
+     * CLOSED or IDLE, so a client that got there by itself delivers no
+     * transition, cb_state_changed never runs, and the process keeps ticking
+     * a dead client through every SIGTERM. svr_on_signal() already breaks the
+     * loop directly. Harmless when the disconnect did transition and
+     * cb_state_changed broke the loop already: loopbreak only sets a flag the
+     * loop reads once. */
+    event_base_loopbreak(p->eb);
 }
 
 
