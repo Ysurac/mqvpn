@@ -224,6 +224,15 @@ fail:
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
     p->tun_up = 0;
+    /* Host state, not wire state — the TUN, its addressing, the routes, the
+     * kill switch — so an in-process retry every ReconnectInterval seconds
+     * would fail identically forever and tell nobody; Reconnect covers the
+     * connection dropping, not a host the client cannot configure. Mark fatal
+     * so the event loop exits non-zero once the disconnect below reaches
+     * CLOSED, and leave it to the supervisor. Same as the Windows twin
+     * (platform_windows.c:232-238, its rc at :703). */
+    p->fatal_error = 1;
+    p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
 }
 
@@ -711,7 +720,8 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     LOG_INF("entering event loop...");
     event_base_dispatch(ctx.eb);
-    rc = 0;
+    rc = ctx.fatal_error ? 1 : 0;
+    if (rc) LOG_ERR("exiting: tunnel setup failed");
 
 cleanup:
     /* Library teardown FIRST, while every callback-owned platform object is
