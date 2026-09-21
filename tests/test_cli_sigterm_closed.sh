@@ -124,6 +124,11 @@ if ! grep -q 'received signal, shutting down' "$LOG"; then
     tail -20 "$LOG" >&2
     exit 1
 fi
+if [ "$status" -ne 0 ]; then
+    echo "FAIL: client crashed or exited non-zero after SIGTERM (status ${status})" >&2
+    tail -20 "$LOG" >&2
+    exit 1
+fi
 
 echo "PASS: SIGTERM stopped the CLOSED client in $((waited * 500))ms (exit ${status})"
 exit 0

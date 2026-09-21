@@ -456,7 +456,10 @@ on_shutdown_wake(evutil_socket_t fd, short what, void *arg)
     p->shutting_down = 1;
     LOG_INF("received Ctrl+C, shutting down...");
     mqvpn_client_disconnect(p->client);
-    /* state_changed callback will call event_base_loopbreak on CLOSED */
+    /* mqvpn_client_disconnect() emits no state transition when the client is
+     * already CLOSED or IDLE, so cb_state_changed cannot be the only loop-exit
+     * path. Mirror the POSIX signal handlers and break directly. */
+    event_base_loopbreak(p->eb);
 }
 
 static BOOL WINAPI
