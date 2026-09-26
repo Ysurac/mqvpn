@@ -28,9 +28,10 @@ import kotlin.coroutines.resumeWithException
  * loop, so a bounded join can never leave a use-after-free behind.
  *
  * If the engine thread dies from an uncaught Throwable, calls already queued
- * are not resumed and a later [stop] runs no finalizer; on Android an
- * uncaught throwable on any thread ends the process (the default handler),
- * as it did with the old coroutine poller.
+ * are not resumed, later calls are refused, a later [stop] runs no finalizer,
+ * and the waiter is left open (a reactor still holding a session's paths must
+ * not be freed); on Android an uncaught throwable on any thread ends the
+ * process (the default handler), as it did with the old coroutine poller.
  */
 class MqvpnPoller(
     private val waiter: Waiter,
@@ -90,7 +91,9 @@ class MqvpnPoller(
             // catches), nothing may be offered to a queue this thread no
             // longer drains: later calls throw instead of suspending forever.
             synchronized(lock) { accepting = false }
-            waiter.close()
+            // Only once the finalizer ran: freeing a reactor that still holds
+            // paths trips its Debug assert before the throwable is reported.
+            if (finished) waiter.close()
         }
     }
 
@@ -151,9 +154,10 @@ class MqvpnPoller(
             thread
         }
         // Until the finalizer has run the loop keeps the waiter open, so this
-        // wake reaches it. If the thread already ran it and exited, or died,
-        // the waiter is closed and the wake is a no-op (the Waiter contract;
-        // NativeReactorWaiter's wake takes the lock its close() takes).
+        // wake reaches it. If the thread already ran it and exited, the waiter
+        // is closed and the wake is a no-op (the Waiter contract;
+        // NativeReactorWaiter's wake takes the lock its close() takes). If the
+        // thread died instead, the waiter was left open and nobody hears the wake.
         waiter.wake()
         if (t != null && t !== Thread.currentThread()) {
             t.join(JOIN_TIMEOUT_MS)

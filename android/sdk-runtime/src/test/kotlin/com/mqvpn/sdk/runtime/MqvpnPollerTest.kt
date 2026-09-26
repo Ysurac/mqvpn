@@ -3,11 +3,13 @@
 
 package com.mqvpn.sdk.runtime
 
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -184,17 +186,33 @@ class MqvpnPollerTest {
         val waiter = ParkWaiter()
         val p = poller(waiter)
         p.start()
+        val engine = runBlocking { withTimeout(2_000) { p.call { Thread.currentThread() } } }
         val e = assertThrows(OutOfMemoryError::class.java) {
             runBlocking { withTimeout(2_000) { p.call<Unit> { throw OutOfMemoryError("test") } } }
         }
         assertEquals("test", e.message)
         // The Error killed the engine thread (fatal by design); a later call is refused, not stranded.
-        // The loop's finally stops accepting, then closes the waiter, on that thread.
-        assertTrue("engine thread exited", waiter.closed.await(2, TimeUnit.SECONDS))
-        val e2 = assertThrows(IllegalStateException::class.java) {
-            runBlocking { withTimeout(2_000) { p.call { 1 } } }
+        // The loop's finally stops accepting; a call that lands before it is never run, so it times
+        // out and is retried. Bounded: no refusal within ~2 s fails the test.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        var refusal: ExecutorStoppedException? = null
+        while (refusal == null && System.nanoTime() < deadline) {
+            try {
+                runBlocking { withTimeout(100) { p.call { } } }
+                fail("a call after the Error must not run")
+            } catch (stopped: ExecutorStoppedException) {
+                refusal = stopped
+            } catch (early: TimeoutCancellationException) {
+                // landed before the loop's finally, so it never ran: retry
+            }
         }
-        assertEquals("Poller stopped", e2.message)
+        assertNotNull("a call after the Error is refused within 2 s", refusal)
+        assertEquals("Poller stopped", refusal!!.message)
+        // The waiter is left open: a reactor that still holds a session's paths must not be freed.
+        engine.join(2_000)
+        assertFalse("engine thread exited", engine.isAlive)
+        assertNull("waiter must not be closed when an Error ends the loop", waiter.closedOn)
+        assertEquals("waiter must not be closed when an Error ends the loop", 1L, waiter.closed.count)
     }
 
     @Test
