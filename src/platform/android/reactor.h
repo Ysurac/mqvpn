@@ -79,16 +79,18 @@ int mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
  * production caller closes an fd the reactor still polls. */
 mqvpn_path_handle_t mqvpn_android_reactor_take_bad_fd(mqvpn_android_reactor_t *r);
 
-/* Reserve an entry, then build a posix bind ctx on the BORROWED fd (udp_gso =
+/* Pick a FREE entry, which stays unmarked (still FREE) until the library
+ * returns, then build a posix bind ctx on the BORROWED fd (udp_gso =
  * gso_policy, udp_gro = gro_policy, 7 MiB buffer request, tag = iface) and
  * register it with mqvpn_client_add_path(). Returns the library handle
  * (>= 0; the entry is ATTACHED whatever the activation outcome was — the
  * ctx is library-owned and the path is kept), or -1: table full (nothing
  * built), bind construction failure, or the library refusing the path (the
- * ctx is freed here, the reservation released). The fd is never touched on
- * failure: the caller closes it. A path_event the library fires synchronously
- * from inside add_path must not call back into the reactor for this handle:
- * the entry becomes ATTACHED only after the library returns. */
+ * ctx is freed here, the entry left FREE). The fd is never touched on
+ * failure: the caller closes it. No reactor call may re-enter from a callback
+ * the library fires synchronously inside add_path (a path_event, say): the
+ * entry is not marked yet, so a nested add_path would pick it again and a
+ * call for this handle would not find it. */
 mqvpn_path_handle_t mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r,
                                                    mqvpn_client_t *client, int fd,
                                                    const char *iface, int gso_policy,

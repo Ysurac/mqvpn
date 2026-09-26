@@ -233,7 +233,7 @@ mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
     bopts.struct_size = sizeof(bopts);
     bopts.udp_gso = gso_policy;
     bopts.udp_gro = gro_policy;
-    bopts.socket_buf_bytes = 0; /* 7 MiB request, what add_path_fd applied */
+    bopts.socket_buf_bytes = 0; /* 0 = the bind's default 7 MiB request */
     snprintf(bopts.tag, sizeof(bopts.tag), "%s", e->tag);
 
     void *ctx = NULL;
@@ -260,8 +260,8 @@ mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
     e->ctx = ctx;
     if (outcome != MQVPN_ADD_PATH_OK) {
         /* The ctx is library-owned now and the path is kept: the library's
-         * retry timer or the platform's next Lost resolves it (same as the
-         * old add_path_fd and iOS). */
+         * retry timer or the platform's next Lost resolves it (the same
+         * policy as the iOS PathBinder). */
         LOG_WRN("android-reactor: path[%" PRId64 "] (%s) activation outcome=%d, kept", h,
                 e->tag, (int)outcome);
     }

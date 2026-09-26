@@ -12,8 +12,10 @@ package com.mqvpn.sdk.native_
  * This is an internal API — use sdk-core's public classes instead.
  *
  * Thread safety: every client and reactor method (clientConnect, clientTick,
- * reactorWait, reactorAddPath, ...) must be called from the engine thread
- * (the MqvpnPoller thread); only [reactorWake] may be called from any thread.
+ * reactorWait, reactorAddPath, reactorFree, ...) must be called from the
+ * engine thread (the MqvpnPoller thread), with two exceptions: [reactorNew]
+ * runs before that thread exists (the service creates the reactor on the main
+ * thread, in onCreate), and [reactorWake] may be called from any thread.
  *
  * Transport (ABI 3): the library owns no socket. Kotlin creates and closes
  * the path fds; the reactor (reactorNew) wraps each one in the bundled POSIX

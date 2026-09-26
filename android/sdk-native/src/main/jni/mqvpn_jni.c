@@ -7,8 +7,10 @@
  * Maps NativeBridge.kt external funs to libmqvpn C API.
  *
  * Thread model: every client and reactor method (clientConnect, clientTick,
- * reactorWait, reactorAddPath, ...) must be called from the single engine
- * thread the Kotlin MqvpnPoller runs; only reactorWake may come from any
+ * reactorWait, reactorAddPath, reactorFree, ...) must be called from the
+ * single engine thread the Kotlin MqvpnPoller runs, with two exceptions:
+ * reactorNew runs before that thread exists (the service creates the reactor
+ * on the main thread, in onCreate), and reactorWake may come from any
  * thread. There is one engine thread per service instance, and two may
  * overlap while a service is replaced — hence the locked per-client context
  * table below. Callbacks from libmqvpn fire on the client's engine thread
@@ -55,11 +57,13 @@
 #define ANDROID_UDP_GSO 1
 #define ANDROID_UDP_GRO 1
 
-/* Global library log sink. Every mqvpn_log() line — the bind's udp-gso: /
- * udp-gro: markers and WARNs, the reactor, path_state_machine, auth — used to
- * go to the app process's stderr, which reaches nobody. Installed once in
- * JNI_OnLoad; the tag is "mqvpn" (this file's own lines keep LOG_TAG). Runs
- * on whichever thread logged; __android_log_print is thread-safe. */
+/* Global library log sink. Every mqvpn_log() line (on Android: the bind's
+ * udp-gso: / udp-gro: markers and WARNs, the reactor, the hybrid lwIP glue)
+ * used to go to the app process's stderr, which reaches nobody. Lines about
+ * one client (the path state machine's included) go through that client's
+ * log callback (jni_log) instead. Installed once in JNI_OnLoad; the tag is
+ * "mqvpn" (this file's own lines keep LOG_TAG). Runs on whichever thread
+ * logged; __android_log_print is thread-safe. */
 static void
 jni_global_log_sink(mqvpn_log_level_t level, const char *msg, void *ctx)
 {

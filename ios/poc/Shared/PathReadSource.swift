@@ -70,7 +70,7 @@ final class PathReadSource {
                 fence.leave()
             }
             if !accepted {
-                assertionFailure("release hop refused before destroy")
+                assertionFailure("release hop refused (unreachable: destroy follows the fence)")
                 close(fd)
                 fence.leave()
             }
