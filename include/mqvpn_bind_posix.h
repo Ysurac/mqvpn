@@ -60,6 +60,19 @@ typedef struct {
  * succeeds with gro_enabled == 0 and the errno readable below. */
 MQVPN_API int mqvpn_bind_posix_path_new(int fd, const mqvpn_bind_posix_opts_t *opts,
                                         void **out_ctx);
+/* The table's `send`, for a call carrying n datagrams (at most 32 are
+ * attempted per call; the return value is the accepted prefix):
+ *   Linux: n == 1 is one plain sendto(). For n > 1, when GSO is allowed
+ *   (opts.udp_gso and kernel support), one sendmsg() per run of equal-sized
+ *   datagrams (the last may be shorter), carrying UDP_SEGMENT when the run
+ *   holds more than one; otherwise one sendmmsg(). A GSO-class error on a
+ *   UDP_SEGMENT send (the kernel or NIC rejecting it) turns GSO off for this
+ *   ctx for the rest of its life and, if nothing of the call had been sent
+ *   yet, retries the batch through sendmmsg() within the same call. The
+ *   core passes n > 1 only here, and only with UdpGso enabled.
+ *   Other systems: one sendto() per datagram, within the same call.
+ * EINTR is retried. When nothing is accepted: EAGAIN / EWOULDBLOCK ->
+ * MQVPN_TX_WOULD_BLOCK, any other error -> MQVPN_TX_FAILED. */
 MQVPN_API const mqvpn_path_ops_t *mqvpn_bind_posix_path_ops(void);
 /* Destructor for a ctx the library never took ownership of (add_path failed).
  * Identical to ops.release; never closes the fd. */
@@ -100,6 +113,11 @@ MQVPN_API int mqvpn_bind_posix_path_drain(void *ctx, mqvpn_client_t *client,
 /* ── Server shared transport (single fd) ── */
 MQVPN_API int mqvpn_bind_posix_server_new(int fd, const mqvpn_bind_posix_opts_t *opts,
                                           void **out_ctx);
+/* The table's `send` behaves as the path table's above, with the GSO
+ * fallback kept per scope: a GSO-class error turns GSO off for that
+ * connection's scope until its release_scope(). Scope 0 keeps no state, so
+ * its fallback lasts for the one call. If the scope table cannot grow, GSO is
+ * turned off for every scope. */
 MQVPN_API const mqvpn_server_transport_ops_t *mqvpn_bind_posix_server_ops(void);
 MQVPN_API void mqvpn_bind_posix_server_free(void *ctx);
 MQVPN_API int mqvpn_bind_posix_server_gro_enabled(const void *ctx);

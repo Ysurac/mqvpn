@@ -140,7 +140,10 @@ typedef struct {
  * the implementation can keep per-destination sticky state (e.g. GSO
  * fallback) with a lifetime equal to the QUIC connection. Scope 0 =
  * transient (pre-accept / stateless reset): the transport MUST NOT create
- * persistent state for it and release_scope(0) is never called. */
+ * persistent state for it and release_scope(0) is never called. Nonzero
+ * scopes are issued monotonically, one per accepted connection, and never
+ * reused within a server's lifetime (the counter refuses new connections
+ * rather than wrap). */
 typedef uint64_t mqvpn_server_tx_scope_t;
 
 typedef struct {
@@ -863,7 +866,7 @@ MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t
 
 /*
  * Platform reports that a path is no longer reachable via its current transport
- * (carrier loss, RTM_DELLINK, NotifyIpInterfaceChange ifDown, etc).
+ * (carrier loss, RTM_DELLINK, an adapter going down, etc).
  *
  * Library transitions the slot to PATH_CLOSED_DROPPED (via EVENT_PLATFORM_DROP).
  * The platform must stop its I/O, close the native socket and call
@@ -896,10 +899,11 @@ MQVPN_API int mqvpn_client_on_platform_path_released(mqvpn_client_t *client,
                                                      mqvpn_path_handle_t path);
 
 /*
- * Re-activate a DEGRADED or CLOSED path using the existing transport.
+ * Re-activate a path using its existing transport.
  * Called by the platform layer when it detects the path is viable again
- * (e.g., netlink RTM_NEWADDR on Linux, NotifyUnicastIpAddressChange on
- * Windows keyed by NET_LUID, NWPathMonitor on macOS for Wi-Fi/Ethernet flap).
+ * (e.g., netlink link/address events on Linux and a PF_ROUTE socket on
+ * macOS, each backed by a 3 s timer; a 3 s poll on Windows, which has no
+ * change notification wired).
  *
  * NOT applicable to platforms whose APIs invalidate path identity on loss
  * and deliver a fresh handle on recovery (Android ConnectivityManager Network,
@@ -908,7 +912,10 @@ MQVPN_API int mqvpn_client_on_platform_path_released(mqvpn_client_t *client,
  * platforms should call remove_path() + a new add_path() with a fresh transport
  * instead.
  *
- * Preconditions: !xquic_path_live && transport_attached && (DEGRADED || CLOSED).
+ * Preconditions: the connection is established with multipath; the path
+ * has no live xquic path and its transport is still attached (never after
+ * drop_path()/remove_path()); and it is DEGRADED, CLOSED, or PENDING while it
+ * waits for a retry (internally CREATE_WAIT).
  * On success: xquic creates a new path (validation is async). The library
  * recovery timer is cancelled. Retry counter resets after 30s stability.
  *
@@ -947,6 +954,12 @@ MQVPN_API mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *clie
 
 MQVPN_API int mqvpn_client_get_stats(const mqvpn_client_t *client, mqvpn_stats_t *out);
 
+/* Lists every path slot the client has used, in slot order, CLOSED ones
+ * included, each with the handle of its current incarnation; writes at most
+ * max_paths entries and sets *n_paths to the number written. A handle names
+ * one incarnation only: add_path() may recycle a fully released slot for a
+ * new path under a new handle (see mqvpn_client_add_path), after which the
+ * old handle is simply absent from the list. */
 MQVPN_API int mqvpn_client_get_paths(const mqvpn_client_t *client, mqvpn_path_info_t *out,
                                      int max_paths, int *n_paths);
 
@@ -984,7 +997,9 @@ MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
  * server's life.
  * Returns MQVPN_ERR_INVALID_ARG (server/ops NULL, struct_size not covering
  * `send`, send NULL, or a non-NULL local_addr whose local_addrlen exceeds
- * the library's sockaddr_storage) without touching the offered ctx.
+ * the library's sockaddr_storage) without touching the offered ctx. The
+ * arguments are checked before the once-only / state check, so a malformed
+ * table is MQVPN_ERR_INVALID_ARG even on a second call.
  * local_addr (nullable) is the bound address reported to xquic;
  * local_addrlen is ignored when it is NULL.
  */
