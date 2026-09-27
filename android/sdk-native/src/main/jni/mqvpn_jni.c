@@ -32,6 +32,7 @@
 #include <time.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -57,6 +58,14 @@
 #define ANDROID_UDP_GSO 1
 #define ANDROID_UDP_GRO 1
 
+/* Level filter of the global sink below. The library's own global level is
+ * set to DEBUG once, in JNI_OnLoad, before any thread can log, and never
+ * written again (it is a plain variable); the filter that follows
+ * MqvpnConfig.logLevel is this atomic, stored by configSetLogLevel. Two
+ * sessions that overlap while a service is replaced share it: the later
+ * setting wins. */
+static _Atomic int g_global_log_threshold = MQVPN_LOG_INFO;
+
 /* Global library log sink. Every mqvpn_log() line (on Android: the bind's
  * udp-gso: / udp-gro: markers and WARNs, the reactor, the hybrid lwIP glue)
  * used to go to the app process's stderr, which reaches nobody. Lines about
@@ -68,6 +77,8 @@ static void
 jni_global_log_sink(mqvpn_log_level_t level, const char *msg, void *ctx)
 {
     (void)ctx;
+    if ((int)level < atomic_load_explicit(&g_global_log_threshold, memory_order_relaxed))
+        return;
     int prio;
     switch (level) {
     case MQVPN_LOG_DEBUG: prio = ANDROID_LOG_DEBUG; break;
@@ -245,6 +256,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     (void)reserved;
     g_jvm = vm;
     mqvpn_log_set_sink(jni_global_log_sink, NULL);
+    mqvpn_log_set_level(MQVPN_LOG_DEBUG); /* the sink filters: g_global_log_threshold */
 
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) {
@@ -669,8 +681,13 @@ JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
 {
     (void)env;
     (void)thiz;
-    return mqvpn_config_set_log_level((mqvpn_config_t *)(intptr_t)cfg,
-                                      (mqvpn_log_level_t)level);
+    int rc = mqvpn_config_set_log_level((mqvpn_config_t *)(intptr_t)cfg,
+                                        (mqvpn_log_level_t)level);
+    /* The same level for the process-wide lines (the bind, the reactor, the
+     * lwIP glue), which do not belong to any one client. */
+    if (rc == MQVPN_OK)
+        atomic_store_explicit(&g_global_log_threshold, (int)level, memory_order_relaxed);
+    return rc;
 }
 
 /* configSetMultipath(cfg, enable) → int */
