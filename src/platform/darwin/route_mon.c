@@ -95,11 +95,8 @@ netmon_platform_pre_readd(platform_ctx_t *p, const char *ifname)
 }
 
 int
-netmon_platform_pre_reactivate(platform_ctx_t *p, int slot, const char *ifname)
+netmon_platform_pre_reactivate(platform_ctx_t *p, platform_path_t *s, const char *ifname)
 {
-    if (p->path_mgr.paths[slot].fd < 0)
-        return -1; /* CLOSED (dropped) slot: no socket to pin */
-
     /* Lesson from the Windows port: interface re-enable can renumber the ifindex,
      * and IP_BOUND_IF/IPV6_BOUND_IF pin by index — a stale pin would
      * silently send traffic out the wrong interface on the very fd
@@ -110,7 +107,7 @@ netmon_platform_pre_reactivate(platform_ctx_t *p, int slot, const char *ifname)
      * routeless or ineligible ifaces. If the pin fails, skip reactivate
      * for this slot; the recovery timer / next event will retry. */
     sa_family_t af = (sa_family_t)p->server_addr.ss_family;
-    if (darwin_pin_socket_to_iface(p->path_mgr.paths[slot].fd, ifname, af) < 0) {
+    if (darwin_pin_socket_to_iface(s->fd, ifname, af) < 0) {
         LOG_WRN("routemon: reactivate %s skipped: iface pin failed", ifname);
         return -1;
     }
@@ -281,8 +278,8 @@ route_resolve_ifname(platform_ctx_t *p, const struct sockaddr_dl *sdl, unsigned 
     }
     if (index != 0 && if_indextoname(index, ifname)) return 1;
 
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        const char *tracked_ifname = p->path_mgr.paths[i].iface;
+    for (int i = 0; i < p->n_paths; i++) {
+        const char *tracked_ifname = p->paths[i].iface;
         if (tracked_ifname[0] == '\0') continue;
         /* Only a definite ENXIO ("no such interface") counts as gone:
          * if_nametoindex is getifaddrs-backed on Darwin and can fail for
@@ -426,8 +423,8 @@ route_resync(platform_ctx_t *p)
         return;
     }
 
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        const char *ifname = p->path_mgr.paths[i].iface;
+    for (int i = 0; i < p->n_paths; i++) {
+        const char *ifname = p->paths[i].iface;
         if (ifname[0] == '\0') continue;
 
         /* Presence + admin state from the one snapshot. */

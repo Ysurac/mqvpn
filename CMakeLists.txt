@@ -543,9 +543,15 @@ if(BUILD_TESTING)
         ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(test_bind_winsock ws2_32)
     add_test(NAME test_bind_winsock COMMAND test_bind_winsock)
+    # Re-add decision shared with the POSIX path monitors (header only; own
+    # checks, not assert(), so the Release CI build is fine).
+    add_executable(test_path_readd tests/test_path_readd.c)
+    target_include_directories(test_path_readd PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME test_path_readd COMMAND test_path_readd)
     if(MSVC)
         # same gate as the product build; target-scoped options are not inherited
-        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock)
+        foreach(t test_cert_identity test_cert_verify_win test_bind_winsock test_path_readd)
             target_compile_options(${t} PRIVATE /WX /utf-8)
             target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
         endforeach()
@@ -567,6 +573,7 @@ add_executable(mqvpn
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/posix/netmon_common.c
+    src/platform/posix/path_table.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
     src/platform/darwin/dns.c
@@ -606,6 +613,7 @@ add_library(mqvpn_darwin_platform OBJECT
     src/platform/darwin/platform_darwin.c
     src/platform/darwin/route_mon.c
     src/platform/posix/netmon_common.c
+    src/platform/posix/path_table.c
     src/platform/darwin/tun_utun.c
     src/platform/darwin/routing.c
     src/platform/darwin/dns.c
@@ -785,6 +793,7 @@ add_executable(mqvpn
     src/platform/linux/platform_linux.c
     src/platform/linux/netlink_mon.c
     src/platform/posix/netmon_common.c
+    src/platform/posix/path_table.c
     src/platform/linux/route_check.c
     src/platform/linux/control_socket.c
     src/platform/posix/status.c
@@ -894,7 +903,9 @@ if(BUILD_TESTING)
     # gate + PTB token bucket, extracted from mqvpn_client.c/mqvpn_server.c) —
     # links reorder_tx.c (for the peek it wraps) + icmp.c (for the PTB send).
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate)
+    # Re-add decision shared by the desktop path monitors (header only).
+    add_executable(test_path_readd tests/test_path_readd.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_status test_path_state_machine test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of

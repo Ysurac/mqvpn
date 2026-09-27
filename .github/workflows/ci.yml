@@ -318,6 +318,16 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_route_gate_test.sh
 
+      # Timer-driven re-add of a path whose library slot another path's
+      # re-add recycled: its old handle is gone from get_paths(), and its
+      # route returns with no netlink event, so only the recovery timer can
+      # bring it back.
+      - name: E2E re-add after library slot recycle test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_readd_recycled_slot_test.sh
+
       # Reorder shim end to end (~30s): the unit tests cover the engine in
       # isolation; only this suite exercises the client<->server negotiation
       # wiring (advertise marker -> echo -> stamping) plus the INI/profile
@@ -1017,10 +1027,11 @@ jobs:
       - name: Certificate verifier tests
         run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
 
-      # Bundled Winsock transport (seam + real loopback sockets); own checks,
-      # not assert(), so Release is fine.
-      - name: Winsock transport tests
-        run: ctest --test-dir build -C Release -R "^test_bind_winsock$" --no-tests=error --output-on-failure
+      # Bundled Winsock transport (seam + real loopback sockets) and the
+      # re-add decision shared with the POSIX path monitors; own checks, not
+      # assert(), so Release is fine.
+      - name: Winsock transport and path re-add tests
+        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd)$" --no-tests=error --output-on-failure
 
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire
