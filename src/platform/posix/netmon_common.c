@@ -613,10 +613,12 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
         if (netmon_iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) continue;
         if (iface_has_route_to_server(ifname, &p->server_addr) == 0) {
             /* First block + every 10th (≈30s at the 3s poll). The message
-             * wording is grepped by scripts/ci_e2e/run_route_gate_test.sh —
-             * rewording it silently disables that e2e's gate check (its
-             * GATE_PATTERN hardcodes the "netlink:" prefix, so only the
-             * Linux rendering is covered today). */
+             * wording is grepped by scripts/ci_e2e/run_route_gate_test.sh and
+             * run_readd_recycled_slot_test.sh. Each needs the first block's
+             * line within its 15s / 10s wait and fails without it, so
+             * rewording the line, or not logging the first block, fails both
+             * e2es. Their GATE_PATTERNs hardcode the "netlink:" prefix, so
+             * only the Linux rendering is covered today. */
             if (s->route_gate_blocked++ % 10 == 0)
                 LOG_WRN("%s: %s has a usable address but no route to "
                         "the server — re-add deferred until a route appears",
@@ -627,9 +629,14 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
 
         /* netmon_try_readd_removed_path scans by ifname, finds this slot
          * through the same decision, and either succeeds (resets the
-         * counter) or fails through recovery_rollback (which bumps it).
-         * Multiple slots sharing one ifname are handled by try_readd's
-         * internal loop. */
+         * counter) or fails. Only failures after add_path() has returned a
+         * handle count toward the limit: a failed activation goes through
+         * recovery_rollback (transient bumps the counter, permanent
+         * saturates it), and a failed read-event arm bumps it directly.
+         * Every earlier exit (the gates, get_paths, socket open, iface pin,
+         * transport ctx, add_path() < 0) leaves it untouched, so those never
+         * exhaust the budget. Multiple slots sharing one ifname are handled
+         * by try_readd's internal loop. */
         if (netmon_try_readd_removed_path(p, ifname))
             LOG_INF("%s: timer re-added path %s after carrier-up failure", netmon_log_tag,
                     ifname);
