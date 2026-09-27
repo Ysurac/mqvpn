@@ -61,7 +61,7 @@ typedef struct platform_path {
     struct event *ev;           /* read event; non-NULL implies a socket */
     mqvpn_path_handle_t handle; /* last successfully registered incarnation */
     void *bind_ctx;             /* current transport ctx; NULL once finalised */
-    int recover_failures;       /* consecutive re-add failures; reset on reconnect */
+    int recover_failures;       /* failed re-adds in a row; reset on success/reconnect */
     /* Route-gate log throttle. Intentionally NOT reset on reconnect — it
      * self-resets in the reconciler when a route reappears (POSIX canon:
      * netmon_common.c recover_dropped_paths_cb); a stale value only delays
@@ -154,7 +154,9 @@ void win_cleanup_killswitch(platform_win_ctx_t *p);
 int win_setup_dns(platform_win_ctx_t *p);
 void win_cleanup_dns(platform_win_ctx_t *p);
 
-/* platform_windows.c (reverse-referenced by net_mon.c) */
+/* platform_windows.c (net_mon.c calls win_pin_socket_to_iface and
+ * schedule_next_tick; on_socket_read is the read callback
+ * platform_path_arm() installs) */
 int win_pin_socket_to_iface(SOCKET sock, const char *friendly_name, ADDRESS_FAMILY af);
 void schedule_next_tick(platform_win_ctx_t *p);
 void on_socket_read(evutil_socket_t fd, short what, void *arg);
@@ -194,7 +196,8 @@ void platform_path_fill_desc(const platform_win_ctx_t *p, const platform_path_t 
  * 0, or -1 with nothing armed. */
 int platform_path_arm(platform_path_t *s);
 
-/* event_del only — for use inside the slot's own read callback. */
+/* event_del only — for use inside the slot's own read callback; the event is
+ * freed by platform_path_close_socket() / platform_paths_close_all(). */
 void platform_path_disarm(platform_path_t *s);
 
 /* Free the slot's read event, closesocket, INVALID_SOCKET. The only place a

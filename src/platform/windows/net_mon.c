@@ -15,7 +15,8 @@
  * backstop, matching the Linux split.
  *
  * This file contains the Layer B teardown/rollback primitives (drop /
- * recovery-socket create / register / rollback, sibling-cloned from the
+ * re-add socket open / register / rollback, and the release tail
+ * release_transport / fatal_stop, sibling-cloned from the
  * POSIX canon — formerly netlink_mon.c, now shared as
  * src/platform/posix/netmon_common.c), the three Layer C probe primitives
  * (iface_is_up_and_running / iface_has_usable_ip /
@@ -680,10 +681,9 @@ reconcile_all(platform_win_ctx_t *p)
         /* recovery backpressure gate — reactivate/re-add ONLY */
         if (s->recover_failures >= PATH_RECOVER_FAILURE_LIMIT) continue;
         if (s->sock != INVALID_SOCKET) {
-            /* CLOSED_RECOVERABLE slots (with a socket) are normally
-             * reactivated by one-shot RTM_NEWADDR/NEWLINK events. A route
-             * appearing emits neither, and the route gate may have swallowed
-             * the original event — so the timer must also retry reactivate.
+            /* CLOSED_RECOVERABLE slots (with a socket) are reactivated by
+             * this poll: Windows has no link/address event source in this
+             * phase (see the file comment) that could trigger a reactivate.
              * try_reactivate_by_ifname re-checks lib state and the lib
              * rejects wrong states with INVALID_STATE, so this is
              * idempotent. */
@@ -728,8 +728,14 @@ reconcile_all(platform_win_ctx_t *p)
 
         /* try_readd_removed_path scans by ifname, finds this slot through
          * the same decision, and either succeeds (resets the counter) or
-         * fails through recovery_rollback (which bumps it). Multiple slots
-         * sharing one ifname are handled by try_readd's internal loop. */
+         * fails. Only failures after add_path() has returned a handle count
+         * toward the limit: a failed activation goes through
+         * recovery_rollback (transient bumps the counter, permanent
+         * saturates it), and a failed read-event arm bumps it directly.
+         * Every earlier exit (the gates, get_paths, socket open, iface pin,
+         * transport ctx, add_path() < 0) leaves it untouched, so those never
+         * exhaust the budget. Multiple slots sharing one ifname are handled
+         * by try_readd's internal loop. */
         if (try_readd_removed_path(p, ifname))
             LOG_INF("netmon: timer re-added path %s after carrier-up failure", ifname);
     }
