@@ -83,7 +83,7 @@ mqvpn_server_on_socket_recv(mqvpn_server_t *server, const uint8_t *pkt, size_t l
 
 /* ── helpers ── */
 
-/* Non-blocking UDP socket on 127.0.0.1:<ephemeral>, like path_mgr's. */
+/* Non-blocking UDP socket on 127.0.0.1:<ephemeral>, like a platform path socket. */
 static int
 udp_socket(struct sockaddr_in *addr)
 {

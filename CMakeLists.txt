@@ -459,7 +459,6 @@ add_executable(mqvpn
     src/platform/windows/net_mon.c
     src/platform/windows/cert_identity.c
     src/platform/windows/cert_verify.c
-    src/path_mgr.c
     src/config.c
     src/compat/getopt.c
 )
@@ -580,7 +579,6 @@ add_executable(mqvpn
     src/platform/darwin/killswitch.c
     src/platform/posix/status.c
     src/platform/posix/dns_common.c
-    src/path_mgr.c
     src/config.c
 )
 
@@ -802,7 +800,6 @@ add_executable(mqvpn
     src/platform/linux/tun.c
     src/platform/linux/dns.c
     src/platform/posix/dns_common.c
-    src/path_mgr.c
     src/config.c
 )
 

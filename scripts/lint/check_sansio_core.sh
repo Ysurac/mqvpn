@@ -52,9 +52,9 @@
 #   * It is a token gate, not a semantic one: I/O reached through a macro or
 #     a function pointer is invisible to it.
 #   * The subject is the library target only. Files that belong to the CLI
-#     targets - e.g. src/path_mgr.c, the platform's socket factory, and
-#     src/config.c - are outside "core" by construction and are not scanned.
-#     This is not a whole-src/ sweep.
+#     targets - e.g. src/platform/posix/path_table.c (the platform's socket
+#     factory) and src/config.c - are outside "core" by construction and are
+#     not scanned. This is not a whole-src/ sweep.
 #   * The header check matches the literal spellings `int fd` and `int tun_fd`.
 #     A descriptor smuggled in as `int *fd`, `int sock` or inside a struct is
 #     not caught; only review is.
