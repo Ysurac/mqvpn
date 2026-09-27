@@ -84,8 +84,8 @@ darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af)
  *  libmqvpn callbacks
  * ================================================================ */
 
-/* Forward declarations for event handlers (on_socket_read is declared in
- * platform_internal.h — shared with route_mon.c) */
+/* Forward declarations for event handlers (on_socket_read, the read callback
+ * platform_path_arm() installs, is declared in platform_internal.h) */
 static void on_tun_read(evutil_socket_t fd, short what, void *arg);
 
 static void

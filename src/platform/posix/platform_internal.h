@@ -146,8 +146,9 @@ struct platform_ctx {
 #define PLATFORM_FATAL_TUNNEL_SETUP 1
 #define PLATFORM_FATAL_PATH_RELEASE 2
 
-/* platform_{linux,darwin}.c — reactor entry points shared with
- * netlink_mon.c (Linux) / route_mon.c (Darwin) */
+/* platform_{linux,darwin}.c (netmon_common.c, and netlink_mon.c on Linux or
+ * route_mon.c on Darwin, call schedule_next_tick; on_socket_read is the read
+ * callback platform_path_arm() installs) */
 void on_socket_read(evutil_socket_t fd, short what, void *arg);
 void schedule_next_tick(platform_ctx_t *p);
 
