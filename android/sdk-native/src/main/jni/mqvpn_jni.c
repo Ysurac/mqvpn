@@ -1138,6 +1138,17 @@ JNI_FN(reactorPathReleased)(JNIEnv *env, jobject thiz, jlong reactor, jlong clie
         (mqvpn_path_handle_t)pathHandle);
 }
 
+/* closeFd(fd) → 0, or the errno of a failed close(2) (NativeBridge.closeFd
+ * says why the close is untagged). Not retried on EINTR: Linux has released
+ * the fd by then. */
+JNIEXPORT jint JNICALL
+JNI_FN(closeFd)(JNIEnv *env, jobject thiz, jint fd)
+{
+    (void)env;
+    (void)thiz;
+    return close(fd) == 0 ? 0 : errno;
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
  *  I/O feed (TUN only — path receive happens inside reactorWait)
  * ════════════════════════════════════════════════════════════════════════════ */

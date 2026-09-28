@@ -198,6 +198,15 @@ object NativeBridge {
     /** Returned by [reactorPathReleased] on ledger corruption (MQVPN_REACTOR_POISONED). */
     const val REACTOR_POISONED: Int = -100
 
+    /**
+     * close(2) on a path fd the SDK owns → 0, or the errno. An untagged close,
+     * like the Os.close() it replaces: an fd something else already closed
+     * gives EBADF (while its number is unused), where
+     * ParcelFileDescriptor.adoptFd(fd).close() would abort the process on
+     * API 30+ (fdsan double close). Any thread.
+     */
+    external fun closeFd(fd: Int): Int
+
     // ---- I/O feed (TUN only; path receive happens inside reactorWait) ----
 
     /** mqvpn_client_on_tun_packet(client, pkt, offset, len) */
