@@ -52,7 +52,13 @@ object NativeBridge {
     /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN) */
     external fun configSetScheduler(cfg: Long, scheduler: Int): Int
 
-    /** mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR) */
+    /**
+     * mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR). On success it
+     * also stores the process-wide threshold of the library's global log lines
+     * (such as the UDP transport's and the reactor's, in logcat under tag
+     * "mqvpn"), which outlives [configFree]: the last successful call decides
+     * it, so with two tunnels the one created last does.
+     */
     external fun configSetLogLevel(cfg: Long, level: Int): Int
 
     /** mqvpn_config_set_multipath(cfg, enable) */
