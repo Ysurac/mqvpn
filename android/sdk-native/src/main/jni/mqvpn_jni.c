@@ -8,10 +8,10 @@
  *
  * Thread model: every client and reactor method (clientConnect, clientTick,
  * reactorWait, reactorAddPath, reactorFree, ...) must be called from the
- * single engine thread the Kotlin MqvpnPoller runs, with two exceptions:
+ * single engine thread the Kotlin MqvpnPoller runs, with three exceptions:
  * reactorNew runs before that thread exists (the service creates the reactor
- * on the main thread, in onCreate), and reactorWake may come from any
- * thread. There is one engine thread per service instance, and two may
+ * on the main thread, in onCreate), and reactorWake and closeFd may come from
+ * any thread. There is one engine thread per service instance, and two may
  * overlap while a service is replaced — hence the locked per-client context
  * table below. Callbacks from libmqvpn fire on the client's engine thread
  * (the library is sans-I/O), so GetEnv normally succeeds;
@@ -1140,7 +1140,7 @@ JNI_FN(reactorPathReleased)(JNIEnv *env, jobject thiz, jlong reactor, jlong clie
 
 /* closeFd(fd) → 0, or the errno of a failed close(2) (NativeBridge.closeFd
  * says why the close is untagged). Not retried on EINTR: Linux has released
- * the fd by then. */
+ * the fd by then. Any thread. */
 JNIEXPORT jint JNICALL
 JNI_FN(closeFd)(JNIEnv *env, jobject thiz, jint fd)
 {

@@ -22,6 +22,7 @@ import java.net.InetSocketAddress
  * emulator: wait / wake / add / remove / release / destroy on a loopback
  * socket added before connect (the production order). Behaviour is covered
  * on the Linux host by tests/test_android_reactor.c; this proves the bridge.
+ * Also covers [NativeBridge.closeFd], the close PathManager uses on path fds.
  */
 @RunWith(AndroidJUnit4::class)
 class ReactorJniSmokeTest {
@@ -70,8 +71,9 @@ class ReactorJniSmokeTest {
                 assertEquals(0, NativeBridge.reactorWait(r, client, 10))
                 // Orderly removal: remove → close (ours, as PathManager closes) → released.
                 assertEquals(0, NativeBridge.reactorRemovePath(r, client, h))
-                assertEquals(0, NativeBridge.closeFd(fd))
-                fd = -1
+                val rc = NativeBridge.closeFd(fd)
+                fd = -1 // before the assert: a failed close must not be repeated by the finally
+                assertEquals(0, rc)
                 assertEquals(0, NativeBridge.reactorPathReleased(r, client, h))
                 // Released twice: the reactor refuses (argument error), nothing crashes.
                 assertEquals(-1, NativeBridge.reactorPathReleased(r, client, h))
@@ -89,8 +91,9 @@ class ReactorJniSmokeTest {
     @Test
     @SdkSuppress(minSdkVersion = 30) // Os.fcntlInt is public from API 30
     fun closeFd_closesThenReportsEbadf() {
-        // An fd far above the lowest free numbers, so no other thread of this
-        // process can take its number between the two closes.
+        // An fd far above the lowest free numbers: new fds normally get the
+        // lowest free number, so in practice nothing takes this one between
+        // the two closes.
         val pipe = ParcelFileDescriptor.createPipe()
         val fd = try {
             Os.fcntlInt(pipe[0].fileDescriptor, OsConstants.F_DUPFD, 900)
