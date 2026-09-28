@@ -35,6 +35,13 @@ data class MqvpnConfig(
     val insecure: Boolean = false,
     val multipathEnabled: Boolean = true,
     val scheduler: Scheduler = Scheduler.MIN_RTT,
+    /**
+     * Minimum level of the library's log lines: this tunnel's own lines,
+     * delivered to `MqvpnVpnService.onLog`, and the lines the library writes
+     * process-wide, such as the UDP transport's and the reactor's, to logcat
+     * under the tag `mqvpn`. The process-wide threshold is set when a tunnel is
+     * created, so the tunnel created last decides it.
+     */
     val logLevel: LogLevel = LogLevel.INFO,
     val reconnect: Boolean = true,
     val reconnectIntervalSec: Int = 5,
