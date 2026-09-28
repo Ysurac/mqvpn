@@ -80,10 +80,10 @@ netmon_platform_pre_readd(platform_ctx_t *p, const char *ifname)
 }
 
 int
-netmon_platform_pre_reactivate(platform_ctx_t *p, int slot, const char *ifname)
+netmon_platform_pre_reactivate(platform_ctx_t *p, platform_path_t *s, const char *ifname)
 {
     (void)p;
-    (void)slot;
+    (void)s;
     (void)ifname;
     return 0; /* always proceed — the lib's own state gate rejects the rest */
 }

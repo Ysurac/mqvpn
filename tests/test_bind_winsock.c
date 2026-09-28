@@ -97,7 +97,7 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *client, mqvpn_path_handle_t path,
 
 /* ── helpers ── */
 
-/* Non-blocking UDP socket on 127.0.0.1:<ephemeral>, like path_mgr's. */
+/* Non-blocking UDP socket on 127.0.0.1:<ephemeral>, like a platform path socket. */
 static SOCKET
 udp_socket(struct sockaddr_in *addr)
 {

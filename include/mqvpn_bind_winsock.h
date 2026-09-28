@@ -45,6 +45,13 @@ typedef struct {
 MQVPN_API int mqvpn_bind_winsock_path_new(SOCKET sock,
                                           const mqvpn_bind_winsock_opts_t *opts,
                                           void **out_ctx);
+/* The table's `send`: one sendto() per datagram within the same call,
+ * stopping at the first error; WSAEINTR is retried. Returns the accepted
+ * prefix; when nothing is accepted, WSAEWOULDBLOCK -> MQVPN_TX_WOULD_BLOCK
+ * and anything else -> MQVPN_TX_FAILED. The core never registers its batched
+ * send on Windows, so n == 1 in practice. Winsock has no per-call
+ * MSG_DONTWAIT: the socket must be non-blocking (FIONBIO), or sendto() and
+ * drain() can block the tick thread. */
 MQVPN_API const mqvpn_path_ops_t *mqvpn_bind_winsock_path_ops(void);
 /* Destructor for a ctx the library never took ownership of (add_path
  * failed). Identical to ops.release; never closes the socket. */

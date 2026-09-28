@@ -13,7 +13,7 @@ void mqvpn_log_set_level(mqvpn_log_level_t level);
 
 /* Process-wide sink for every global log line: the bundled binds, the Android
  * reactor, addr_pool, the hybrid lwIP glue, auth's genkey errors and the CLI
- * platform code (path_mgr, config, the per-OS layers). Lines about one client
+ * platform code (config, the per-OS layers). Lines about one client
  * (the path state machine's included) or one server go through that object's
  * log callback instead. NULL restores the stderr writer, which is the
  * default — Linux, macOS and Windows never call this. The sink receives

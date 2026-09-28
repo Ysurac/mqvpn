@@ -64,20 +64,14 @@ POINTERS='p|pp|entry|path|primary'
 # Match `PTR->FIELD <optional ws> = <NOT another =>` - rejects `==` comparisons.
 PATTERN="($POINTERS)->($FIELDS)[[:space:]]*=[^=]"
 
-# Files / scopes exempt because they use a different struct (mqvpn_path_t
-# in path_mgr / platform layers, xqc_path_metrics_t in server) or are the
-# FSM module itself.
+# Files / scopes exempt because they are the FSM module itself or use a
+# different struct (xqc_path_metrics_t in server). The platform layers are
+# scanned: their path slot (platform_path_t) has no field named like a
+# lifecycle field.
 EXCLUDED_FILES='
 src/path_state_machine.c
 src/path_entry_internal.h
-src/path_mgr.c
-src/path_mgr.h
 src/mqvpn_server.c
-src/platform/linux/platform_linux.c
-src/platform/windows/platform_windows.c
-src/platform/windows/net_mon.c
-src/platform/darwin/platform_darwin.c
-src/platform/posix/netmon_common.c
 '
 
 # Check 2: a guarded header, then one file allowed to #include it directly,

@@ -304,19 +304,32 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_validation_blackhole_test.sh
 
-      # The one NEGATIVE suite in this recovery family: every sibling above
-      # proves drop -> successful re-add; this one proves re-add is REFUSED
-      # while the iface has an address but no route to the server. A
-      # regression that weakens that gate passes every other suite (their
-      # ifaces always have routes) while re-adding paths into the kernel's
-      # assume-on-link ARP blackhole on multi-homed routers. Also the only
-      # coverage of timer-driven recovery from a change (route appearing)
-      # that emits no netlink event, and of the deferral log marker.
+      # The route gate's NEGATIVE suite in this recovery family: every
+      # sibling above proves drop -> successful re-add; this one proves
+      # re-add is REFUSED while the iface has an address but no route to the
+      # server, and the recycled-slot suite below re-checks that refusal. A
+      # regression that weakens that gate passes every suite but these two
+      # (no other suite checks the refusal) while re-adding paths into the
+      # kernel's assume-on-link ARP blackhole on multi-homed routers. The two
+      # are also the only suites that deliberately cover timer-driven
+      # recovery from a change (route appearing) that emits no netlink event
+      # the client listens for, and the only ones that grep the deferral log
+      # marker.
       - name: E2E route-gate re-add deferral test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_route_gate_test.sh
+
+      # Timer-driven re-add of a path whose library slot another path's
+      # re-add recycled: its old handle is gone from get_paths(), and its
+      # route returns with no netlink event, so only the recovery timer can
+      # bring it back.
+      - name: E2E re-add after library slot recycle test (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_readd_recycled_slot_test.sh
 
       # Reorder shim end to end (~30s): the unit tests cover the engine in
       # isolation; only this suite exercises the client<->server negotiation
@@ -1017,10 +1030,11 @@ jobs:
       - name: Certificate verifier tests
         run: ctest --test-dir build -C Release -R "test_cert_(identity|verify_win)" --no-tests=error --output-on-failure
 
-      # Bundled Winsock transport (seam + real loopback sockets); own checks,
-      # not assert(), so Release is fine.
-      - name: Winsock transport tests
-        run: ctest --test-dir build -C Release -R "^test_bind_winsock$" --no-tests=error --output-on-failure
+      # Bundled Winsock transport (seam + real loopback sockets) and the
+      # re-add decision shared with the POSIX path monitors; own checks, not
+      # assert(), so Release is fine.
+      - name: Winsock transport and path re-add tests
+        run: ctest --test-dir build -C Release -R "^(test_bind_winsock|test_path_readd)$" --no-tests=error --output-on-failure
 
       # Weak: presence and order of the install call only (see the script).
       - name: Verifier wiring tripwire

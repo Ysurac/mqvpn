@@ -71,9 +71,12 @@ typedef int64_t mqvpn_path_handle_t;
 
 /* ─── Transport contract (ABI 3) ───
  *
- * The library never touches an OS socket. Every path (client) and the
- * shared listen socket (server) is reached through an ops table the
- * platform installs. Bundled implementations: include/mqvpn_bind_posix.h
+ * The library owns none of the UDP sockets the tunnel runs over: every path
+ * (client) and the shared listen socket (server) is reached through an ops
+ * table the platform installs, and the platform creates and closes those
+ * sockets. The one exception to this split is the server side of the hybrid
+ * TCP lane, which opens and closes its relayed TCP connections itself (see
+ * egress_fd_register). Bundled implementations: include/mqvpn_bind_posix.h
  * (Linux/macOS/iOS/Android) and, on Windows, mqvpn_bind_winsock.h. */
 
 typedef struct {
@@ -140,7 +143,10 @@ typedef struct {
  * the implementation can keep per-destination sticky state (e.g. GSO
  * fallback) with a lifetime equal to the QUIC connection. Scope 0 =
  * transient (pre-accept / stateless reset): the transport MUST NOT create
- * persistent state for it and release_scope(0) is never called. */
+ * persistent state for it and release_scope(0) is never called. Nonzero
+ * scopes are issued monotonically, one per accepted connection, and never
+ * reused within a server's lifetime (the counter refuses new connections
+ * rather than wrap). */
 typedef uint64_t mqvpn_server_tx_scope_t;
 
 typedef struct {
@@ -254,12 +260,31 @@ typedef enum {
  *   transport_attached = platform provides I/O for this slot
  *   xquic_path_live   = xquic has a live QUIC path on this slot
  *
- *   PENDING   → add_path() called, awaiting activation
- *   ACTIVE    → xquic path created (validation async)
- *   DEGRADED  → transport failed, library timer retries with backoff (5s→60s, max 6)
- *   CLOSED    → retries exhausted (platform can still call reactivate_path if
- * transport_attached==1) OR explicitly removed via remove_path() (transport_attached==0,
- * no recovery)
+ *   PENDING   → no validated xquic path yet: waiting to be tried, validating
+ *               (xquic_path_live==1), or waiting for a retry after a failed
+ *               attempt. add_path() does not wait for validation: it returns
+ *               with the path PENDING (CLOSED on a permanent create failure).
+ *   ACTIVE    → validated and usable. Entered only from PENDING, once
+ *               validation completes asynchronously.
+ *   STANDBY   → validated backup path: under MQVPN_SCHED_BACKUP_FEC, paths
+ *               validated after connection setup land here instead of ACTIVE.
+ *   DEGRADED  → xquic closed a validated path (xquic_path_live==0); the
+ *               transport is still attached and the library retries it.
+ *   CLOSED    → one of:
+ *               - retries exhausted, or a permanent create failure: the
+ *                 transport is still attached (transport_attached==1), so
+ *                 mqvpn_client_reactivate_path() can revive it;
+ *               - after drop_path() or remove_path(): transport_attached==0,
+ *                 no retry, no reactivation. The platform must stop its I/O,
+ *                 close the socket and call
+ *                 mqvpn_client_on_platform_path_released(); add_path() cannot
+ *                 reuse the slot before that;
+ *               - released and cleaned up: add_path() may reuse the slot.
+ *
+ * One library timer retries failed PENDING attempts and DEGRADED paths,
+ * backing off 5s→60s; a successful retry is PENDING again until validated.
+ * After 6 failures the path is CLOSED (the count resets after 30s in
+ * ACTIVE/STANDBY, and on reconnect).
  */
 typedef enum {
     MQVPN_PATH_PENDING = 0,
@@ -797,10 +822,11 @@ MQVPN_API mqvpn_client_t *mqvpn_client_new(const mqvpn_config_t *cfg,
  * tunnel_closed — never reconnect_scheduled) from inside the call: with the
  * batched send path engaged it first flushes datagrams already accepted by
  * mqvpn_client_on_tun_packet, and that engine pass can close the
- * connection. Callback-owned resources — and every still-attached path's
- * transport_ctx, released via ops.release() as part of this call — must
- * therefore stay valid until this returns, and nothing — including those
- * callbacks — may use the handle afterwards. */
+ * connection. Callback-owned resources — and the transport_ctx of every path
+ * not yet released (still attached, or dropped/removed but not yet reported
+ * via mqvpn_client_on_platform_path_released()), released via ops.release()
+ * as part of this call — must therefore stay valid until this returns, and
+ * nothing — including those callbacks — may use the handle afterwards. */
 MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
 
 /* Start (or, from RECONNECTING, immediately restart) the connection.
@@ -847,6 +873,19 @@ MQVPN_API mqvpn_path_handle_t mqvpn_client_add_path(mqvpn_client_t *client,
                                                     void *transport_ctx,
                                                     mqvpn_add_path_outcome_t *outcome);
 
+/*
+ * Remove a path at the application's initiative: an orderly removal, e.g.
+ * rolling back a failed activation, or losing a network on a platform that
+ * re-creates paths under a new identity instead of reactivating them. The
+ * slot ends up exactly as after drop_path(), only the recorded reason
+ * differs: a non-blocking PATH_ABANDON is emitted if the path has a live
+ * xquic path, and the slot moves to CLOSED_DROPPED with its transport
+ * detached (no retry, no reactivate_path()). The platform still owns the
+ * socket: it must stop its I/O, close the socket and call
+ * mqvpn_client_on_platform_path_released() before the slot can reach
+ * CLOSED_FREE and be reused by add_path(). Returns MQVPN_OK, or
+ * MQVPN_ERR_INVALID_ARG for a bad client or handle.
+ */
 MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle_t path);
 
 /*
@@ -863,7 +902,7 @@ MQVPN_API int mqvpn_client_drop_path(mqvpn_client_t *client, mqvpn_path_handle_t
 
 /*
  * Platform reports that a path is no longer reachable via its current transport
- * (carrier loss, RTM_DELLINK, NotifyIpInterfaceChange ifDown, etc).
+ * (carrier loss, RTM_DELLINK, an adapter going down, etc).
  *
  * Library transitions the slot to PATH_CLOSED_DROPPED (via EVENT_PLATFORM_DROP).
  * The platform must stop its I/O, close the native socket and call
@@ -889,26 +928,33 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *client, mqvpn_path_handle_
  *   CLOSED_DROPPED, not yet released     → OK (finalises the ctx)
  *   already released / CLOSED_FREE       → OK, no-op (late duplicate)
  *   any other lifecycle state            → MQVPN_ERR_INVALID_STATE, ctx untouched
- * Never call this after mqvpn_client_destroy(); destroy finalises every
- * still-attached ctx itself. Thread safety: tick thread only.
+ * Never call this after mqvpn_client_destroy(): destroy finalises every ctx
+ * not yet released itself — including one whose path was dropped or removed
+ * but not yet reported here — so the platform must not release it again.
+ * Thread safety: tick thread only.
  */
 MQVPN_API int mqvpn_client_on_platform_path_released(mqvpn_client_t *client,
                                                      mqvpn_path_handle_t path);
 
 /*
- * Re-activate a DEGRADED or CLOSED path using the existing transport.
+ * Re-activate a path using its existing transport.
  * Called by the platform layer when it detects the path is viable again
- * (e.g., netlink RTM_NEWADDR on Linux, NotifyUnicastIpAddressChange on
- * Windows keyed by NET_LUID, NWPathMonitor on macOS for Wi-Fi/Ethernet flap).
+ * (e.g., netlink link/address events on Linux and a PF_ROUTE socket on
+ * macOS, each backed by a 3 s timer; a 3 s poll on Windows, which has no
+ * change notification wired).
  *
  * NOT applicable to platforms whose APIs invalidate path identity on loss
  * and deliver a fresh handle on recovery (Android ConnectivityManager Network,
  * iOS NEPacketTunnelProvider where socket-to-interface bindings are invalidated
  * when the underlying interface re-attaches, e.g. cellular handoff). Those
- * platforms should call remove_path() + a new add_path() with a fresh transport
- * instead.
+ * platforms should call remove_path() instead, then — once the old socket is
+ * closed — mqvpn_client_on_platform_path_released(), then add_path() with a
+ * fresh transport.
  *
- * Preconditions: !xquic_path_live && transport_attached && (DEGRADED || CLOSED).
+ * Preconditions: the connection is established with multipath; the path
+ * has no live xquic path and its transport is still attached (never after
+ * drop_path()/remove_path()); and it is DEGRADED, CLOSED, or PENDING while it
+ * waits for a retry (internally CREATE_WAIT).
  * On success: xquic creates a new path (validation is async). The library
  * recovery timer is cancelled. Retry counter resets after 30s stability.
  *
@@ -947,6 +993,12 @@ MQVPN_API mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *clie
 
 MQVPN_API int mqvpn_client_get_stats(const mqvpn_client_t *client, mqvpn_stats_t *out);
 
+/* Lists every path slot the client has used, in slot order, CLOSED ones
+ * included, each with the handle of its current incarnation; writes at most
+ * max_paths entries and sets *n_paths to the number written. A handle names
+ * one incarnation only: add_path() may recycle a fully released slot for a
+ * new path under a new handle (see mqvpn_client_add_path), after which the
+ * old handle is simply absent from the list. */
 MQVPN_API int mqvpn_client_get_paths(const mqvpn_client_t *client, mqvpn_path_info_t *out,
                                      int max_paths, int *n_paths);
 
@@ -984,7 +1036,9 @@ MQVPN_API void mqvpn_server_destroy(mqvpn_server_t *server);
  * server's life.
  * Returns MQVPN_ERR_INVALID_ARG (server/ops NULL, struct_size not covering
  * `send`, send NULL, or a non-NULL local_addr whose local_addrlen exceeds
- * the library's sockaddr_storage) without touching the offered ctx.
+ * the library's sockaddr_storage) without touching the offered ctx. The
+ * arguments are checked before the once-only / state check, so a malformed
+ * table is MQVPN_ERR_INVALID_ARG even on a second call.
  * local_addr (nullable) is the bound address reported to xquic;
  * local_addrlen is ignored when it is NULL.
  */
