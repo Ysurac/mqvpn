@@ -13,9 +13,10 @@ package com.mqvpn.sdk.native_
  *
  * Thread safety: every client and reactor method (clientConnect, clientTick,
  * reactorWait, reactorAddPath, reactorFree, ...) must be called from the
- * engine thread (the MqvpnPoller thread), with two exceptions: [reactorNew]
+ * engine thread (the MqvpnPoller thread), with three exceptions: [reactorNew]
  * runs before that thread exists (the service creates the reactor on the main
- * thread, in onCreate), and [reactorWake] may be called from any thread.
+ * thread, in onCreate), and [reactorWake] and [closeFd] may be called from
+ * any thread.
  *
  * Transport (ABI 3): the library owns no socket. Kotlin creates and closes
  * the path fds; the reactor (reactorNew) wraps each one in the bundled POSIX
@@ -51,7 +52,13 @@ object NativeBridge {
     /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN) */
     external fun configSetScheduler(cfg: Long, scheduler: Int): Int
 
-    /** mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR) */
+    /**
+     * mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR). On success it
+     * also stores the process-wide threshold of the library's global log lines
+     * (such as the UDP transport's and the reactor's, in logcat under tag
+     * "mqvpn"), which outlives [configFree]: the last successful call decides
+     * it, so with two tunnels the one created last does.
+     */
     external fun configSetLogLevel(cfg: Long, level: Int): Int
 
     /** mqvpn_config_set_multipath(cfg, enable) */
@@ -198,6 +205,15 @@ object NativeBridge {
     /** Returned by [reactorPathReleased] on ledger corruption (MQVPN_REACTOR_POISONED). */
     const val REACTOR_POISONED: Int = -100
 
+    /**
+     * close(2) on a path fd the SDK owns → 0, or the errno. An untagged close,
+     * like the Os.close() it replaces: an fd something else already closed
+     * gives EBADF (while its number is unused), where
+     * ParcelFileDescriptor.adoptFd(fd).close() would abort the process on
+     * API 30+ (fdsan double close). Any thread.
+     */
+    external fun closeFd(fd: Int): Int
+
     // ---- I/O feed (TUN only; path receive happens inside reactorWait) ----
 
     /** mqvpn_client_on_tun_packet(client, pkt, offset, len) */
@@ -210,14 +226,14 @@ object NativeBridge {
 
     /**
      * mqvpn_client_get_stats(client) → LongArray:
-     * [bytesTx, bytesRx, pktsTx, pktsRx, rttUs, connUptimeMs]
+     * [bytesTx, bytesRx, dgramSent, dgramRecv, dgramLost, dgramAcked, srttMs]
      */
     external fun getStats(client: Long): LongArray?
 
     /**
      * mqvpn_client_get_paths(client) → Array of Object arrays.
      * Each inner array: [handle(Long), status(Int), iface(String),
-     *   bytesTx(Long), bytesRx(Long), rttUs(Long)]
+     *   bytesTx(Long), bytesRx(Long), srttMs(Long)]
      */
     external fun getPaths(client: Long): Array<Any>?
 

@@ -8,10 +8,10 @@
  *
  * Thread model: every client and reactor method (clientConnect, clientTick,
  * reactorWait, reactorAddPath, reactorFree, ...) must be called from the
- * single engine thread the Kotlin MqvpnPoller runs, with two exceptions:
+ * single engine thread the Kotlin MqvpnPoller runs, with three exceptions:
  * reactorNew runs before that thread exists (the service creates the reactor
- * on the main thread, in onCreate), and reactorWake may come from any
- * thread. There is one engine thread per service instance, and two may
+ * on the main thread, in onCreate), and reactorWake and closeFd may come from
+ * any thread. There is one engine thread per service instance, and two may
  * overlap while a service is replaced — hence the locked per-client context
  * table below. Callbacks from libmqvpn fire on the client's engine thread
  * (the library is sans-I/O), so GetEnv normally succeeds;
@@ -32,6 +32,7 @@
 #include <time.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -57,6 +58,14 @@
 #define ANDROID_UDP_GSO 1
 #define ANDROID_UDP_GRO 1
 
+/* Level filter of the global sink below. The library's own global level is
+ * set to DEBUG once, in JNI_OnLoad, before any thread can log, and never
+ * written again (it is a plain variable); the filter that follows
+ * MqvpnConfig.logLevel is this atomic, stored by configSetLogLevel. Two
+ * sessions that overlap while a service is replaced share it: the later
+ * setting wins. */
+static _Atomic int g_global_log_threshold = MQVPN_LOG_INFO;
+
 /* Global library log sink. Every mqvpn_log() line (on Android: the bind's
  * udp-gso: / udp-gro: markers and WARNs, the reactor, the hybrid lwIP glue)
  * used to go to the app process's stderr, which reaches nobody. Lines about
@@ -68,6 +77,8 @@ static void
 jni_global_log_sink(mqvpn_log_level_t level, const char *msg, void *ctx)
 {
     (void)ctx;
+    if ((int)level < atomic_load_explicit(&g_global_log_threshold, memory_order_relaxed))
+        return;
     int prio;
     switch (level) {
     case MQVPN_LOG_DEBUG: prio = ANDROID_LOG_DEBUG; break;
@@ -245,6 +256,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     (void)reserved;
     g_jvm = vm;
     mqvpn_log_set_sink(jni_global_log_sink, NULL);
+    mqvpn_log_set_level(MQVPN_LOG_DEBUG); /* the sink filters: g_global_log_threshold */
 
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) {
@@ -669,8 +681,13 @@ JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
 {
     (void)env;
     (void)thiz;
-    return mqvpn_config_set_log_level((mqvpn_config_t *)(intptr_t)cfg,
-                                      (mqvpn_log_level_t)level);
+    int rc = mqvpn_config_set_log_level((mqvpn_config_t *)(intptr_t)cfg,
+                                        (mqvpn_log_level_t)level);
+    /* The same level for the process-wide lines (the bind, the reactor, the
+     * lwIP glue), which do not belong to any one client. */
+    if (rc == MQVPN_OK)
+        atomic_store_explicit(&g_global_log_threshold, (int)level, memory_order_relaxed);
+    return rc;
 }
 
 /* configSetMultipath(cfg, enable) → int */
@@ -825,37 +842,35 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         return 0;
     }
 
-    /* Cache jmethodIDs — these are stable for the lifetime of the class. */
+    /* Cache jmethodIDs — these are stable for the lifetime of the class. A
+     * failed lookup leaves NoSuchMethodError pending, and a JNI call under a
+     * pending exception is undefined behaviour (CheckJNI aborts), so each
+     * GetMethodID is checked before the next. */
     jclass cls = (*env)->GetObjectClass(env, callbackObj);
-
-    ctx->mid_tunnel_config_ready =
-        (*env)->GetMethodID(env, cls, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V");
-
-    ctx->mid_tunnel_closed =
-        (*env)->GetMethodID(env, cls, "onNativeTunnelClosed", "(I)V");
-
-    ctx->mid_state_changed =
-        (*env)->GetMethodID(env, cls, "onNativeStateChanged", "(II)V");
-
-    ctx->mid_path_event = (*env)->GetMethodID(env, cls, "onNativePathEvent", "(JI)V");
-
-    ctx->mid_log = (*env)->GetMethodID(env, cls, "onNativeLog", "(ILjava/lang/String;)V");
-
-    ctx->mid_reconnect_scheduled =
-        (*env)->GetMethodID(env, cls, "onNativeReconnectScheduled", "(I)V");
-
-    (*env)->DeleteLocalRef(env, cls);
-
-    /* Check all method IDs resolved */
-    if (!ctx->mid_tunnel_config_ready || !ctx->mid_tunnel_closed ||
-        !ctx->mid_state_changed || !ctx->mid_path_event || !ctx->mid_log ||
-        !ctx->mid_reconnect_scheduled) {
-        LOGE("Failed to resolve callback method IDs");
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        (*env)->DeleteGlobalRef(env, ctx->callback_obj);
-        free(ctx);
-        return 0;
+    const struct {
+        jmethodID *mid;
+        const char *name;
+        const char *sig;
+    } methods[] = {
+        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V"},
+        {&ctx->mid_tunnel_closed, "onNativeTunnelClosed", "(I)V"},
+        {&ctx->mid_state_changed, "onNativeStateChanged", "(II)V"},
+        {&ctx->mid_path_event, "onNativePathEvent", "(JI)V"},
+        {&ctx->mid_log, "onNativeLog", "(ILjava/lang/String;)V"},
+        {&ctx->mid_reconnect_scheduled, "onNativeReconnectScheduled", "(I)V"},
+    };
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
+        *methods[i].mid = (*env)->GetMethodID(env, cls, methods[i].name, methods[i].sig);
+        if (!*methods[i].mid || (*env)->ExceptionCheck(env)) {
+            LOGE("Failed to resolve callback method IDs (%s)", methods[i].name);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, cls);
+            (*env)->DeleteGlobalRef(env, ctx->callback_obj);
+            free(ctx);
+            return 0;
+        }
     }
+    (*env)->DeleteLocalRef(env, cls);
 
     /* Build callbacks struct */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1123,6 +1138,17 @@ JNI_FN(reactorPathReleased)(JNIEnv *env, jobject thiz, jlong reactor, jlong clie
         (mqvpn_path_handle_t)pathHandle);
 }
 
+/* closeFd(fd) → 0, or the errno of a failed close(2) (NativeBridge.closeFd
+ * says why the close is untagged). Not retried on EINTR: Linux has released
+ * the fd by then. Any thread. */
+JNIEXPORT jint JNICALL
+JNI_FN(closeFd)(JNIEnv *env, jobject thiz, jint fd)
+{
+    (void)env;
+    (void)thiz;
+    return close(fd) == 0 ? 0 : errno;
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
  *  I/O feed (TUN only — path receive happens inside reactorWait)
  * ════════════════════════════════════════════════════════════════════════════ */
@@ -1183,9 +1209,26 @@ JNI_FN(getStats)(JNIEnv *env, jobject thiz, jlong client)
     return arr;
 }
 
+/* Stores v in arr[idx] and drops the local reference. v is the result of a
+ * boxing CallStaticObjectMethod or of NewStringUTF; the call failed if v is NULL
+ * or an exception is pending (OutOfMemoryError) — a Call*Method reports failure
+ * only through the exception, and its return value is then undefined. Then v is
+ * neither stored nor deleted, and -1 is returned so the caller stops before its
+ * next JNI call. */
+static int
+jni_store_element(JNIEnv *env, jobjectArray arr, jsize idx, jobject v)
+{
+    if (!v || (*env)->ExceptionCheck(env)) return -1;
+    (*env)->SetObjectArrayElement(env, arr, idx, v);
+    (*env)->DeleteLocalRef(env, v);
+    return 0;
+}
+
 /*
  * getPaths(client) → Array<Any>
  * Returns array of Object arrays, each: [handle, status, iface, bytesTx, bytesRx, srttMs]
+ * An allocation failure returns NULL at once and leaves its OutOfMemoryError
+ * pending for Kotlin; the JVM frees the local references when this returns.
  */
 JNIEXPORT jobjectArray JNICALL
 JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
@@ -1199,7 +1242,20 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
                                     MAX_PATHS, &n_paths);
     if (rc != MQVPN_OK || n_paths <= 0) return NULL;
 
+    /* Classes and boxing methods: looked up once per call. */
     jclass objClass = (*env)->FindClass(env, "java/lang/Object");
+    if (!objClass) return NULL;
+    jclass longCls = (*env)->FindClass(env, "java/lang/Long");
+    if (!longCls) return NULL;
+    jclass intCls = (*env)->FindClass(env, "java/lang/Integer");
+    if (!intCls) return NULL;
+    jmethodID longOf =
+        (*env)->GetStaticMethodID(env, longCls, "valueOf", "(J)Ljava/lang/Long;");
+    if (!longOf) return NULL;
+    jmethodID intOf =
+        (*env)->GetStaticMethodID(env, intCls, "valueOf", "(I)Ljava/lang/Integer;");
+    if (!intOf) return NULL;
+
     jobjectArray outer = (*env)->NewObjectArray(env, n_paths, objClass, NULL);
     if (!outer) return NULL;
 
@@ -1207,42 +1263,29 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
         /* Each path: [handle(Long), status(Int), iface(String),
          *   bytesTx(Long), bytesRx(Long), srttMs(Long)] */
         jobjectArray inner = (*env)->NewObjectArray(env, 6, objClass, NULL);
-
-        /* Box primitives */
-        jclass longCls = (*env)->FindClass(env, "java/lang/Long");
-        jmethodID longOf =
-            (*env)->GetStaticMethodID(env, longCls, "valueOf", "(J)Ljava/lang/Long;");
-
-        jclass intCls = (*env)->FindClass(env, "java/lang/Integer");
-        jmethodID intOf =
-            (*env)->GetStaticMethodID(env, intCls, "valueOf", "(I)Ljava/lang/Integer;");
-
-        (*env)->SetObjectArrayElement(
-            env, inner, 0,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].handle));
-        (*env)->SetObjectArrayElement(
-            env, inner, 1,
-            (*env)->CallStaticObjectMethod(env, intCls, intOf, (jint)paths[i].status));
-        (*env)->SetObjectArrayElement(env, inner, 2,
-                                      (*env)->NewStringUTF(env, paths[i].name));
-        (*env)->SetObjectArrayElement(
-            env, inner, 3,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf,
-                                           (jlong)paths[i].bytes_tx));
-        (*env)->SetObjectArrayElement(
-            env, inner, 4,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf,
-                                           (jlong)paths[i].bytes_rx));
-        (*env)->SetObjectArrayElement(env, inner, 5,
-                                      (*env)->CallStaticObjectMethod(
-                                          env, longCls, longOf, (jlong)paths[i].srtt_ms));
+        if (!inner) return NULL;
+        jobject v =
+            (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].handle);
+        if (jni_store_element(env, inner, 0, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, intCls, intOf, (jint)paths[i].status);
+        if (jni_store_element(env, inner, 1, v) < 0) return NULL;
+        v = (*env)->NewStringUTF(env, paths[i].name);
+        if (jni_store_element(env, inner, 2, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf,
+                                           (jlong)paths[i].bytes_tx);
+        if (jni_store_element(env, inner, 3, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf,
+                                           (jlong)paths[i].bytes_rx);
+        if (jni_store_element(env, inner, 4, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].srtt_ms);
+        if (jni_store_element(env, inner, 5, v) < 0) return NULL;
 
         (*env)->SetObjectArrayElement(env, outer, i, inner);
         (*env)->DeleteLocalRef(env, inner);
-        (*env)->DeleteLocalRef(env, longCls);
-        (*env)->DeleteLocalRef(env, intCls);
     }
 
+    (*env)->DeleteLocalRef(env, longCls);
+    (*env)->DeleteLocalRef(env, intCls);
     (*env)->DeleteLocalRef(env, objClass);
     return outer;
 }

@@ -4,7 +4,7 @@
 package com.mqvpn.sdk.core.internal
 
 import android.net.Network
-import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import com.mqvpn.sdk.core.MqvpnTunnel
 import com.mqvpn.sdk.native_.NativeBridge
@@ -186,16 +186,10 @@ internal class PathManager(
     companion object {
         private const val TAG = "PathManager"
 
+        // An untagged close(2) through the JNI; NativeBridge.closeFd says why.
         private fun closeFdSafe(fd: Int) {
-            try {
-                val fdObj = java.io.FileDescriptor()
-                val field = java.io.FileDescriptor::class.java.getDeclaredField("descriptor")
-                field.isAccessible = true
-                field.setInt(fdObj, fd)
-                Os.close(fdObj)
-            } catch (e: Exception) {
-                Log.w(TAG, "close fd=$fd failed: ${e.message}")
-            }
+            val err = NativeBridge.closeFd(fd)
+            if (err != 0) Log.w(TAG, "close fd=$fd failed: ${OsConstants.errnoName(err) ?: err}")
         }
 
         /**

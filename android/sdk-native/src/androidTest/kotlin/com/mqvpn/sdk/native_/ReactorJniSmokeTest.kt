@@ -5,7 +5,10 @@ package com.mqvpn.sdk.native_
 
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.system.Os
+import android.system.OsConstants
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.filters.SdkSuppress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,6 +22,7 @@ import java.net.InetSocketAddress
  * emulator: wait / wake / add / remove / release / destroy on a loopback
  * socket added before connect (the production order). Behaviour is covered
  * on the Linux host by tests/test_android_reactor.c; this proves the bridge.
+ * Also covers [NativeBridge.closeFd], the close PathManager uses on path fds.
  */
 @RunWith(AndroidJUnit4::class)
 class ReactorJniSmokeTest {
@@ -65,10 +69,11 @@ class ReactorJniSmokeTest {
                 assertTrue("reactorAddPath returned $h", h >= 0)
                 // Attached, nothing readable: the wait times out with 0 drains.
                 assertEquals(0, NativeBridge.reactorWait(r, client, 10))
-                // Orderly removal: remove → close (ours) → released.
+                // Orderly removal: remove → close (ours, as PathManager closes) → released.
                 assertEquals(0, NativeBridge.reactorRemovePath(r, client, h))
-                ParcelFileDescriptor.adoptFd(fd).close()
-                fd = -1
+                val rc = NativeBridge.closeFd(fd)
+                fd = -1 // before the assert: a failed close must not be repeated by the finally
+                assertEquals(0, rc)
                 assertEquals(0, NativeBridge.reactorPathReleased(r, client, h))
                 // Released twice: the reactor refuses (argument error), nothing crashes.
                 assertEquals(-1, NativeBridge.reactorPathReleased(r, client, h))
@@ -76,11 +81,29 @@ class ReactorJniSmokeTest {
                 if (client != 0L) NativeBridge.reactorClientDestroy(r, client)
                 NativeBridge.configFree(cfg)
                 // After destroy: NativeBridge's "close the path fds AFTER this".
-                if (fd >= 0) ParcelFileDescriptor.adoptFd(fd).close()
+                if (fd >= 0) NativeBridge.closeFd(fd)
             }
         } finally {
             NativeBridge.reactorFree(r)
         }
+    }
+
+    @Test
+    @SdkSuppress(minSdkVersion = 30) // Os.fcntlInt is public from API 30
+    fun closeFd_closesThenReportsEbadf() {
+        // An fd far above the lowest free numbers: new fds normally get the
+        // lowest free number, so in practice nothing takes this one between
+        // the two closes.
+        val pipe = ParcelFileDescriptor.createPipe()
+        val fd = try {
+            Os.fcntlInt(pipe[0].fileDescriptor, OsConstants.F_DUPFD, 900)
+        } finally {
+            pipe.forEach { it.close() }
+        }
+        assertEquals(0, NativeBridge.closeFd(fd))
+        // Already closed: a plain EBADF — the close is untagged, so fdsan
+        // reports nothing (an adopted fd's tagged close would abort here).
+        assertEquals(OsConstants.EBADF, NativeBridge.closeFd(fd))
     }
 
     /** Mirrors sdk-core's TunnelCallbacks by name + JNI signature (see PlatformTrustDeviceTest). */

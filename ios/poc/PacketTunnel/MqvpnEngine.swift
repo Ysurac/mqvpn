@@ -10,10 +10,13 @@ let log = Logger(subsystem: "mqvpn.poc", category: "engine")
 /// header): every global libmqvpn line — the bind's socket-buffer and
 /// send-error lines, the hybrid lwIP glue — reaches os_log instead of the
 /// extension's stderr, which nobody sees (per-client lines, the path state
-/// machine's included, already arrive through cbs.log). Installed once per
-/// process (the first start(), via MqvpnEngine.logSinkInstalled); runs on
-/// whichever thread logged (os_log is thread-safe).
+/// machine's included, arrive through cbs.log, which is this same function).
+/// Installed once per process (the first start(), via
+/// MqvpnEngine.logSinkInstalled); runs on whichever thread logged (os_log is
+/// thread-safe).
 private let mqvpnLogSink: mqvpn_log_fn = { level, msg, _ in
+    // msg is not documented NULL-safe by the header; the JNI driver
+    // substitutes "" too.
     let text = msg.map { String(cString: $0) } ?? ""
     switch level {
     case MQVPN_LOG_ERROR: log.error("[lib] \(text, privacy: .public)")
@@ -238,13 +241,9 @@ final class MqvpnEngine: NSObject {
             let engine = Unmanaged<MqvpnEngine>.fromOpaque(ctx!).takeUnretainedValue()
             engine.onTunnelClosed?(reason.rawValue)
         }
-        cbs.log = { level, msg, _ in
-            // msg is not documented NULL-safe by the header, but the JNI
-            // reference driver defensively substitutes "" — mirror that here
-            // rather than force-unwrapping into a crash.
-            let text = msg.map { String(cString: $0) } ?? ""
-            log.notice("[lib] \(text, privacy: .public)")
-        }
+        // Per-client lines take the global sink's level mapping (error /
+        // warning / notice) and its NULL-safe msg handling.
+        cbs.log = mqvpnLogSink
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         client = mqvpn_client_new(cfg, &cbs, ctx)
         mqvpn_config_free(cfg)

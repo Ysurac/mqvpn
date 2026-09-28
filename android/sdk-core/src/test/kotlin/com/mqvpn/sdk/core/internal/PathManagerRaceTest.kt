@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Also the bad-fd chain: the ledger is cleared WITHOUT a close.
  *
  * Tests use a synchronous [MqvpnExecutor], injected [bindUdp] / [closeFd]
- * lambdas (so PathBinder and Os.close are bypassed), and a real
+ * lambdas (so PathBinder and the native close are bypassed), and a real
  * [NetworkMonitor] whose internal map is manipulated via reflection to
  * simulate the active set.
  *

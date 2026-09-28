@@ -69,6 +69,18 @@ class PlatformTrustDeviceTest {
         }
     }
 
+    @Test fun clientNew_withoutCallbackMethods_returnsZero() {
+        // A callbacks object without the callback methods: clientNew returns 0 and leaves no exception
+        // pending (it would be thrown here); a lookup made under the pending NoSuchMethodError would
+        // abort under CheckJNI instead.
+        val cfg = NativeBridge.configNew()
+        try {
+            assertEquals(0L, NativeBridge.clientNew(cfg, Any()))
+        } finally {
+            NativeBridge.configFree(cfg)
+        }
+    }
+
     /** Mirrors sdk-core's internal TunnelCallbacks (not on this module's classpath: sdk-core
      *  depends on sdk-native, not the reverse). clientNew resolves these by name + JNI signature:
      *  ([BI[BI[BIIZ)V, (I)V, (II)V, (JI)V, (ILjava/lang/String;)V, (I)V.
