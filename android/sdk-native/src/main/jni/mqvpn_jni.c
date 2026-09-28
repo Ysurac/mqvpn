@@ -1209,13 +1209,16 @@ JNI_FN(getStats)(JNIEnv *env, jobject thiz, jlong client)
     return arr;
 }
 
-/* Stores v in arr[idx] and drops the local reference. A NULL v means the
- * call that made it failed with an exception pending (OutOfMemoryError):
- * returns -1 so the caller stops before its next JNI call. */
+/* Stores v in arr[idx] and drops the local reference. v is the result of a
+ * boxing CallStaticObjectMethod or of NewStringUTF; the call failed if v is NULL
+ * or an exception is pending (OutOfMemoryError) — a Call*Method reports failure
+ * only through the exception, and its return value is then undefined. Then v is
+ * neither stored nor deleted, and -1 is returned so the caller stops before its
+ * next JNI call. */
 static int
 jni_store_element(JNIEnv *env, jobjectArray arr, jsize idx, jobject v)
 {
-    if (!v) return -1;
+    if (!v || (*env)->ExceptionCheck(env)) return -1;
     (*env)->SetObjectArrayElement(env, arr, idx, v);
     (*env)->DeleteLocalRef(env, v);
     return 0;
