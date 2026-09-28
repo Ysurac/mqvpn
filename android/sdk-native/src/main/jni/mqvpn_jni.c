@@ -842,37 +842,35 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         return 0;
     }
 
-    /* Cache jmethodIDs — these are stable for the lifetime of the class. */
+    /* Cache jmethodIDs — these are stable for the lifetime of the class. A
+     * failed lookup leaves NoSuchMethodError pending, and a JNI call under a
+     * pending exception is undefined behaviour (CheckJNI aborts), so each
+     * GetMethodID is checked before the next. */
     jclass cls = (*env)->GetObjectClass(env, callbackObj);
-
-    ctx->mid_tunnel_config_ready =
-        (*env)->GetMethodID(env, cls, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V");
-
-    ctx->mid_tunnel_closed =
-        (*env)->GetMethodID(env, cls, "onNativeTunnelClosed", "(I)V");
-
-    ctx->mid_state_changed =
-        (*env)->GetMethodID(env, cls, "onNativeStateChanged", "(II)V");
-
-    ctx->mid_path_event = (*env)->GetMethodID(env, cls, "onNativePathEvent", "(JI)V");
-
-    ctx->mid_log = (*env)->GetMethodID(env, cls, "onNativeLog", "(ILjava/lang/String;)V");
-
-    ctx->mid_reconnect_scheduled =
-        (*env)->GetMethodID(env, cls, "onNativeReconnectScheduled", "(I)V");
-
-    (*env)->DeleteLocalRef(env, cls);
-
-    /* Check all method IDs resolved */
-    if (!ctx->mid_tunnel_config_ready || !ctx->mid_tunnel_closed ||
-        !ctx->mid_state_changed || !ctx->mid_path_event || !ctx->mid_log ||
-        !ctx->mid_reconnect_scheduled) {
-        LOGE("Failed to resolve callback method IDs");
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        (*env)->DeleteGlobalRef(env, ctx->callback_obj);
-        free(ctx);
-        return 0;
+    const struct {
+        jmethodID *mid;
+        const char *name;
+        const char *sig;
+    } methods[] = {
+        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V"},
+        {&ctx->mid_tunnel_closed, "onNativeTunnelClosed", "(I)V"},
+        {&ctx->mid_state_changed, "onNativeStateChanged", "(II)V"},
+        {&ctx->mid_path_event, "onNativePathEvent", "(JI)V"},
+        {&ctx->mid_log, "onNativeLog", "(ILjava/lang/String;)V"},
+        {&ctx->mid_reconnect_scheduled, "onNativeReconnectScheduled", "(I)V"},
+    };
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
+        *methods[i].mid = (*env)->GetMethodID(env, cls, methods[i].name, methods[i].sig);
+        if (!*methods[i].mid || (*env)->ExceptionCheck(env)) {
+            LOGE("Failed to resolve callback method IDs (%s)", methods[i].name);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, cls);
+            (*env)->DeleteGlobalRef(env, ctx->callback_obj);
+            free(ctx);
+            return 0;
+        }
     }
+    (*env)->DeleteLocalRef(env, cls);
 
     /* Build callbacks struct */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -1200,9 +1198,23 @@ JNI_FN(getStats)(JNIEnv *env, jobject thiz, jlong client)
     return arr;
 }
 
+/* Stores v in arr[idx] and drops the local reference. A NULL v means the
+ * call that made it failed with an exception pending (OutOfMemoryError):
+ * returns -1 so the caller stops before its next JNI call. */
+static int
+jni_store_element(JNIEnv *env, jobjectArray arr, jsize idx, jobject v)
+{
+    if (!v) return -1;
+    (*env)->SetObjectArrayElement(env, arr, idx, v);
+    (*env)->DeleteLocalRef(env, v);
+    return 0;
+}
+
 /*
  * getPaths(client) → Array<Any>
  * Returns array of Object arrays, each: [handle, status, iface, bytesTx, bytesRx, srttMs]
+ * An allocation failure returns NULL at once and leaves its OutOfMemoryError
+ * pending for Kotlin; the JVM frees the local references when this returns.
  */
 JNIEXPORT jobjectArray JNICALL
 JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
@@ -1216,7 +1228,20 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
                                     MAX_PATHS, &n_paths);
     if (rc != MQVPN_OK || n_paths <= 0) return NULL;
 
+    /* Classes and boxing methods: looked up once per call. */
     jclass objClass = (*env)->FindClass(env, "java/lang/Object");
+    if (!objClass) return NULL;
+    jclass longCls = (*env)->FindClass(env, "java/lang/Long");
+    if (!longCls) return NULL;
+    jclass intCls = (*env)->FindClass(env, "java/lang/Integer");
+    if (!intCls) return NULL;
+    jmethodID longOf =
+        (*env)->GetStaticMethodID(env, longCls, "valueOf", "(J)Ljava/lang/Long;");
+    if (!longOf) return NULL;
+    jmethodID intOf =
+        (*env)->GetStaticMethodID(env, intCls, "valueOf", "(I)Ljava/lang/Integer;");
+    if (!intOf) return NULL;
+
     jobjectArray outer = (*env)->NewObjectArray(env, n_paths, objClass, NULL);
     if (!outer) return NULL;
 
@@ -1224,42 +1249,29 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
         /* Each path: [handle(Long), status(Int), iface(String),
          *   bytesTx(Long), bytesRx(Long), srttMs(Long)] */
         jobjectArray inner = (*env)->NewObjectArray(env, 6, objClass, NULL);
-
-        /* Box primitives */
-        jclass longCls = (*env)->FindClass(env, "java/lang/Long");
-        jmethodID longOf =
-            (*env)->GetStaticMethodID(env, longCls, "valueOf", "(J)Ljava/lang/Long;");
-
-        jclass intCls = (*env)->FindClass(env, "java/lang/Integer");
-        jmethodID intOf =
-            (*env)->GetStaticMethodID(env, intCls, "valueOf", "(I)Ljava/lang/Integer;");
-
-        (*env)->SetObjectArrayElement(
-            env, inner, 0,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].handle));
-        (*env)->SetObjectArrayElement(
-            env, inner, 1,
-            (*env)->CallStaticObjectMethod(env, intCls, intOf, (jint)paths[i].status));
-        (*env)->SetObjectArrayElement(env, inner, 2,
-                                      (*env)->NewStringUTF(env, paths[i].name));
-        (*env)->SetObjectArrayElement(
-            env, inner, 3,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf,
-                                           (jlong)paths[i].bytes_tx));
-        (*env)->SetObjectArrayElement(
-            env, inner, 4,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf,
-                                           (jlong)paths[i].bytes_rx));
-        (*env)->SetObjectArrayElement(env, inner, 5,
-                                      (*env)->CallStaticObjectMethod(
-                                          env, longCls, longOf, (jlong)paths[i].srtt_ms));
+        if (!inner) return NULL;
+        jobject v =
+            (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].handle);
+        if (jni_store_element(env, inner, 0, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, intCls, intOf, (jint)paths[i].status);
+        if (jni_store_element(env, inner, 1, v) < 0) return NULL;
+        v = (*env)->NewStringUTF(env, paths[i].name);
+        if (jni_store_element(env, inner, 2, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf,
+                                           (jlong)paths[i].bytes_tx);
+        if (jni_store_element(env, inner, 3, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf,
+                                           (jlong)paths[i].bytes_rx);
+        if (jni_store_element(env, inner, 4, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].srtt_ms);
+        if (jni_store_element(env, inner, 5, v) < 0) return NULL;
 
         (*env)->SetObjectArrayElement(env, outer, i, inner);
         (*env)->DeleteLocalRef(env, inner);
-        (*env)->DeleteLocalRef(env, longCls);
-        (*env)->DeleteLocalRef(env, intCls);
     }
 
+    (*env)->DeleteLocalRef(env, longCls);
+    (*env)->DeleteLocalRef(env, intCls);
     (*env)->DeleteLocalRef(env, objClass);
     return outer;
 }

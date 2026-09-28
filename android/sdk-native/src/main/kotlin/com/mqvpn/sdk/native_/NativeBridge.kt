@@ -210,14 +210,14 @@ object NativeBridge {
 
     /**
      * mqvpn_client_get_stats(client) → LongArray:
-     * [bytesTx, bytesRx, pktsTx, pktsRx, rttUs, connUptimeMs]
+     * [bytesTx, bytesRx, dgramSent, dgramRecv, dgramLost, dgramAcked, srttMs]
      */
     external fun getStats(client: Long): LongArray?
 
     /**
      * mqvpn_client_get_paths(client) → Array of Object arrays.
      * Each inner array: [handle(Long), status(Int), iface(String),
-     *   bytesTx(Long), bytesRx(Long), rttUs(Long)]
+     *   bytesTx(Long), bytesRx(Long), srttMs(Long)]
      */
     external fun getPaths(client: Long): Array<Any>?
 
