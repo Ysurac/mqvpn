@@ -151,8 +151,9 @@ internal class PathManager(
      * The reactor found the path's fd closed behind us (POLLNVAL). Engine
      * thread (called by the executor's onBadFd). The number may already
      * belong to another socket, so it is dropped from the ledger WITHOUT a
-     * close; the Network stays in the monitor's set and the next
-     * Lost/Available cycle re-adds it.
+     * close. No Lost comes while the Network stays up, so it also leaves the
+     * monitor's set, as on a bind failure: the next capability update
+     * re-adds the path with a fresh fd.
      */
     fun handleBadFd(handle: Long) {
         val network = pathHandles.entries.firstOrNull { it.value == handle }?.key
@@ -162,6 +163,7 @@ internal class PathManager(
         val rc = tunnel.removePath(handle)
         if (rc != 0) Log.w(TAG, "removePath for handle=$handle returned $rc")
         checkReleased(tunnel.pathReleased(handle), "handle=$handle")
+        if (network != null) networkMonitor.removeNetwork(network)
     }
 
     internal fun checkReleased(rc: Int, what: String) {

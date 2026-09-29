@@ -3,7 +3,9 @@
 
 package com.mqvpn.sdk.core.internal
 
+import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import com.mqvpn.sdk.core.MqvpnTunnel
 import com.mqvpn.sdk.core.TestReflection
 import com.mqvpn.sdk.network.NetworkEvent
@@ -20,6 +22,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows
+import org.robolectric.shadows.ShadowNetworkCapabilities
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -28,7 +32,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * if onLost fires while bindAndDetachUdp is running on Dispatchers.IO,
  * the post-bind executor block must NOT call addPath. Otherwise a path
  * slot would be leaked, bound to an already-dead Network handle.
- * Also the bad-fd chain: the ledger is cleared WITHOUT a close.
+ * Also the bad-fd chain: the ledger is cleared WITHOUT a close, and the
+ * network is re-added on the next capability update.
  *
  * Tests use a synchronous [MqvpnExecutor], injected [bindUdp] / [closeFd]
  * lambdas (so PathBinder and the native close are bypassed), and a real
@@ -165,6 +170,44 @@ class PathManagerRaceTest {
         assertTrue("the number may belong to another socket: never closed here, got $closed", closed.isEmpty())
         // The destroyed dummy tunnel answers INVALID_STATE, not POISONED: no fatal.
         assertTrue("no fatal, got $fatal", fatal.isEmpty())
+    }
+
+    @Test
+    fun `bad fd - the next capability update re-adds the network`() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val monitor = NetworkMonitor(context)
+        val events = mutableListOf<NetworkEvent>()
+        monitor.start { events.add(it) }
+        val cb = Shadows.shadowOf(context.getSystemService(ConnectivityManager::class.java))
+            .networkCallbacks.single()
+        val net = newNetwork(netId = 600)
+        val caps = ShadowNetworkCapabilities.newInstance()
+        Shadows.shadowOf(caps).addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+
+        cb.onCapabilitiesChanged(net, caps)
+        cb.onCapabilitiesChanged(net, caps)
+        assertEquals("a network that stays up is announced once", 1,
+            events.count { it is NetworkEvent.Available })
+
+        val pm = PathManager(
+            executor = syncExecutor,
+            tunnel = createDummyTunnel(),
+            networkMonitor = monitor,
+            protector = { true },
+            serverHost = "1.2.3.4",
+            serverPort = 443,
+            onFatal = { fail("no fatal expected: $it") },
+            bindUdp = { _, _, _, _ -> FAKE_FD },
+            closeFd = { },
+        )
+        injectLedger(pm, net, handle = 42L, fd = FAKE_FD)
+
+        pm.handleBadFd(42L)
+        cb.onCapabilitiesChanged(net, caps)
+
+        assertEquals("no Lost comes while the network stays up: the next update re-adds it", 2,
+            events.count { it is NetworkEvent.Available })
+        monitor.stop()
     }
 
     @Test
