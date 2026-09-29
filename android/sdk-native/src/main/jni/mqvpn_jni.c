@@ -6,13 +6,22 @@
  *
  * Maps NativeBridge.kt external funs to libmqvpn C API.
  *
- * Thread model: All client methods (clientConnect, clientTick, etc.) must be
- * called from a single "executor" thread. Callbacks from libmqvpn fire on the
- * same thread (since the library is sans-I/O), so GetEnv normally succeeds.
- * Fallback AttachCurrentThread + DetachCurrentThread is provided for safety.
+ * Thread model: every client and reactor method (clientConnect, clientTick,
+ * reactorWait, reactorAddPath, reactorFree, ...) must be called from the
+ * single engine thread the Kotlin MqvpnPoller runs, with three exceptions:
+ * reactorNew runs before that thread exists (the service creates the reactor
+ * on the main thread, in onCreate), and reactorWake and closeFd may come from
+ * any thread. There is one engine thread per service instance, and two may
+ * overlap while a service is replaced — hence the locked per-client context
+ * table below. Callbacks from libmqvpn fire on the client's engine thread
+ * (the library is sans-I/O), so GetEnv normally succeeds;
+ * AttachCurrentThread is the fallback.
  *
- * tun_output and send_packet use direct write()/sendto() — no JNI upcall for
- * the hot path.
+ * Transport (ABI 3): the library owns no socket. Each path fd Kotlin creates
+ * is wrapped in a bundled POSIX bind ctx (send: Linux GSO/sendmmsg with the
+ * sticky fallback; receive: UDP_GRO) by the reactor in src/platform/android/,
+ * which also poll()s the fds and drains them on the engine thread inside
+ * reactorWait. No datagram crosses JNI. tun_output stays a direct write().
  */
 
 #include <jni.h>
@@ -22,13 +31,17 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <android/log.h>
 
 #include "libmqvpn.h"
+#include "log.h"
 #include "mqvpn_internal.h"
+#include "platform/android/reactor.h"
 #include "reorder.h"
 
 #define LOG_TAG   "mqvpn_jni"
@@ -36,11 +49,52 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
+/* Android transport policy. Pushed to BOTH the core (mqvpn_config_set_udp_gso
+ * in clientNew) and the bind (reactorAddPath), the way the Linux platform
+ * pushes its parsed UdpGso to both, so core batching and bind GSO can never
+ * split. Android is a Linux kernel: GSO/GRO engage where supported and the
+ * bind falls back by itself where not. No MqvpnConfig key (no new
+ * user-facing configuration in ABI 3). */
+#define ANDROID_UDP_GSO 1
+#define ANDROID_UDP_GRO 1
+
+/* Level filter of the global sink below. The library's own global level is
+ * set to DEBUG once, in JNI_OnLoad, before any thread can log, and never
+ * written again (it is a plain variable); the filter that follows
+ * MqvpnConfig.logLevel is this atomic, stored by configSetLogLevel. Two
+ * sessions that overlap while a service is replaced share it: the later
+ * setting wins. */
+static _Atomic int g_global_log_threshold = MQVPN_LOG_INFO;
+
+/* Global library log sink. Every mqvpn_log() line (on Android: the bind's
+ * udp-gso: / udp-gro: markers and WARNs, the reactor, the hybrid lwIP glue)
+ * used to go to the app process's stderr, which reaches nobody. Lines about
+ * one client (the path state machine's included) go through that client's
+ * log callback (jni_log) instead. Installed once in JNI_OnLoad; the tag is
+ * "mqvpn" (this file's own lines keep LOG_TAG). Runs on whichever thread
+ * logged; __android_log_print is thread-safe. */
+static void
+jni_global_log_sink(mqvpn_log_level_t level, const char *msg, void *ctx)
+{
+    (void)ctx;
+    if ((int)level < atomic_load_explicit(&g_global_log_threshold, memory_order_relaxed))
+        return;
+    int prio;
+    switch (level) {
+    case MQVPN_LOG_DEBUG: prio = ANDROID_LOG_DEBUG; break;
+    case MQVPN_LOG_WARN: prio = ANDROID_LOG_WARN; break;
+    case MQVPN_LOG_ERROR: prio = ANDROID_LOG_ERROR; break;
+    case MQVPN_LOG_INFO:
+    default: prio = ANDROID_LOG_INFO; break;
+    }
+    __android_log_print(prio, "mqvpn", "%s", msg ? msg : "");
+}
+
 /* ─── JNI context (user_ctx for libmqvpn callbacks) ─── */
 
 typedef struct {
     JavaVM *jvm;
-    jobject callback_obj; /* GlobalRef — must be freed in clientDestroy */
+    jobject callback_obj; /* GlobalRef — freed in reactorClientDestroy */
     int tun_fd;           /* cached for fast write() in tun_output */
 
     /* Cached jmethodIDs (looked up once in clientNew) */
@@ -62,11 +116,60 @@ static jmethodID g_platform_trust_verify = NULL;
 static jclass g_byte_array_cls = NULL;
 
 /*
- * Active JNI context — Android VpnService runs a single client per process.
- * Set in clientNew, cleared in clientDestroy.
- * If multi-client support is needed later, replace with a hash table.
+ * JNI context per client, looked up by the client pointer. A VpnService runs
+ * one client at a time, but a service being replaced while its predecessor's
+ * finalizer is still running (a stop() whose join timed out) creates the next
+ * client before the previous one is destroyed; a process-wide "active
+ * context" would then be freed or updated for the wrong client. Small fixed
+ * table under a mutex: registered in clientNew, removed in
+ * reactorClientDestroy, read by clientSetTunActive.
  */
-static jni_ctx_t *s_active_ctx = NULL;
+/* A client whose destroy never runs (engine thread died) keeps its slot for
+ * the process's life; a VpnService process never needs more than two. */
+#define JNI_MAX_CLIENTS 4
+static struct {
+    mqvpn_client_t *client;
+    jni_ctx_t *ctx;
+} g_clients[JNI_MAX_CLIENTS];
+static pthread_mutex_t g_clients_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int
+ctx_register(mqvpn_client_t *client, jni_ctx_t *ctx)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_clients_lock);
+    for (int i = 0; i < JNI_MAX_CLIENTS; i++) {
+        if (!g_clients[i].client) {
+            g_clients[i].client = client;
+            g_clients[i].ctx = ctx;
+            rc = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_clients_lock);
+    return rc;
+}
+
+/* The context registered for client, or NULL; with take != 0 it is also
+ * removed from the table (the caller owns it from then on). */
+static jni_ctx_t *
+ctx_lookup(mqvpn_client_t *client, int take)
+{
+    jni_ctx_t *ctx = NULL;
+    pthread_mutex_lock(&g_clients_lock);
+    for (int i = 0; i < JNI_MAX_CLIENTS; i++) {
+        if (g_clients[i].client == client) {
+            ctx = g_clients[i].ctx;
+            if (take) {
+                g_clients[i].client = NULL;
+                g_clients[i].ctx = NULL;
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_clients_lock);
+    return ctx;
+}
 
 /*
  * Helper: get JNIEnv for the current thread.
@@ -152,6 +255,8 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
 {
     (void)reserved;
     g_jvm = vm;
+    mqvpn_log_set_sink(jni_global_log_sink, NULL);
+    mqvpn_log_set_level(MQVPN_LOG_DEBUG); /* the sink filters: g_global_log_threshold */
 
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) {
@@ -204,9 +309,6 @@ jni_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
             LOGW("tun write failed: %s", strerror(errno));
     }
 }
-
-/* send_packet: NULL — we use fd-only mode.
- * libmqvpn calls sendto() directly on the path fd. */
 
 /* tunnel_config_ready: JNI upcall to Java */
 static void
@@ -579,8 +681,13 @@ JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
 {
     (void)env;
     (void)thiz;
-    return mqvpn_config_set_log_level((mqvpn_config_t *)(intptr_t)cfg,
-                                      (mqvpn_log_level_t)level);
+    int rc = mqvpn_config_set_log_level((mqvpn_config_t *)(intptr_t)cfg,
+                                        (mqvpn_log_level_t)level);
+    /* The same level for the process-wide lines (the bind, the reactor, the
+     * lwIP glue), which do not belong to any one client. */
+    if (rc == MQVPN_OK)
+        atomic_store_explicit(&g_global_log_threshold, (int)level, memory_order_relaxed);
+    return rc;
 }
 
 /* configSetMultipath(cfg, enable) → int */
@@ -698,7 +805,7 @@ JNI_FN(configSetHybridTcpMode)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
  *
  * Creates a GlobalRef for callbackObj and caches all jmethodIDs.
  * The GlobalRef prevents GC from collecting the callback object.
- * It is released in clientDestroy.
+ * It is released in reactorClientDestroy.
  */
 JNIEXPORT jlong JNICALL
 JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
@@ -715,6 +822,12 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         LOGE("mqvpn_config_set_cert_verifier failed: %d", vrc);
         return 0;
     }
+    /* Same constant the reactor hands the bind: one source for the policy. */
+    int grc = mqvpn_config_set_udp_gso((mqvpn_config_t *)(intptr_t)cfg, ANDROID_UDP_GSO);
+    if (grc != MQVPN_OK) {
+        LOGE("mqvpn_config_set_udp_gso failed: %d", grc);
+        return 0;
+    }
 
     jni_ctx_t *ctx = calloc(1, sizeof(jni_ctx_t));
     if (!ctx) return 0;
@@ -729,43 +842,40 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         return 0;
     }
 
-    /* Cache jmethodIDs — these are stable for the lifetime of the class. */
+    /* Cache jmethodIDs — these are stable for the lifetime of the class. A
+     * failed lookup leaves NoSuchMethodError pending, and a JNI call under a
+     * pending exception is undefined behaviour (CheckJNI aborts), so each
+     * GetMethodID is checked before the next. */
     jclass cls = (*env)->GetObjectClass(env, callbackObj);
-
-    ctx->mid_tunnel_config_ready =
-        (*env)->GetMethodID(env, cls, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V");
-
-    ctx->mid_tunnel_closed =
-        (*env)->GetMethodID(env, cls, "onNativeTunnelClosed", "(I)V");
-
-    ctx->mid_state_changed =
-        (*env)->GetMethodID(env, cls, "onNativeStateChanged", "(II)V");
-
-    ctx->mid_path_event = (*env)->GetMethodID(env, cls, "onNativePathEvent", "(JI)V");
-
-    ctx->mid_log = (*env)->GetMethodID(env, cls, "onNativeLog", "(ILjava/lang/String;)V");
-
-    ctx->mid_reconnect_scheduled =
-        (*env)->GetMethodID(env, cls, "onNativeReconnectScheduled", "(I)V");
-
-    (*env)->DeleteLocalRef(env, cls);
-
-    /* Check all method IDs resolved */
-    if (!ctx->mid_tunnel_config_ready || !ctx->mid_tunnel_closed ||
-        !ctx->mid_state_changed || !ctx->mid_path_event || !ctx->mid_log ||
-        !ctx->mid_reconnect_scheduled) {
-        LOGE("Failed to resolve callback method IDs");
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        (*env)->DeleteGlobalRef(env, ctx->callback_obj);
-        free(ctx);
-        return 0;
+    const struct {
+        jmethodID *mid;
+        const char *name;
+        const char *sig;
+    } methods[] = {
+        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V"},
+        {&ctx->mid_tunnel_closed, "onNativeTunnelClosed", "(I)V"},
+        {&ctx->mid_state_changed, "onNativeStateChanged", "(II)V"},
+        {&ctx->mid_path_event, "onNativePathEvent", "(JI)V"},
+        {&ctx->mid_log, "onNativeLog", "(ILjava/lang/String;)V"},
+        {&ctx->mid_reconnect_scheduled, "onNativeReconnectScheduled", "(I)V"},
+    };
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
+        *methods[i].mid = (*env)->GetMethodID(env, cls, methods[i].name, methods[i].sig);
+        if (!*methods[i].mid || (*env)->ExceptionCheck(env)) {
+            LOGE("Failed to resolve callback method IDs (%s)", methods[i].name);
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, cls);
+            (*env)->DeleteGlobalRef(env, ctx->callback_obj);
+            free(ctx);
+            return 0;
+        }
     }
+    (*env)->DeleteLocalRef(env, cls);
 
     /* Build callbacks struct */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = jni_tun_output;
     cbs.tunnel_config_ready = jni_tunnel_config_ready;
-    cbs.send_packet = NULL; /* fd-only mode — library uses sendto() */
     cbs.tunnel_closed = jni_tunnel_closed;
     cbs.ready_for_tun = NULL; /* Android creates TUN in tunnel_config_ready */
     cbs.state_changed = jni_state_changed;
@@ -784,32 +894,57 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         return 0;
     }
 
-    s_active_ctx = ctx;
+    if (ctx_register(client, ctx) != 0) {
+        /* More clients alive than a service lifecycle can produce: refuse
+         * rather than lose track of a context. */
+        LOGE("too many live clients (%d)", JNI_MAX_CLIENTS);
+        mqvpn_client_destroy(client);
+        (*env)->DeleteGlobalRef(env, ctx->callback_obj);
+        free(ctx);
+        return 0;
+    }
     return (jlong)(intptr_t)client;
 }
 
 /*
- * clientDestroy(client: Long)
+ * reactorClientDestroy(reactor: Long, client: Long)
  *
- * Frees the client and releases the GlobalRef on the callback object.
+ * Whole-client teardown through the reactor (the destroy contract of
+ * libmqvpn.h: stop polling, harvest RX totals, mqvpn_client_destroy — which
+ * finalises every attached bind ctx — then forget the table), then releases
+ * the GlobalRef on the callback object. Kotlin closes the path fds AFTER this
+ * returns; the client handle is invalid afterwards. The only destroy entry
+ * point. Without a reactor (a caller bug: the executor always owns one) the
+ * client is destroyed directly, as clientNew does on its full-table path —
+ * the reactor composite over an empty table — and the error is logged.
  */
 JNIEXPORT void JNICALL
-JNI_FN(clientDestroy)(JNIEnv *env, jobject thiz, jlong client)
+JNI_FN(reactorClientDestroy)(JNIEnv *env, jobject thiz, jlong reactor, jlong client)
 {
     (void)thiz;
+    mqvpn_android_reactor_t *r = (mqvpn_android_reactor_t *)(intptr_t)reactor;
     mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
     if (!c) return;
 
-    /* Retrieve jni_ctx from s_active_ctx before destroy invalidates client.
-     * Single-client-per-process model matches Android VpnService. */
-    jni_ctx_t *ctx = s_active_ctx;
-    mqvpn_client_destroy(c);
-
-    if (ctx) {
-        (*env)->DeleteGlobalRef(env, ctx->callback_obj);
-        free(ctx);
-        s_active_ctx = NULL;
+    /* Take THIS client's context out of the table before the destroy
+     * invalidates the pointer; a client created meanwhile keeps its own
+     * entry untouched. No entry means c is not a live client of this bridge
+     * (clientNew either registers a client or destroys it): leave it alone. */
+    jni_ctx_t *ctx = ctx_lookup(c, 1);
+    if (!ctx) {
+        LOGE("reactorClientDestroy: client %p unknown (already destroyed?)", (void *)c);
+        return;
     }
+
+    if (r) {
+        mqvpn_android_reactor_client_destroy(r, c);
+    } else {
+        LOGE("reactorClientDestroy: no reactor; destroying the client directly");
+        mqvpn_client_destroy(c);
+    }
+
+    (*env)->DeleteGlobalRef(env, ctx->callback_obj);
+    free(ctx);
 }
 
 /* clientConnect(client) → int */
@@ -839,9 +974,10 @@ JNI_FN(clientSetTunActive)(JNIEnv *env, jobject thiz, jlong client, jboolean act
     (void)thiz;
     mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
 
-    /* Update cached tun_fd in jni_ctx for tun_output fast path */
-    if (s_active_ctx) {
-        s_active_ctx->tun_fd = active ? tunFd : -1;
+    /* Update THIS client's cached tun_fd for the tun_output fast path */
+    jni_ctx_t *ctx = ctx_lookup(c, 0);
+    if (ctx) {
+        ctx->tun_fd = active ? tunFd : -1;
     }
 
     return mqvpn_client_set_tun_active(c, active ? 1 : 0, tunFd);
@@ -851,8 +987,8 @@ JNI_FN(clientSetTunActive)(JNIEnv *env, jobject thiz, jlong client, jboolean act
  * clientSetServerAddr(client, host, port) → int
  *
  * Resolves host:port to a sockaddr and calls mqvpn_client_set_server_addr().
- * Must be called before clientConnect() — xquic needs the peer address for
- * sendto() in fd-only mode.
+ * Must be called before clientConnect() — xquic needs the peer address
+ * before the first path can send.
  */
 JNIEXPORT jint JNICALL
 JNI_FN(clientSetServerAddr)(JNIEnv *env, jobject thiz, jlong client, jstring host,
@@ -897,87 +1033,125 @@ JNI_FN(clientTick)(JNIEnv *env, jobject thiz, jlong client)
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
- *  Path management
+ *  Reactor — the engine thread's poll()/eventfd loop and the path lifecycle
+ *  (src/platform/android/reactor.h). Owned by the Kotlin executor, not by a
+ *  client: it outlives sessions and reactorWake never touches a client.
  * ════════════════════════════════════════════════════════════════════════════ */
 
-/* addPathFd(client, fd, iface) → long (path handle) */
+/* reactorNew() → long (reactor pointer), 0 on failure */
 JNIEXPORT jlong JNICALL
-JNI_FN(addPathFd)(JNIEnv *env, jobject thiz, jlong client, jint fd, jstring iface)
-{
-    (void)thiz;
-    mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
-
-    mqvpn_path_desc_t desc;
-    memset(&desc, 0, sizeof(desc));
-    desc.struct_size = sizeof(desc);
-    desc.fd = fd;
-
-    if (iface) {
-        const char *name = (*env)->GetStringUTFChars(env, iface, NULL);
-        if (name) {
-            snprintf(desc.iface, sizeof(desc.iface), "%s", name);
-            (*env)->ReleaseStringUTFChars(env, iface, name);
-        }
-    }
-
-    /* Populate local_addr via getsockname() — xquic needs correct local
-     * address size (16 for IPv4, 28 for IPv6), not sizeof(sockaddr_storage). */
-    struct sockaddr_storage ss;
-    socklen_t ss_len = sizeof(ss);
-    if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) == 0) {
-        memcpy(desc.local_addr, &ss, ss_len);
-        desc.local_addr_len = ss_len;
-    }
-
-    return (jlong)mqvpn_client_add_path_fd(c, fd, &desc);
-}
-
-/* removePath(client, pathHandle) → int */
-JNIEXPORT jint JNICALL
-JNI_FN(removePath)(JNIEnv *env, jobject thiz, jlong client, jlong pathHandle)
+JNI_FN(reactorNew)(JNIEnv *env, jobject thiz)
 {
     (void)env;
     (void)thiz;
-    return mqvpn_client_remove_path((mqvpn_client_t *)(intptr_t)client,
-                                    (mqvpn_path_handle_t)pathHandle);
+    return (jlong)(intptr_t)mqvpn_android_reactor_new();
+}
+
+/* reactorFree(reactor): after the poller thread has left its loop and every
+ * client was destroyed through reactorClientDestroy. */
+JNIEXPORT void JNICALL
+JNI_FN(reactorFree)(JNIEnv *env, jobject thiz, jlong reactor)
+{
+    (void)env;
+    (void)thiz;
+    mqvpn_android_reactor_free((mqvpn_android_reactor_t *)(intptr_t)reactor);
+}
+
+/* reactorWake(reactor) → int. Any thread. */
+JNIEXPORT jint JNICALL
+JNI_FN(reactorWake)(JNIEnv *env, jobject thiz, jlong reactor)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_android_reactor_wake((mqvpn_android_reactor_t *)(intptr_t)reactor);
+}
+
+/* reactorWait(reactor, client, timeoutMs) → int: drains performed, or -1.
+ * client may be 0 only while no path is attached. */
+JNIEXPORT jint JNICALL
+JNI_FN(reactorWait)(JNIEnv *env, jobject thiz, jlong reactor, jlong client,
+                    jint timeoutMs)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_android_reactor_wait((mqvpn_android_reactor_t *)(intptr_t)reactor,
+                                      (mqvpn_client_t *)(intptr_t)client, (int)timeoutMs);
+}
+
+/* reactorTakeBadFd(reactor) → long: the next handle whose fd was found closed
+ * behind the platform (POLLNVAL), or -1. Delivered once. */
+JNIEXPORT jlong JNICALL
+JNI_FN(reactorTakeBadFd)(JNIEnv *env, jobject thiz, jlong reactor)
+{
+    (void)env;
+    (void)thiz;
+    return (jlong)mqvpn_android_reactor_take_bad_fd(
+        (mqvpn_android_reactor_t *)(intptr_t)reactor);
+}
+
+/* reactorAddPath(reactor, client, fd, iface) → long (path handle), -1 on
+ * failure with the fd untouched (Kotlin closes it). The fd is BORROWED: the
+ * bind ctx never closes it. */
+JNIEXPORT jlong JNICALL
+JNI_FN(reactorAddPath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client, jint fd,
+                       jstring iface)
+{
+    (void)thiz;
+    char name[16] = {0};
+    if (iface) {
+        const char *n = (*env)->GetStringUTFChars(env, iface, NULL);
+        /* NULL: OutOfMemoryError pending. Fail with the fd untouched. */
+        if (!n) return -1;
+        snprintf(name, sizeof(name), "%s", n);
+        (*env)->ReleaseStringUTFChars(env, iface, n);
+    }
+    return (jlong)mqvpn_android_reactor_add_path(
+        (mqvpn_android_reactor_t *)(intptr_t)reactor, (mqvpn_client_t *)(intptr_t)client,
+        (int)fd, name, ANDROID_UDP_GSO, ANDROID_UDP_GRO);
+}
+
+/* reactorRemovePath(reactor, client, pathHandle) → int. Orderly removal:
+ * the library abandons the path and the reactor stops polling the fd; Kotlin
+ * then closes the fd (never on the bad-fd chain) and calls reactorPathReleased. */
+JNIEXPORT jint JNICALL
+JNI_FN(reactorRemovePath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client,
+                          jlong pathHandle)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_android_reactor_remove_path((mqvpn_android_reactor_t *)(intptr_t)reactor,
+                                             (mqvpn_client_t *)(intptr_t)client,
+                                             (mqvpn_path_handle_t)pathHandle);
+}
+
+/* reactorPathReleased(reactor, client, pathHandle) → int: MQVPN_OK, a library
+ * error (the transport then stays library-owned until destroy), or
+ * MQVPN_REACTOR_POISONED (-100: ledger corruption, end the session). */
+JNIEXPORT jint JNICALL
+JNI_FN(reactorPathReleased)(JNIEnv *env, jobject thiz, jlong reactor, jlong client,
+                            jlong pathHandle)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_android_reactor_path_released(
+        (mqvpn_android_reactor_t *)(intptr_t)reactor, (mqvpn_client_t *)(intptr_t)client,
+        (mqvpn_path_handle_t)pathHandle);
+}
+
+/* closeFd(fd) → 0, or the errno of a failed close(2) (NativeBridge.closeFd
+ * says why the close is untagged). Not retried on EINTR: Linux has released
+ * the fd by then. Any thread. */
+JNIEXPORT jint JNICALL
+JNI_FN(closeFd)(JNIEnv *env, jobject thiz, jint fd)
+{
+    (void)env;
+    (void)thiz;
+    return close(fd) == 0 ? 0 : errno;
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
- *  I/O feed
+ *  I/O feed (TUN only — path receive happens inside reactorWait)
  * ════════════════════════════════════════════════════════════════════════════ */
-
-/*
- * onSocketRecv(client, pathHandle, buf, offset, len, peerAddr, peerAddrLen)
- *
- * Feeds a received UDP packet into the engine.
- * peerAddr is raw sockaddr_storage bytes from recvfrom().
- */
-JNIEXPORT jint JNICALL
-JNI_FN(onSocketRecv)(JNIEnv *env, jobject thiz, jlong client, jlong pathHandle,
-                     jbyteArray buf, jint offset, jint len, jbyteArray peerAddr,
-                     jint peerAddrLen)
-{
-    (void)thiz;
-    mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
-
-    jbyte *pkt = (*env)->GetByteArrayElements(env, buf, NULL);
-    if (!pkt) return MQVPN_ERR_NO_MEMORY;
-
-    jbyte *addr = (*env)->GetByteArrayElements(env, peerAddr, NULL);
-    if (!addr) {
-        (*env)->ReleaseByteArrayElements(env, buf, pkt, JNI_ABORT);
-        return MQVPN_ERR_NO_MEMORY;
-    }
-
-    int rc = mqvpn_client_on_socket_recv(
-        c, (mqvpn_path_handle_t)pathHandle, (const uint8_t *)(pkt + offset), (size_t)len,
-        (const struct sockaddr *)addr, (socklen_t)peerAddrLen);
-
-    (*env)->ReleaseByteArrayElements(env, peerAddr, addr, JNI_ABORT);
-    (*env)->ReleaseByteArrayElements(env, buf, pkt, JNI_ABORT);
-
-    return rc;
-}
 
 /* onTunPacket(client, pkt, offset, len) → int */
 JNIEXPORT jint JNICALL
@@ -1035,9 +1209,26 @@ JNI_FN(getStats)(JNIEnv *env, jobject thiz, jlong client)
     return arr;
 }
 
+/* Stores v in arr[idx] and drops the local reference. v is the result of a
+ * boxing CallStaticObjectMethod or of NewStringUTF; the call failed if v is NULL
+ * or an exception is pending (OutOfMemoryError) — a Call*Method reports failure
+ * only through the exception, and its return value is then undefined. Then v is
+ * neither stored nor deleted, and -1 is returned so the caller stops before its
+ * next JNI call. */
+static int
+jni_store_element(JNIEnv *env, jobjectArray arr, jsize idx, jobject v)
+{
+    if (!v || (*env)->ExceptionCheck(env)) return -1;
+    (*env)->SetObjectArrayElement(env, arr, idx, v);
+    (*env)->DeleteLocalRef(env, v);
+    return 0;
+}
+
 /*
  * getPaths(client) → Array<Any>
  * Returns array of Object arrays, each: [handle, status, iface, bytesTx, bytesRx, srttMs]
+ * An allocation failure returns NULL at once and leaves its OutOfMemoryError
+ * pending for Kotlin; the JVM frees the local references when this returns.
  */
 JNIEXPORT jobjectArray JNICALL
 JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
@@ -1051,7 +1242,20 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
                                     MAX_PATHS, &n_paths);
     if (rc != MQVPN_OK || n_paths <= 0) return NULL;
 
+    /* Classes and boxing methods: looked up once per call. */
     jclass objClass = (*env)->FindClass(env, "java/lang/Object");
+    if (!objClass) return NULL;
+    jclass longCls = (*env)->FindClass(env, "java/lang/Long");
+    if (!longCls) return NULL;
+    jclass intCls = (*env)->FindClass(env, "java/lang/Integer");
+    if (!intCls) return NULL;
+    jmethodID longOf =
+        (*env)->GetStaticMethodID(env, longCls, "valueOf", "(J)Ljava/lang/Long;");
+    if (!longOf) return NULL;
+    jmethodID intOf =
+        (*env)->GetStaticMethodID(env, intCls, "valueOf", "(I)Ljava/lang/Integer;");
+    if (!intOf) return NULL;
+
     jobjectArray outer = (*env)->NewObjectArray(env, n_paths, objClass, NULL);
     if (!outer) return NULL;
 
@@ -1059,42 +1263,29 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
         /* Each path: [handle(Long), status(Int), iface(String),
          *   bytesTx(Long), bytesRx(Long), srttMs(Long)] */
         jobjectArray inner = (*env)->NewObjectArray(env, 6, objClass, NULL);
-
-        /* Box primitives */
-        jclass longCls = (*env)->FindClass(env, "java/lang/Long");
-        jmethodID longOf =
-            (*env)->GetStaticMethodID(env, longCls, "valueOf", "(J)Ljava/lang/Long;");
-
-        jclass intCls = (*env)->FindClass(env, "java/lang/Integer");
-        jmethodID intOf =
-            (*env)->GetStaticMethodID(env, intCls, "valueOf", "(I)Ljava/lang/Integer;");
-
-        (*env)->SetObjectArrayElement(
-            env, inner, 0,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].handle));
-        (*env)->SetObjectArrayElement(
-            env, inner, 1,
-            (*env)->CallStaticObjectMethod(env, intCls, intOf, (jint)paths[i].status));
-        (*env)->SetObjectArrayElement(env, inner, 2,
-                                      (*env)->NewStringUTF(env, paths[i].name));
-        (*env)->SetObjectArrayElement(
-            env, inner, 3,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf,
-                                           (jlong)paths[i].bytes_tx));
-        (*env)->SetObjectArrayElement(
-            env, inner, 4,
-            (*env)->CallStaticObjectMethod(env, longCls, longOf,
-                                           (jlong)paths[i].bytes_rx));
-        (*env)->SetObjectArrayElement(env, inner, 5,
-                                      (*env)->CallStaticObjectMethod(
-                                          env, longCls, longOf, (jlong)paths[i].srtt_ms));
+        if (!inner) return NULL;
+        jobject v =
+            (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].handle);
+        if (jni_store_element(env, inner, 0, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, intCls, intOf, (jint)paths[i].status);
+        if (jni_store_element(env, inner, 1, v) < 0) return NULL;
+        v = (*env)->NewStringUTF(env, paths[i].name);
+        if (jni_store_element(env, inner, 2, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf,
+                                           (jlong)paths[i].bytes_tx);
+        if (jni_store_element(env, inner, 3, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf,
+                                           (jlong)paths[i].bytes_rx);
+        if (jni_store_element(env, inner, 4, v) < 0) return NULL;
+        v = (*env)->CallStaticObjectMethod(env, longCls, longOf, (jlong)paths[i].srtt_ms);
+        if (jni_store_element(env, inner, 5, v) < 0) return NULL;
 
         (*env)->SetObjectArrayElement(env, outer, i, inner);
         (*env)->DeleteLocalRef(env, inner);
-        (*env)->DeleteLocalRef(env, longCls);
-        (*env)->DeleteLocalRef(env, intCls);
     }
 
+    (*env)->DeleteLocalRef(env, longCls);
+    (*env)->DeleteLocalRef(env, intCls);
     (*env)->DeleteLocalRef(env, objClass);
     return outer;
 }
@@ -1175,49 +1366,6 @@ JNI_FN(generateKey)(JNIEnv *env, jobject thiz)
     int rc = mqvpn_generate_key(buf, sizeof(buf));
     if (rc != MQVPN_OK) return NULL;
     return (*env)->NewStringUTF(env, buf);
-}
-
-/*
- * recvFrom(fd, buf, offset, len, peerAddrOut, peerAddrLenOut) → int
- *
- * JNI wrapper around recvfrom(). Returns bytes read, -1 on error.
- * peerAddrOut is filled with raw sockaddr_storage bytes.
- * peerAddrLenOut[0] is set to the actual peer address length.
- */
-JNIEXPORT jint JNICALL
-JNI_FN(recvFrom)(JNIEnv *env, jobject thiz, jint fd, jbyteArray buf, jint offset,
-                 jint len, jbyteArray peerAddrOut, jintArray peerAddrLenOut)
-{
-    (void)thiz;
-
-    jbyte *data = (*env)->GetByteArrayElements(env, buf, NULL);
-    if (!data) return -1;
-
-    struct sockaddr_storage ss;
-    socklen_t ss_len = sizeof(ss);
-    memset(&ss, 0, sizeof(ss));
-
-    ssize_t n =
-        recvfrom(fd, data + offset, (size_t)len, 0, (struct sockaddr *)&ss, &ss_len);
-
-    (*env)->ReleaseByteArrayElements(env, buf, data, (n > 0) ? 0 : JNI_ABORT);
-
-    if (n >= 0) {
-        /* Copy peer address to output array */
-        jbyte *addr_out = (*env)->GetByteArrayElements(env, peerAddrOut, NULL);
-        if (addr_out) {
-            jint addr_out_len = (*env)->GetArrayLength(env, peerAddrOut);
-            jint copy_len = (jint)ss_len < addr_out_len ? (jint)ss_len : addr_out_len;
-            memcpy(addr_out, &ss, copy_len);
-            (*env)->ReleaseByteArrayElements(env, peerAddrOut, addr_out, 0);
-        }
-
-        /* Set address length */
-        jint addrLen = (jint)ss_len;
-        (*env)->SetIntArrayRegion(env, peerAddrLenOut, 0, 1, &addrLen);
-    }
-
-    return (jint)n;
 }
 
 #ifdef MQVPN_JNI_TEST_SEAMS
