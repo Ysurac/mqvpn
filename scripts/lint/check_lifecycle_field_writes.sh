@@ -9,7 +9,11 @@
 # Enforce spec §3.3 / §7.1: direct assignment to path_entry_t lifecycle
 # fields is only allowed inside src/path_state_machine.c (path_on_event
 # body + helpers) and at lines tagged with a trailing /* LINT-ALLOW */
-# comment.
+# comment. It scans the tracked .c and .h files under src/ and tests/ only.
+# formal/ is outside its scope on purpose: the oracle and the CBMC harness
+# build the concrete slots they feed to the FSM (oracle_abs.h's oracle_conc
+# assigns the lifecycle fields; the harness makes every field arbitrary),
+# which is not a way around the FSM. Check 2 still covers formal/.
 #
 # Fields (spec §3.3, also see path_entry_internal.h):
 #   state | transport_attached | transport_released | xquic_path_live
@@ -28,7 +32,12 @@
 #   path_entry_internal.h  src/mqvpn_client.c, src/path_state_machine.h,
 #                          tests/test_path_state_machine.c
 #   path_state_machine.h   src/mqvpn_client.c, src/path_state_machine.c,
-#                          tests/test_path_state_machine.c
+#                          tests/test_path_state_machine.c,
+#                          formal/oracle/oracle_abs.h
+#   oracle_abs.h           tests/test_path_slot_oracle.c,
+#                          formal/cbmc/harness_path_on_event.c
+#                          (the formal-verification harnesses reach the FSM
+#                          through oracle_abs.h only)
 # Every file the table names is guarded the same way, by basename, and may
 # be #included only where the table allows it. So #including any of those
 # .c files as a translation unit, which would smuggle the definition in, is
@@ -85,6 +94,9 @@ path_entry_internal.h tests/test_path_state_machine.c
 path_state_machine.h src/mqvpn_client.c
 path_state_machine.h src/path_state_machine.c
 path_state_machine.h tests/test_path_state_machine.c
+path_state_machine.h formal/oracle/oracle_abs.h
+oracle_abs.h tests/test_path_slot_oracle.c
+oracle_abs.h formal/cbmc/harness_path_on_event.c
 '
 # Every basename the table names, once each; then as one ERE alternation,
 # dots escaped.
