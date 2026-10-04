@@ -1326,6 +1326,20 @@ ip_assigned:;
     /* Register in session table */
     uint32_t ip_off = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
     if (ip_off > 0 && ip_off <= MQVPN_ADDR_POOL_MAX) {
+        svr_conn_t *old = s->sessions[ip_off];
+        if (old && old != conn) {
+            /* A fixed IP can map two live connections to one offset when a
+             * client reconnects before its old tunnel times out. Supersede
+             * the old one: drop its registration (so n_sessions stays right
+             * and its slot never dangles), neutralise its own later release,
+             * and close it. */
+            s->sessions[ip_off] = NULL;
+            s->n_sessions--;
+            if (s->cbs.on_client_disconnected)
+                s->cbs.on_client_disconnected(ip_off, MQVPN_ERR_CLOSED, s->user_ctx);
+            old->assigned_ip.s_addr = 0;
+            if (s->engine) xqc_h3_conn_close(s->engine, &old->cid);
+        }
         s->sessions[ip_off] = conn;
         s->n_sessions++;
     }
