@@ -879,6 +879,24 @@ mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c)
     return 0;
 }
 
+/* Test-only: plant/read conn->masque_request (ABI-hidden). */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_set_masque_request(mqvpn_client_t *c, void *req)
+{
+    if (!c || !c->conn) return -1;
+    c->conn->masque_request = (xqc_h3_request_t *)req;
+    return 0;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_masque_request_is_null(const mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    return c->conn->masque_request == NULL ? 1 : 0;
+}
+
 MQVPN_INTERNAL
 uint64_t
 mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c)
@@ -2045,6 +2063,10 @@ cli_connect_ip_on_request_close(cli_conn_t *conn)
     if (!conn->tunnel_ok && !conn->client->shutting_down)
         cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
     conn->tunnel_ok = 0;
+    /* xquic frees the request right after this close-notify, but the conn
+     * lives on, so drop the borrowed pointer: later weight/dscp sends guard
+     * on NULL. (cli_conn_destroy clears it too, for the destroy path.) */
+    conn->masque_request = NULL;
 }
 
 static int

@@ -2647,6 +2647,9 @@ extern int mqvpn_client_test_conn_tunnel_notified(const mqvpn_client_t *c);
 extern int mqvpn_client_test_signal_connect_fail(mqvpn_client_t *c, int reason,
                                                  int status);
 extern int mqvpn_client_test_notify_conn_closed(mqvpn_client_t *c);
+extern int mqvpn_client_test_request_close_connect_ip(mqvpn_client_t *c);
+extern int mqvpn_client_test_set_masque_request(mqvpn_client_t *c, void *req);
+extern int mqvpn_client_test_masque_request_is_null(const mqvpn_client_t *c);
 
 static int g_tunnel_closed_count = 0;
 static mqvpn_error_t g_last_tunnel_closed_reason;
@@ -2744,6 +2747,31 @@ TEST(conn_close_skips_closed_after_connect_fail)
     ASSERT_EQ(mqvpn_client_test_notify_conn_closed(c), 0);
     ASSERT_EQ(g_tunnel_closed_count, 1);
     ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+/* Regression: a CONNECT-IP tunnel-stream close (peer RESET_STREAM, or our own
+ * close on an invalid ROUTE_ADVERTISEMENT) that does NOT destroy the conn must
+ * clear conn->masque_request, so a later path activation or control-API
+ * weight/dscp push cannot send through the freed xquic request (use-after-free).
+ * A non-NULL sentinel stands in for the request pointer. */
+TEST(request_close_clears_masque_request)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    /* Plant a sentinel as if the Extended CONNECT request were live. */
+    int sentinel = 0;
+    ASSERT_EQ(mqvpn_client_test_set_masque_request(c, &sentinel), 0);
+    ASSERT_EQ(mqvpn_client_test_masque_request_is_null(c), 0);
+
+    /* The tunnel stream closes without a conn destroy. */
+    ASSERT_EQ(mqvpn_client_test_request_close_connect_ip(c), 0);
+
+    /* The borrowed request pointer must be dropped. */
+    ASSERT_EQ(mqvpn_client_test_masque_request_is_null(c), 1);
 
     ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
     mqvpn_client_destroy(c);
@@ -4217,6 +4245,7 @@ main(void)
     run_classify_status_zero_is_protocol();
     run_connect_fail_signals_tunnel_closed_exactly_once();
     run_conn_close_skips_closed_after_connect_fail();
+    run_request_close_clears_masque_request();
     run_conn_close_fires_closed_when_not_latched();
 
     /* CONNECT-IP :status scan hardening + close classification */
