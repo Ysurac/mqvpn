@@ -4557,17 +4557,19 @@ tick_reconnect(mqvpn_client_t *c)
     client_reset_paths_for_reconnect(c);
 
     /* Rotate to the next usable primary path (issue #4271 Bug 2).
-     * Build a flags view where inactive paths (fd gone, active=0) are treated
-     * as backup so mqvpn_rotate_primary_path() skips them.  This prevents
-     * hammering a dead path when a live alternative exists. */
+     * mqvpn_reconnect_path_idx() treats inactive paths (fd gone, active=0) as
+     * backup so the rotation skips them, and falls back to an attached
+     * backup path when no attached primary is left. This prevents hammering
+     * a dead path when a live alternative exists. */
     if (c->n_paths > 0) {
         uint32_t flags[MQVPN_MAX_PATHS];
+        int attached[MQVPN_MAX_PATHS];
         for (int i = 0; i < c->n_paths; i++) {
             flags[i] = c->paths[i].flags;
-            if (!c->paths[i].platform_attached) flags[i] |= MQVPN_PATH_FLAG_BACKUP;
+            attached[i] = c->paths[i].platform_attached;
         }
         c->primary_path_idx =
-            mqvpn_rotate_primary_path(c->primary_path_idx, flags, c->n_paths);
+            mqvpn_reconnect_path_idx(c->primary_path_idx, flags, attached, c->n_paths);
         LOG_I(c, "reconnect: using path[%d] iface=%s", c->primary_path_idx,
               c->paths[c->primary_path_idx].name);
     }
