@@ -1640,6 +1640,20 @@ svr_format_peer_addr(const svr_conn_t *conn, char *buf, size_t buflen)
     snprintf(buf, buflen, "%s:%u", addr_str, port);
 }
 
+/* Reject an x-user that names a configured user (would impersonate them) or
+ * carries a character add_user forbids (would break the control-API JSON). */
+static int
+svr_x_user_name_acceptable(const mqvpn_server_t *s, const char *name)
+{
+    for (const char *p = name; *p; p++) {
+        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) return 0;
+    }
+    for (int i = 0; i < s->config.n_users; i++) {
+        if (strcmp(s->config.user_names[i], name) == 0) return 0;
+    }
+    return 1;
+}
+
 /* CONNECT-IP request: header-phase handling (validate, auth, 200 response).
  * Returns 0 on success, -1 to reset the stream. */
 static int
@@ -1687,7 +1701,10 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
         }
 
         stream->conn->connected_at_us = now_us();
-        if (strcmp(username, "(global)") == 0 && hdrs->x_user[0] != '\0')
+        /* A shared-key ("(global)") client may name itself with x-user, but
+         * not as a configured user (impersonation) or with an unsafe name. */
+        if (strcmp(username, "(global)") == 0 && hdrs->x_user[0] != '\0' &&
+            svr_x_user_name_acceptable(s, hdrs->x_user))
             snprintf(stream->conn->username, sizeof(stream->conn->username), "%s",
                      hdrs->x_user);
         else
