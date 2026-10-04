@@ -155,6 +155,80 @@ TEST(four_primaries_full_cycle)
     }
 }
 
+/* Two WANs, the first one removed: tick_reconnect() marks the detached path
+ * as backup, so [B, P] with cur=0 must move to the live path 1. Returning
+ * cur_idx here made every reconnect retry the removed WAN. */
+TEST(two_wans_first_detached_moves_to_second)
+{
+    uint32_t f[2];
+    make_flags("BP", f, 2);
+    ASSERT_EQ(mqvpn_rotate_primary_path(0, f, 2), 1);
+}
+
+/* cur_idx on a backup with one primary left: move back to the primary */
+TEST(backup_cur_returns_to_single_primary)
+{
+    uint32_t f[3];
+    make_flags("PBB", f, 3);
+    ASSERT_EQ(mqvpn_rotate_primary_path(1, f, 3), 0);
+    ASSERT_EQ(mqvpn_rotate_primary_path(2, f, 3), 0);
+}
+
+/* mqvpn_reconnect_path_idx: two WANs, path 0 removed (detached) */
+TEST(reconnect_idx_two_wans_first_removed)
+{
+    uint32_t f[2];
+    int attached[2] = {0, 1};
+    make_flags("PP", f, 2);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(0, f, attached, 2), 1);
+}
+
+/* Path = wan, BackupPath = lte, wan removed: reconnect over the backup */
+TEST(reconnect_idx_falls_back_to_attached_backup)
+{
+    uint32_t f[2];
+    int attached[2] = {0, 1};
+    make_flags("PB", f, 2);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(0, f, attached, 2), 1);
+}
+
+/* An attached primary wins over an attached backup */
+TEST(reconnect_idx_prefers_attached_primary)
+{
+    uint32_t f[3];
+    int attached[3] = {0, 1, 1};
+    make_flags("PBP", f, 3);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(0, f, attached, 3), 2);
+}
+
+/* Back on the primary once it is attached again */
+TEST(reconnect_idx_returns_to_primary)
+{
+    uint32_t f[2];
+    int attached[2] = {1, 1};
+    make_flags("PB", f, 2);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(1, f, attached, 2), 0);
+}
+
+/* Nothing attached: keep cur_idx */
+TEST(reconnect_idx_nothing_attached)
+{
+    uint32_t f[2];
+    int attached[2] = {0, 0};
+    make_flags("PP", f, 2);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(1, f, attached, 2), 1);
+}
+
+/* Both WANs attached: plain round robin, as before */
+TEST(reconnect_idx_round_robin_when_all_attached)
+{
+    uint32_t f[2];
+    int attached[2] = {1, 1};
+    make_flags("PP", f, 2);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(0, f, attached, 2), 1);
+    ASSERT_EQ(mqvpn_reconnect_path_idx(1, f, attached, 2), 0);
+}
+
 /* ── Runner ── */
 
 int
@@ -172,6 +246,14 @@ main(void)
     run_all_backup_no_rotation();
     run_issue_4257_first_dead_rotates_to_second();
     run_four_primaries_full_cycle();
+    run_two_wans_first_detached_moves_to_second();
+    run_backup_cur_returns_to_single_primary();
+    run_reconnect_idx_two_wans_first_removed();
+    run_reconnect_idx_falls_back_to_attached_backup();
+    run_reconnect_idx_prefers_attached_primary();
+    run_reconnect_idx_returns_to_primary();
+    run_reconnect_idx_nothing_attached();
+    run_reconnect_idx_round_robin_when_all_attached();
 
     printf("\n%d/%d tests passed\n", g_passed, g_run);
     return (g_passed == g_run) ? 0 : 1;
