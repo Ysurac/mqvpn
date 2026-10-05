@@ -62,6 +62,8 @@
 set -e
 
 source "$(dirname "$0")/sanitizer_check.sh"
+# Shared wait helpers (wait_for_log / wait_for_log_after).
+source "$(dirname "$0")/e2e_lib.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN=""
@@ -138,35 +140,6 @@ ip netns del "$NS_CLIENT" 2>/dev/null || true
 ip link del "$VETH_A0" 2>/dev/null || true
 ip link del "$VETH_B0" 2>/dev/null || true
 
-wait_for_log() {
-    local log_file="$1" pattern="$2" timeout="${3:-15}"
-    local elapsed=0
-    while [ "$elapsed" -lt "$timeout" ]; do
-        if grep -qE "$pattern" "$log_file" 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
-    return 1
-}
-
-# Like wait_for_log but only considers lines AFTER line number $3 —
-# needed to distinguish the post-re-add activation from the initial
-# connection-time activation of the same path.
-wait_for_log_after() {
-    local log_file="$1" pattern="$2" start_line="$3" timeout="${4:-15}"
-    local elapsed=0
-    while [ "$elapsed" -lt "$timeout" ]; do
-        if tail -n "+$((start_line + 1))" "$log_file" 2>/dev/null \
-                | grep -qE "$pattern"; then
-            return 0
-        fi
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
-    return 1
-}
 
 # ─── Setup ───
 PSK=$("$MQVPN" --genkey 2>/dev/null)
@@ -270,7 +243,7 @@ echo "OK: dual-path active"
 #
 # Admin down clears IFF_UP; the platform treats this as an immediate
 # administrative drop and closes Path A right away (logged by
-# remove_path_by_index at WRN level). Path B keeps carrying tunnel
+# remove_path_by_slot at WRN level). Path B keeps carrying tunnel
 # traffic. The addr flush mimics what NetworkManager/netplan does on a
 # real box when an interface is admin-downed.
 

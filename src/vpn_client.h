@@ -65,4 +65,12 @@ typedef struct mqvpn_client_cfg_s {
                                     * ignore any such capsule received */
 } mqvpn_client_cfg_t;
 
+/* CLI → library config bridge (src/platform/client_config_bridge.c): forwards
+ * every platform-independent field of `cfg` into `lib_cfg`. Shared by the
+ * Linux/Windows/Darwin run loops so a new knob cannot be forwarded on one
+ * platform and silently dropped on another (InitMaxPathId was, on Windows).
+ * Platform-only knobs (Linux: UdpGso) stay at the call sites. */
+void mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg,
+                                        const mqvpn_client_cfg_t *cfg);
+
 #endif /* MQVPN_VPN_CLIENT_H */

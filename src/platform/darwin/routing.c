@@ -244,7 +244,7 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
  * socket's scoped lookup never depends on which interface currently owns
  * the unscoped primary default (configd reshuffles that on every
  * interface arrival/departure). The kernel flushes a scoped pin with its
- * interface on down; try_readd_removed_path / try_reactivate_by_ifname
+ * interface on down; the netmon pre-readd / pre-reactivate adapters
  * (route_mon.c) re-install it before handing the recovered socket back
  * to xquic. */
 
@@ -428,9 +428,20 @@ setup_routes(platform_ctx_t *p)
                              "::/1",  "-interface", p->tun.name, NULL};
         const char *v6h[] = {"route",    "-n",         "add",       "-inet6",
                              "8000::/1", "-interface", p->tun.name, NULL};
-        if (run_route_cmd(v6l) == 0 && run_route_cmd(v6h) == 0) {
-            p->routing6_configured = 1;
-            LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
+        if (run_route_cmd(v6l) == 0) {
+            if (run_route_cmd(v6h) == 0) {
+                p->routing6_configured = 1;
+                LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
+            } else {
+                /* Partial install must not outlive the failure: with
+                 * routing6_configured still 0, cleanup_routes() skips the
+                 * IPv6 deletes, so a ::/1 left behind here would keep
+                 * routing half the v6 space into the TUN after disconnect. */
+                const char *v6u[] = {"route", "-n",         "delete",    "-inet6",
+                                     "::/1",  "-interface", p->tun.name, NULL};
+                (void)run_route_cmd(v6u);
+                LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
+            }
         } else {
             LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
         }
@@ -441,9 +452,9 @@ setup_routes(platform_ctx_t *p)
      * (follow-up #F1; doc block at darwin_scoped_server_pin). Best-effort:
      * an interface without upstream right now gets its pin from route_mon
      * at re-add/reactivate time instead. */
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (p->path_mgr.paths[i].iface[0] == '\0') continue;
-        (void)darwin_scoped_server_pin(p, p->path_mgr.paths[i].iface);
+    for (int i = 0; i < p->n_paths; i++) {
+        if (p->paths[i].iface[0] == '\0') continue;
+        (void)darwin_scoped_server_pin(p, p->paths[i].iface);
     }
     return 0;
 }
@@ -453,9 +464,9 @@ cleanup_routes(platform_ctx_t *p)
 {
     if (!p->routing_configured) return;
 
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (p->path_mgr.paths[i].iface[0] == '\0') continue;
-        scoped_server_pin_delete(p, p->path_mgr.paths[i].iface);
+    for (int i = 0; i < p->n_paths; i++) {
+        if (p->paths[i].iface[0] == '\0') continue;
+        scoped_server_pin_delete(p, p->paths[i].iface);
     }
 
     if (p->routing6_configured) {

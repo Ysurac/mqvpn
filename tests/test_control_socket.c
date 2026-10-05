@@ -364,23 +364,27 @@ static int g_passed = 0;
         }                                                                  \
     } while (0)
 
-/* Platform-owned RX offload counters the control socket borrows. Non-zero and
- * unequal so a get_stats regression that hardcodes 0 or swaps the pair cannot
- * pass. */
-static uint64_t g_gro_receives = 61;
-static uint64_t g_gro_datagrams = 83;
+/* Stand-in for the platform's transport getter (ctrl_rx_stats_fn). Non-zero
+ * and unequal so a get_stats regression that hardcodes 0 or swaps the pair
+ * cannot pass. */
+static void
+test_rx_stats(void *ctx, uint64_t *receives, uint64_t *datagrams)
+{
+    (void)ctx;
+    *receives = 61;
+    *datagrams = 83;
+}
 
 static int
 call_dispatch(const char *req, char *resp, size_t resp_len)
 {
     /* Stack-built context: dispatch and the handlers only read ->server,
-     * ->cli_ctx and the borrowed counter pointers, never the libevent
-     * members. */
+     * ->cli_ctx and the RX-counter getter, never the libevent members. */
     ctrl_socket_t cs = {
         .server = (mqvpn_server_t *)NULL,
         .cli_ctx = NULL,
-        .gro_receives = &g_gro_receives,
-        .gro_datagrams = &g_gro_datagrams,
+        .rx_stats = test_rx_stats,
+        .rx_ctx = NULL,
     };
     return dispatch(req, resp, resp_len, &cs);
 }
@@ -393,8 +397,8 @@ call_dispatch_client(const char *req, char *resp, size_t resp_len)
     ctrl_socket_t cs = {
         .server = (mqvpn_server_t *)NULL,
         .cli_ctx = &g_fake_cli_ctx,
-        .gro_receives = &g_gro_receives,
-        .gro_datagrams = &g_gro_datagrams,
+        .rx_stats = test_rx_stats,
+        .rx_ctx = NULL,
     };
     return dispatch(req, resp, resp_len, &cs);
 }
@@ -636,8 +640,8 @@ TEST(get_stats)
     ASSERT_CONTAINS(resp, "\"tcp_flows_total\":7");
     ASSERT_CONTAINS(resp, "\"uptime_sec\":4242");
     /* Offload counters reach the JSON from BOTH sources: udp_tx_* through
-     * mqvpn_stats_t (the library issues those sends), udp_rx_* straight from
-     * the platform's borrowed counters (GRO never crosses the library ABI).
+     * mqvpn_stats_t (the library issues those sends), udp_rx_* from the
+     * platform's transport getter (RX offload never crosses the library ABI).
      * The get_stats body is a hand-written field-by-field snprintf, so a new
      * mqvpn_stats_t field silently reads 0 here unless it is added in both
      * places — that is exactly the failure this pins. */

@@ -9,13 +9,20 @@
  *
  * These unit tests verify the library-level slot lifecycle that the reconnect
  * recovery path depends on:
- *   - drop_path() + add_path_fd() (RTM_DELLINK → RTM_NEWADDR) gives a clean PENDING slot
- *   - remove_path() + add_path_fd() (try_readd_removed_path undo → retry) reuses the slot
+ *   - drop_path() + path_released + add_path() (RTM_DELLINK → RTM_NEWADDR) gives a
+ *     clean PENDING slot
+ *   - remove_path() + path_released + add_path() (try_readd_removed_path undo → retry)
+ *     reuses the slot
  *   - Many repeated bounce cycles do not exhaust the path slot array
  *   - A CLOSED path (retries exhausted) is re-addable after reconnect
  *
  * Full reconnect-triggered re-add (the missing piece after budget exhaustion)
  * requires a live client+server and is covered by the e2e test suite.
+ *
+ * Every drop/remove is followed by mqvpn_client_on_platform_path_released(),
+ * mirroring release_transport() in src/platform/posix/netmon_common.c: the
+ * library only recycles a slot (CLOSED_FREE) once the platform reports its
+ * transport released.  Transports are in-memory fakes (tests/fake_transport.h).
  */
 
 #include <stdio.h>
@@ -24,6 +31,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "fake_transport.h"
 
 /* ── Test infrastructure ── */
 
@@ -111,14 +119,38 @@ count_paths(mqvpn_client_t *c)
 }
 
 static mqvpn_path_desc_t
-make_desc(int fd, const char *iface, uint32_t flags)
+make_desc(const char *iface, uint32_t flags)
 {
     mqvpn_path_desc_t d = {0};
     d.struct_size = sizeof(d);
-    d.fd = fd;
     d.flags = flags;
     snprintf(d.iface, sizeof(d.iface), "%s", iface);
     return d;
+}
+
+/* One fake transport per add_path() call (the library owns it until release).
+ * Ring large enough that no test reuses a fake still owned by its client:
+ * the busiest test (full_slot_array_bounce_does_not_overflow) uses
+ * MQVPN_MAX_PATHS + 4. */
+#define FAKE_RING (4 * MQVPN_MAX_PATHS)
+static fake_transport_t g_fake[FAKE_RING];
+static int g_fake_next;
+
+/* Register a path with a fresh fake transport (the old "fresh fd"). */
+static mqvpn_path_handle_t
+add_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc)
+{
+    fake_transport_t *t = &g_fake[g_fake_next++ % FAKE_RING];
+    fake_transport_init(t);
+    return mqvpn_client_add_path(c, desc, fake_path_ops(), t, NULL);
+}
+
+/* Platform closed the socket: report the transport released so the slot can
+ * reach CLOSED_FREE (netmon_common.c release_transport()). */
+static int
+release_path(mqvpn_client_t *c, mqvpn_path_handle_t h)
+{
+    return mqvpn_client_on_platform_path_released(c, h);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -127,7 +159,7 @@ make_desc(int fd, const char *iface, uint32_t flags)
  * When the kernel deletes the usb1 interface (RTM_DELLINK), the platform calls
  * drop_path() — which closes the slot without sending a QUIC close frame.
  * When the interface comes back (RTM_NEWADDR), try_readd_removed_path() creates
- * a fresh socket and calls add_path_fd().  These tests verify that slot is
+ * a fresh socket and calls add_path().  These tests verify that slot is
  * correctly reused and starts in a clean PENDING state.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -140,18 +172,19 @@ TEST(drop_then_readd_starts_pending)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(10, "usb1", 0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 10, &d);
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h1 = add_path(c, &d);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h1), MQVPN_PATH_PENDING);
 
     /* Interface disappears (RTM_DELLINK → drop_path) */
     ASSERT_EQ(mqvpn_client_drop_path(c, h1), MQVPN_OK);
     ASSERT_EQ(path_status(c, h1), MQVPN_PATH_CLOSED);
+    ASSERT_EQ(release_path(c, h1), MQVPN_OK); /* socket closed */
 
-    /* Interface reappears (RTM_NEWADDR → try_readd_removed_path → add_path_fd) */
-    mqvpn_path_desc_t d2 = make_desc(11, "usb1", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 11, &d2);
+    /* Interface reappears (RTM_NEWADDR → try_readd_removed_path → add_path) */
+    mqvpn_path_desc_t d2 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h2), MQVPN_PATH_PENDING);
 
@@ -167,15 +200,16 @@ TEST(drop_then_readd_reuses_slot)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(10, "usb1", 0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 10, &d);
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h1 = add_path(c, &d);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(count_paths(c), 1);
 
     ASSERT_EQ(mqvpn_client_drop_path(c, h1), MQVPN_OK);
+    ASSERT_EQ(release_path(c, h1), MQVPN_OK); /* socket closed */
 
-    mqvpn_path_desc_t d2 = make_desc(11, "usb1", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 11, &d2);
+    mqvpn_path_desc_t d2 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h2, h1);          /* new handle */
     ASSERT_EQ(count_paths(c), 1); /* slot reused, count unchanged */
@@ -188,12 +222,12 @@ TEST(drop_then_readd_reuses_slot)
  *
  * When activation fails (path stays PENDING), try_readd_removed_path() calls
  * remove_path() to undo the add and schedules a retry on the next netlink
- * event.  These tests verify that remove_path + add_path_fd correctly reuses
+ * event.  These tests verify that remove_path + add_path correctly reuses
  * the slot and produces a clean PENDING entry.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /*
- * undo (remove_path) + retry (add_path_fd) gives a fresh PENDING slot.
+ * undo (remove_path) + retry (add_path) gives a fresh PENDING slot.
  * This is the try_readd_removed_path retry contract.
  */
 TEST(remove_then_readd_starts_pending)
@@ -201,17 +235,18 @@ TEST(remove_then_readd_starts_pending)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(20, "usb1", 0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 20, &d);
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h1 = add_path(c, &d);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
 
     /* Undo: activation failed, try_readd_removed_path calls remove_path */
     ASSERT_EQ(mqvpn_client_remove_path(c, h1), MQVPN_OK);
     ASSERT_EQ(path_status(c, h1), MQVPN_PATH_CLOSED);
+    ASSERT_EQ(release_path(c, h1), MQVPN_OK); /* socket closed */
 
-    /* Retry: next netlink event triggers a new add_path_fd */
-    mqvpn_path_desc_t d2 = make_desc(21, "usb1", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 21, &d2);
+    /* Retry: next netlink event triggers a new add_path */
+    mqvpn_path_desc_t d2 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h2), MQVPN_PATH_PENDING);
     ASSERT_EQ(count_paths(c), 1); /* slot reused */
@@ -238,12 +273,12 @@ TEST(eight_bounces_slot_count_stable)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d0 = make_desc(10, "eth0", 0);
-    mqvpn_path_handle_t h_eth0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    mqvpn_path_desc_t d0 = make_desc("eth0", 0);
+    mqvpn_path_handle_t h_eth0 = add_path(c, &d0);
     ASSERT_NE(h_eth0, (mqvpn_path_handle_t)-1);
 
-    mqvpn_path_desc_t d1 = make_desc(11, "usb1", 0);
-    mqvpn_path_handle_t h_usb1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    mqvpn_path_desc_t d1 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h_usb1 = add_path(c, &d1);
     ASSERT_NE(h_usb1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(count_paths(c), 2);
 
@@ -251,11 +286,11 @@ TEST(eight_bounces_slot_count_stable)
         /* usb1 goes down (RTM_DELLINK) */
         ASSERT_EQ(mqvpn_client_drop_path(c, h_usb1), MQVPN_OK);
         ASSERT_EQ(path_status(c, h_usb1), MQVPN_PATH_CLOSED);
+        ASSERT_EQ(release_path(c, h_usb1), MQVPN_OK); /* socket closed */
 
-        /* usb1 comes back (RTM_NEWADDR → add_path_fd with fresh fd) */
-        int new_fd = 100 + bounce;
-        mqvpn_path_desc_t d = make_desc(new_fd, "usb1", 0);
-        h_usb1 = mqvpn_client_add_path_fd(c, new_fd, &d);
+        /* usb1 comes back (RTM_NEWADDR → add_path with a fresh transport) */
+        mqvpn_path_desc_t d = make_desc("usb1", 0);
+        h_usb1 = add_path(c, &d);
         ASSERT_NE(h_usb1, (mqvpn_path_handle_t)-1);
         ASSERT_EQ(path_status(c, h_usb1), MQVPN_PATH_PENDING);
         /* Slot count must not grow — each bounce reuses the same slot */
@@ -278,23 +313,23 @@ TEST(eight_undo_retry_cycles_slot_count_stable)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d0 = make_desc(10, "eth0", 0);
-    mqvpn_path_handle_t h_eth0 = mqvpn_client_add_path_fd(c, 10, &d0);
+    mqvpn_path_desc_t d0 = make_desc("eth0", 0);
+    mqvpn_path_handle_t h_eth0 = add_path(c, &d0);
     ASSERT_NE(h_eth0, (mqvpn_path_handle_t)-1);
 
-    mqvpn_path_desc_t d1 = make_desc(11, "usb1", 0);
-    mqvpn_path_handle_t h_usb1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    mqvpn_path_desc_t d1 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h_usb1 = add_path(c, &d1);
     ASSERT_NE(h_usb1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(count_paths(c), 2);
 
     for (int i = 0; i < 8; i++) {
         /* Undo (activation failed → remove_path) */
         ASSERT_EQ(mqvpn_client_remove_path(c, h_usb1), MQVPN_OK);
+        ASSERT_EQ(release_path(c, h_usb1), MQVPN_OK); /* socket closed */
 
-        /* Retry (next netlink event → add_path_fd) */
-        int new_fd = 100 + i;
-        mqvpn_path_desc_t d = make_desc(new_fd, "usb1", 0);
-        h_usb1 = mqvpn_client_add_path_fd(c, new_fd, &d);
+        /* Retry (next netlink event → add_path) */
+        mqvpn_path_desc_t d = make_desc("usb1", 0);
+        h_usb1 = add_path(c, &d);
         ASSERT_NE(h_usb1, (mqvpn_path_handle_t)-1);
         ASSERT_EQ(path_status(c, h_usb1), MQVPN_PATH_PENDING);
         ASSERT_EQ(count_paths(c), 2);
@@ -311,7 +346,7 @@ TEST(eight_undo_retry_cycles_slot_count_stable)
  * When the xquic path budget is exhausted and a forced reconnect is triggered,
  * the path may transition to CLOSED (retries exhausted) before the reconnect
  * completes.  After reconnect, the platform must be able to re-add the path
- * via add_path_fd() using the CLOSED slot.
+ * via add_path() using the CLOSED slot.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 /*
@@ -324,17 +359,18 @@ TEST(closed_path_readdable_after_reconnect)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(30, "usb1", 0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 30, &d);
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h1 = add_path(c, &d);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
 
     /* Path closes (retries exhausted or explicit removal) */
     ASSERT_EQ(mqvpn_client_remove_path(c, h1), MQVPN_OK);
     ASSERT_EQ(path_status(c, h1), MQVPN_PATH_CLOSED);
+    ASSERT_EQ(release_path(c, h1), MQVPN_OK); /* socket closed */
 
     /* Reconnect completes; platform re-adds usb1 with a fresh socket */
-    mqvpn_path_desc_t d2 = make_desc(31, "usb1", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 31, &d2);
+    mqvpn_path_desc_t d2 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h2, h1);
     ASSERT_EQ(path_status(c, h2), MQVPN_PATH_PENDING);
@@ -353,15 +389,16 @@ TEST(closed_via_drop_readdable)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(40, "usb1", 0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 40, &d);
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h1 = add_path(c, &d);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_drop_path(c, h1), MQVPN_OK);
     ASSERT_EQ(path_status(c, h1), MQVPN_PATH_CLOSED);
+    ASSERT_EQ(release_path(c, h1), MQVPN_OK); /* socket closed */
 
-    mqvpn_path_desc_t d2 = make_desc(41, "usb1", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 41, &d2);
+    mqvpn_path_desc_t d2 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h2), MQVPN_PATH_PENDING);
     ASSERT_EQ(count_paths(c), 1);
@@ -372,7 +409,7 @@ TEST(closed_via_drop_readdable)
 /* ═══════════════════════════════════════════════════════════════════════════
  * Group 5: Slot array capacity is not exhausted by bouncing
  *
- * Repeated bouncing on a single interface must never cause add_path_fd() to
+ * Repeated bouncing on a single interface must never cause add_path() to
  * fail with -1 (no available slots).
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -391,8 +428,8 @@ TEST(full_slot_array_bounce_does_not_overflow)
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
         char name[16];
         snprintf(name, sizeof(name), "eth%d", i);
-        mqvpn_path_desc_t d = make_desc(10 + i, name, 0);
-        handles[i] = mqvpn_client_add_path_fd(c, 10 + i, &d);
+        mqvpn_path_desc_t d = make_desc(name, 0);
+        handles[i] = add_path(c, &d);
         ASSERT_NE(handles[i], (mqvpn_path_handle_t)-1);
     }
     ASSERT_EQ(count_paths(c), MQVPN_MAX_PATHS);
@@ -400,10 +437,10 @@ TEST(full_slot_array_bounce_does_not_overflow)
     /* eth1 (slot 1) bounces 4 times; slots must stay at MQVPN_MAX_PATHS */
     for (int bounce = 0; bounce < 4; bounce++) {
         ASSERT_EQ(mqvpn_client_drop_path(c, handles[1]), MQVPN_OK);
+        ASSERT_EQ(release_path(c, handles[1]), MQVPN_OK); /* socket closed */
 
-        int new_fd = 100 + bounce;
-        mqvpn_path_desc_t d = make_desc(new_fd, "usb1", 0);
-        handles[1] = mqvpn_client_add_path_fd(c, new_fd, &d);
+        mqvpn_path_desc_t d = make_desc("usb1", 0);
+        handles[1] = add_path(c, &d);
         ASSERT_NE(handles[1], (mqvpn_path_handle_t)-1);
         ASSERT_EQ(path_status(c, handles[1]), MQVPN_PATH_PENDING);
         ASSERT_EQ(count_paths(c), MQVPN_MAX_PATHS);
@@ -428,15 +465,14 @@ TEST(new_interface_rejected_when_slots_full)
     ASSERT_NOT_NULL(c);
 
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
-        mqvpn_path_desc_t d = make_desc(10 + i, "ethX", 0);
+        mqvpn_path_desc_t d = make_desc("ethX", 0);
         snprintf(d.iface, sizeof(d.iface), "eth%d", i);
-        ASSERT_NE(mqvpn_client_add_path_fd(c, 10 + i, &d),
-                  (mqvpn_path_handle_t)-1);
+        ASSERT_NE(add_path(c, &d), (mqvpn_path_handle_t)-1);
     }
 
     /* All slots active (PENDING) — one more must be rejected */
-    mqvpn_path_desc_t overflow = make_desc(99, "usb2", 0);
-    ASSERT_EQ(mqvpn_client_add_path_fd(c, 99, &overflow), (mqvpn_path_handle_t)-1);
+    mqvpn_path_desc_t overflow = make_desc("usb2", 0);
+    ASSERT_EQ(add_path(c, &overflow), (mqvpn_path_handle_t)-1);
 
     mqvpn_client_destroy(c);
 }
@@ -445,7 +481,7 @@ TEST(new_interface_rejected_when_slots_full)
  * Group 6: Exact issue #4276 reconnect sequence
  *
  * After budget-exhaustion: try_readd_removed_path() undoes the add (calls
- * remove_path, fd=-1).  A forced reconnect completes.  cb_state_changed()
+ * remove_path + path_released).  A forced reconnect completes.  cb_state_changed()
  * fires ESTABLISHED and calls try_readd_removed_path() again.  This group
  * verifies the library-level contract that second re-add relies on.
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -453,15 +489,15 @@ TEST(new_interface_rejected_when_slots_full)
 /*
  * Full #4276 slot sequence:
  *   1. usb1 added (PENDING)
- *   2. RTM_DELLINK → drop_path (CLOSED, fd freed)
- *   3. RTM_NEWLINK → try_readd_removed_path → add_path_fd; xquic fails →
- *      undo (remove_path, fd freed again)                [CLOSED, active=0]
+ *   2. RTM_DELLINK → drop_path (CLOSED, socket closed → path_released)
+ *   3. RTM_NEWLINK → try_readd_removed_path → add_path; xquic fails →
+ *      undo (remove_path + path_released)              [CLOSED, active=0]
  *   4. Budget exhausted → reconnect completes (ESTABLISHED)
  *   5. cb_state_changed(ESTABLISHED) calls try_readd_removed_path again →
- *      add_path_fd with fresh fd → PENDING on new connection
+ *      add_path with a fresh transport → PENDING on new connection
  *
  * Steps 2-3 are simulated by drop_path then remove_path.
- * Step 5 is simulated by a second add_path_fd call.
+ * Step 5 is simulated by a second add_path call.
  */
 TEST(budget_exhausted_reconnect_reseeds_path)
 {
@@ -469,27 +505,29 @@ TEST(budget_exhausted_reconnect_reseeds_path)
     ASSERT_NOT_NULL(c);
 
     /* Step 1: initial paths */
-    mqvpn_path_desc_t d0 = make_desc(10, "eth0", 0);
-    mqvpn_path_desc_t d1 = make_desc(11, "usb1", 0);
-    mqvpn_path_handle_t h_eth0 = mqvpn_client_add_path_fd(c, 10, &d0);
-    mqvpn_path_handle_t h_usb1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    mqvpn_path_desc_t d0 = make_desc("eth0", 0);
+    mqvpn_path_desc_t d1 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h_eth0 = add_path(c, &d0);
+    mqvpn_path_handle_t h_usb1 = add_path(c, &d1);
     ASSERT_NE(h_eth0, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h_usb1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(count_paths(c), 2);
 
     /* Step 2: RTM_DELLINK → drop_path */
     ASSERT_EQ(mqvpn_client_drop_path(c, h_usb1), MQVPN_OK);
+    ASSERT_EQ(release_path(c, h_usb1), MQVPN_OK); /* socket closed */
 
     /* Step 3: try_readd_removed_path undo (xquic failed, remove_path called) */
-    mqvpn_path_desc_t d1b = make_desc(12, "usb1", 0);
-    mqvpn_path_handle_t h_tmp = mqvpn_client_add_path_fd(c, 12, &d1b);
+    mqvpn_path_desc_t d1b = make_desc("usb1", 0);
+    mqvpn_path_handle_t h_tmp = add_path(c, &d1b);
     ASSERT_NE(h_tmp, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(mqvpn_client_remove_path(c, h_tmp), MQVPN_OK); /* undo */
+    ASSERT_EQ(release_path(c, h_tmp), MQVPN_OK); /* socket closed */
     ASSERT_EQ(count_paths(c), 2); /* slot still present, CLOSED */
 
-    /* Step 4-5: reconnect completes (ESTABLISHED) → re-add with fresh fd */
-    mqvpn_path_desc_t d1c = make_desc(13, "usb1", 0);
-    mqvpn_path_handle_t h_new = mqvpn_client_add_path_fd(c, 13, &d1c);
+    /* Step 4-5: reconnect completes (ESTABLISHED) → re-add with fresh transport */
+    mqvpn_path_desc_t d1c = make_desc("usb1", 0);
+    mqvpn_path_handle_t h_new = add_path(c, &d1c);
     ASSERT_NE(h_new, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h_new), MQVPN_PATH_PENDING);
     ASSERT_EQ(count_paths(c), 2); /* slot reused, eth0 unaffected */

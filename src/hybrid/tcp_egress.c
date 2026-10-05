@@ -6,7 +6,7 @@
  * configurable timeout, 2xx/4xx/5xx response mapping, the downlink/uplink
  * relay once a flow is ACTIVE, and the close mapping that tears a flow down
  * exactly once regardless of which side notices first (see the
- * destroy-ownership note above svr_tcp_egress_on_relay_error). */
+ * destroy-ownership note above svr_tcp_egress_abort). */
 
 #include "hybrid/tcp_egress.h"
 
@@ -86,6 +86,15 @@
  * target. */
 _Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
                "relay chunk frames must stay within a small-thread stack budget");
+
+/* The fairness budget (TCP_EGRESS_RELAY_BUDGET, tcp_egress.h) is normally
+ * spent in chunk-sized reads; the final read is capped to the remaining
+ * budget, so an arbitrary positive value would still be enforced exactly.
+ * Keep it at least one full chunk and a whole number of chunks because the
+ * header documents and reasons about the quantum in those units. */
+_Static_assert(TCP_EGRESS_RELAY_BUDGET >= TCP_EGRESS_RELAY_CHUNK &&
+                   TCP_EGRESS_RELAY_BUDGET % TCP_EGRESS_RELAY_CHUNK == 0,
+               "relay budget must be a whole number of relay chunks");
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -528,28 +537,46 @@ svr_tcp_egress_errno_to_status(int err)
  * socket. "uplink" is recv() from the egress socket -> send_body() to the
  * client. Every function below is named accordingly.
  *
- * Destroy ownership (decided here, once, for the whole relay stage): a
- * fatal relay error (svr_tcp_egress_on_relay_error) NEVER calls
- * svr_tcp_egress_flow_destroy directly — it only calls
- * xqc_h3_request_close(ef->h3_request) and returns immediately without
- * touching `ef` again. The actual destroy happens exactly once, later,
- * from mqvpn_server.c's h3_request_close_notify (cb_request_close, already
- * wired for the connect-timeout/synchronous-failure paths) OR
- * h3_request_closing_notify (this task's new registration, for a peer
- * RESET_STREAM) — both funnel through the SAME svr_tcp_egress_flow_destroy
- * call, guarded by re-reading the stream's tcp_egress_flow slot fresh each
- * time (destroy() NULLs it), so whichever notify fires first destroys the
- * flow and the other one is a no-op. This matters because
- * xqc_h3_request_close can synchronously re-enter the close-notify callback
- * (verified: xqc_h3_stream_close destroys the h3 stream immediately, inline,
- * when its transport stream already carries XQC_HTTP3_STREAM_FLAG_CLOSED —
- * third_party/xquic/src/http3/xqc_h3_stream.c) — so every call site of
- * on_relay_error in this file is its LAST statement before an unconditional
- * `return`/`break` out of the enclosing function, exactly like the client's
- * tcp_lane_flow_status_t discipline (tcp_lane.c), just collapsed to a
- * simpler "did I just possibly free `ef`? then stop touching it" contract
- * since the server has only one relay-error outcome (no clean-close /
- * abort distinction to track). */
+ * Destroy ownership (decided here, once, for the whole relay stage): when
+ * the server itself gives up on a flow — a fatal relay error
+ * (svr_tcp_egress_on_relay_error) or an idle eviction
+ * (svr_tcp_egress_on_idle_evict) — it destroys the flow FIRST (fd interest
+ * dropped, fd closed, counters decremented, the stream's tcp_egress_flow
+ * slot NULLed) and only then resets the H3 stream with
+ * xqc_h3_request_close. The order matters twice over:
+ *
+ * (1) The reset completes asynchronously (RESET_STREAM has to reach the
+ *     client and be answered before the close notify fires). A flow left
+ *     alive until then keeps its fd interest armed, and a downlink-paused
+ *     flow holds want_write — on a RST'd socket that is level-triggered
+ *     writable forever, so the reactor would re-run flush_downlink_retry
+ *     -> send() EPIPE -> on_relay_error on every pass until the notify
+ *     arrived (observed on the test server as ~64k "relay I/O error
+ *     (errno=32)" lines in under two seconds; pinned by test_tcp_egress.c's
+ *     mqvpn_tcp_relay_error_stops_fd_dispatch).
+ * (2) xqc_h3_request_close can synchronously re-enter the close-notify
+ *     callback (verified: xqc_h3_stream_close destroys the h3 stream
+ *     immediately, inline, when its transport stream already carries
+ *     XQC_HTTP3_STREAM_FLAG_CLOSED — third_party/xquic/src/http3/
+ *     xqc_h3_stream.c). With the slot already NULL, mqvpn_server.c's
+ *     close/closing-notify funnel is a no-op — the same exactly-once
+ *     guard svr_tcp_egress_fail_connect has always relied on.
+ *
+ * Either way `ef` is freed when these functions return, so every call site
+ * of on_relay_error in this file is its LAST statement before an
+ * unconditional `return`/`break` out of the enclosing function, exactly
+ * like the client's tcp_lane_flow_status_t discipline (tcp_lane.c), just
+ * collapsed to a simpler "did I just free `ef`? then stop touching it"
+ * contract since the server has only one relay-error outcome (no
+ * clean-close / abort distinction to track). */
+static void
+svr_tcp_egress_abort(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    xqc_h3_request_t *req = ef->h3_request;
+    svr_tcp_egress_flow_destroy(server, ef);
+    xqc_h3_request_close(req);
+}
+
 static void
 svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
 {
@@ -584,15 +611,13 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
         live = live->next;
     if (!live) return; /* flushed teardown already destroyed the flow */
 
-    xqc_h3_request_close(ef->h3_request);
-    /* Do NOT touch ef again — see the destroy-ownership note above. */
+    svr_tcp_egress_abort(server, ef);
 }
 
 /* ACTIVE-flow idle-timeout eviction (the limits work this file's tick
  * docstring referenced). Same destroy-ownership discipline as
- * on_relay_error above — closes the H3 stream and returns without touching
- * `ef` again, letting the close-notify funnel run the real destroy — but
- * kept as its own function rather than reusing on_relay_error under an
+ * on_relay_error above (svr_tcp_egress_abort: `ef` is freed on return) —
+ * but kept as its own function rather than reusing on_relay_error under an
  * errno=0 sentinel: an idle timeout is not an I/O error, and a dedicated log
  * line keeps the two cases distinguishable in server logs. Called only from
  * svr_tcp_egress_tick for a flow already confirmed ACTIVE (CONNECTING flows
@@ -648,9 +673,7 @@ svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                "closing stream",
                peer, ef->username, idle_timeout_sec);
     }
-    xqc_h3_request_close(ef->h3_request);
-    /* Do NOT touch ef again — see the destroy-ownership note on
-     * on_relay_error above. */
+    svr_tcp_egress_abort(server, ef);
 }
 
 /* The ONE place fd interest is computed from flow state (per this task's
@@ -1224,10 +1247,17 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
      * event. */
     if (readable && !ef->uplink_withheld) {
         uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
+        size_t relayed = 0;
         ssize_t n;
         for (;;) {
+            /* Read no further than the budget allows. relayed is below
+             * TCP_EGRESS_RELAY_BUDGET here -- the break further down fires at
+             * >= -- so want is at least 1 and a zero-length read, which would
+             * look like EOF, cannot happen. */
+            size_t want = TCP_EGRESS_RELAY_BUDGET - relayed;
+            if (want > sizeof(buf)) want = sizeof(buf);
             do {
-                n = recv(ef->fd, buf, sizeof(buf), MSG_DONTWAIT);
+                n = recv(ef->fd, buf, want, MSG_DONTWAIT);
             } while (n < 0 && errno == EINTR);
             if (n <= 0) break;
             /* Uplink activity: bytes actually arrived from the egress
@@ -1247,8 +1277,28 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                  * further either way. */
                 (void)svr_tcp_egress_stash_uplink(server, ef, buf + sent,
                                                   (size_t)n - (size_t)sent);
-                return; /* the ONLY break-equivalent exit of this loop */
+                return; /* a break-equivalent exit of this loop */
             }
+            /* Fairness yield: hand the reactor back after a budget, so the
+             * other flows on this connection get a turn at the send-queue
+             * release this loop would otherwise spend by itself. The
+             * arithmetic is in tcp_egress.h beside TCP_EGRESS_RELAY_BUDGET.
+             *
+             * break rather than return: n > 0 on this path, so neither
+             * post-loop recv()-status branch applies and control reaches
+             * svr_tcp_egress_update_fd_interest() at the tail, which leaves
+             * want_read set -- uplink_withheld is still 0 here, so the flow
+             * is out of budget rather than stalled. `readable` is a
+             * level-triggered signal by this function's own contract (see the
+             * comment above it), and the only two places that set
+             * cbs.egress_fd_register deliver it that way (EV_PERSIST | EV_READ
+             * in platform/linux/platform_linux.c, POLLIN in
+             * tests/test_tcp_egress.c's harness_pump), so whatever is left
+             * in the socket is reported again on the next pass. The budget is
+             * at least one chunk, so bytes have always moved before the yield:
+             * it cannot spin. */
+            relayed += (size_t)sent;
+            if (relayed >= TCP_EGRESS_RELAY_BUDGET) break;
         }
         if (n == 0) {
             /* Pure EOF: recv()==0 is level-triggered readable — drop
@@ -1310,12 +1360,11 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
     uint64_t idle_us = (uint64_t)ctx.tcp_idle_timeout_sec * 1000000ULL;
     svr_tcp_egress_flow_t *ef = *ctx.flow_list_head;
     while (ef) {
-        /* Save next before possibly destroying/closing ef — fail_connect()
-         * unlinks and frees it, and on_idle_evict() may synchronously
-         * re-enter the close-notify funnel that does the same (see the
-         * destroy-ownership note above svr_tcp_egress_on_relay_error) —
-         * either way, dereferencing ef again after would be a use-after-free
-         * on the next loop iteration. */
+        /* Save next before possibly destroying ef — fail_connect() and
+         * on_idle_evict() both unlink and free it (see the
+         * destroy-ownership note above svr_tcp_egress_abort), so
+         * dereferencing ef again after would be a use-after-free on the
+         * next loop iteration. */
         svr_tcp_egress_flow_t *next = ef->next;
         if (ef->state == EGRESS_FLOW_CONNECTING) {
             /* CONNECTING flows are never idle-evicted: they use

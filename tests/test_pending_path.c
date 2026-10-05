@@ -11,7 +11,7 @@
  * Bug 2 (library fix in tick_reconnect):
  *   mqvpn_rotate_primary_path() was never called; reconnect always hammered
  *   the same dead path.  The library now rotates before each reconnect attempt,
- *   skipping paths with active=0 (fd gone).  These unit tests verify the
+ *   skipping paths whose transport is detached.  These unit tests verify the
  *   slot-lifecycle semantics that make the rotation safe.
  */
 
@@ -21,6 +21,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "fake_transport.h"
 
 /* ── Test infrastructure ── */
 
@@ -110,14 +111,22 @@ count_paths(mqvpn_client_t *c)
 }
 
 static mqvpn_path_desc_t
-make_desc(int fd, const char *iface, uint32_t flags)
+make_desc(const char *iface, uint32_t flags)
 {
     mqvpn_path_desc_t d = {0};
     d.struct_size = sizeof(d);
-    d.fd = fd;
     d.flags = flags;
     snprintf(d.iface, sizeof(d.iface), "%s", iface);
     return d;
+}
+
+/* Register a path backed by a fresh fake transport.  The caller owns *t and
+ * must keep it alive until the client is destroyed (or the path released). */
+static mqvpn_path_handle_t
+add_path(mqvpn_client_t *c, const mqvpn_path_desc_t *d, fake_transport_t *t)
+{
+    fake_transport_init(t);
+    return mqvpn_client_add_path(c, d, fake_path_ops(), t, NULL);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -134,8 +143,9 @@ TEST(path_starts_pending_before_connect)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(10, "eth0", 0);
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 10, &d);
+    fake_transport_t t;
+    mqvpn_path_desc_t d = make_desc("eth0", 0);
+    mqvpn_path_handle_t h = add_path(c, &d, &t);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h), MQVPN_PATH_PENDING);
 
@@ -148,10 +158,11 @@ TEST(two_paths_both_pending_before_connect)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d0 = make_desc(10, "eth0", 0);
-    mqvpn_path_desc_t d1 = make_desc(11, "usb0", 0);
-    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    fake_transport_t t0, t1;
+    mqvpn_path_desc_t d0 = make_desc("eth0", 0);
+    mqvpn_path_desc_t d1 = make_desc("usb0", 0);
+    mqvpn_path_handle_t h0 = add_path(c, &d0, &t0);
+    mqvpn_path_handle_t h1 = add_path(c, &d1, &t1);
     ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(path_status(c, h0), MQVPN_PATH_PENDING);
@@ -171,8 +182,10 @@ TEST(pending_status_string)
 /* ═══════════════════════════════════════════════════════════════════════════
  * Group 2: Bug 2 — path removal prevents recovery
  *
- * remove_path() and drop_path() both set active=0, which prevents
- * reactivate_path() from recovering the slot.  These tests verify the
+ * remove_path() and drop_path() both detach the transport (slot goes to
+ * CLOSED_DROPPED), which prevents reactivate_path() from recovering the
+ * slot.  The slot only becomes reusable (CLOSED_FREE) once the platform
+ * calls on_platform_path_released().  These tests verify the
  * slot-lifecycle contract that tick_reconnect()'s rotation relies on.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -182,8 +195,9 @@ TEST(remove_path_marks_closed)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(20, "usb1", 0);
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 20, &d);
+    fake_transport_t t;
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h = add_path(c, &d, &t);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
@@ -193,18 +207,19 @@ TEST(remove_path_marks_closed)
 }
 
 /*
- * After remove_path(), reactivate_path() must fail (active=0).
+ * After remove_path(), reactivate_path() must fail (transport detached).
  * This documents the root cause of Bug 2: once removed, the path cannot
- * be recovered through the reactivation API — only by re-adding it via
- * add_path_fd() with a new socket.
+ * be recovered through the reactivation API — only by releasing the old
+ * transport and re-adding it via add_path() with a new one.
  */
 TEST(reactivate_fails_after_remove)
 {
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(20, "usb1", 0);
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 20, &d);
+    fake_transport_t t;
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h = add_path(c, &d, &t);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
@@ -214,28 +229,33 @@ TEST(reactivate_fails_after_remove)
 }
 
 /*
- * The CLOSED slot left by remove_path() is reusable by add_path_fd().
- * This is the correct recovery path for Bug 2: the platform re-adds
- * the interface (new socket fd) once connectivity is restored.
+ * The CLOSED slot left by remove_path() is reusable by add_path() once the
+ * platform has released the old transport.  This is the correct recovery
+ * path for Bug 2: the platform closes the old socket, reports it released,
+ * and re-adds the interface (new transport) once connectivity is restored.
  */
-TEST(closed_slot_reused_by_add_path_fd)
+TEST(closed_slot_reused_by_add_path)
 {
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(20, "usb1", 0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 20, &d);
+    fake_transport_t t1, t2;
+    mqvpn_path_desc_t d = make_desc("usb1", 0);
+    mqvpn_path_handle_t h1 = add_path(c, &d, &t1);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(count_paths(c), 1);
 
     ASSERT_EQ(mqvpn_client_remove_path(c, h1), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_on_platform_path_released(c, h1), MQVPN_OK);
+    ASSERT_EQ(t1.release_calls, 1u);
 
-    mqvpn_path_desc_t d2 = make_desc(21, "usb1", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 21, &d2);
+    mqvpn_path_desc_t d2 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2, &t2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h2, h1);               /* new handle */
     ASSERT_EQ(count_paths(c), 1);    /* slot reused, count unchanged */
     ASSERT_EQ(path_status(c, h2), MQVPN_PATH_PENDING);
+    ASSERT_EQ(path_status(c, h1), -1); /* old incarnation no longer listed */
 
     mqvpn_client_destroy(c);
 }
@@ -248,43 +268,47 @@ TEST(closed_slot_reused_by_add_path_fd)
  *   Result: only path0 remains (PENDING), no fallback path.
  *
  * The fix in tick_reconnect() rotates primary_path_idx away from path0 on
- * the next reconnect attempt, but only finds path1 usable if its fd is still
- * alive (active=1).  Removing path1 via remove_path() (active=0) means
- * the rotation skips it, and reconnect must re-add via add_path_fd().
+ * the next reconnect attempt, but only finds path1 usable if its transport is
+ * still attached.  Removing path1 via remove_path() (transport detached)
+ * means the rotation skips it, and the platform must release it and re-add
+ * via add_path().
  */
 TEST(remove_pending_path_leaves_only_dead_primary)
 {
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d0 = make_desc(10, "eth0", 0);
-    mqvpn_path_desc_t d1 = make_desc(11, "usb1", 0);
-    mqvpn_path_handle_t h0 = mqvpn_client_add_path_fd(c, 10, &d0);
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 11, &d1);
+    fake_transport_t t0, t1;
+    mqvpn_path_desc_t d0 = make_desc("eth0", 0);
+    mqvpn_path_desc_t d1 = make_desc("usb1", 0);
+    mqvpn_path_handle_t h0 = add_path(c, &d0, &t0);
+    mqvpn_path_handle_t h1 = add_path(c, &d1, &t1);
     ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
 
     /* Platform removes path1 (PENDING, no internet). */
     ASSERT_EQ(mqvpn_client_remove_path(c, h1), MQVPN_OK);
 
-    /* path1 slot is CLOSED+inactive; path0 is still PENDING.
-     * get_paths() still returns both slots (n_paths never decrements),
-     * so we check status rather than count.  If path0 also loses internet
-     * the client is stuck until the platform re-adds path1 via add_path_fd(). */
+    /* path1 slot is CLOSED with its transport detached; path0 is still
+     * PENDING.  get_paths() still returns both slots (n_paths never
+     * decrements), so we check status rather than count.  If path0 also
+     * loses internet the client is stuck until the platform releases path1
+     * and re-adds it via add_path(). */
     ASSERT_EQ(path_status(c, h1), MQVPN_PATH_CLOSED);
     ASSERT_EQ(path_status(c, h0), MQVPN_PATH_PENDING);
 
     mqvpn_client_destroy(c);
 }
 
-/* drop_path() has the same active=0 semantics. */
+/* drop_path() has the same detached-transport semantics. */
 TEST(reactivate_fails_after_drop)
 {
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(30, "wlan0", 0);
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 30, &d);
+    fake_transport_t t;
+    mqvpn_path_desc_t d = make_desc("wlan0", 0);
+    mqvpn_path_handle_t h = add_path(c, &d, &t);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
@@ -300,41 +324,49 @@ TEST(remove_last_path_allowed)
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
-    mqvpn_path_desc_t d = make_desc(10, "eth0", 0);
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 10, &d);
+    fake_transport_t t;
+    mqvpn_path_desc_t d = make_desc("eth0", 0);
+    mqvpn_path_handle_t h = add_path(c, &d, &t);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
     /* remove_path() marks the slot CLOSED but does not decrement n_paths;
-     * the slot is reusable by the next add_path_fd() call. */
+     * the slot is reusable by add_path() once the platform calls
+     * on_platform_path_released(). */
     ASSERT_EQ(path_status(c, h), MQVPN_PATH_CLOSED);
 
     mqvpn_client_destroy(c);
 }
 
-/* Slot freed by remove can accommodate a path up to MQVPN_MAX_PATHS total. */
+/* Slot freed by remove + release can accommodate a path up to
+ * MQVPN_MAX_PATHS total. */
 TEST(max_paths_with_slot_reuse)
 {
     mqvpn_client_t *c = make_test_client();
     ASSERT_NOT_NULL(c);
 
+    static fake_transport_t t[MQVPN_MAX_PATHS + 2];
     mqvpn_path_handle_t handles[MQVPN_MAX_PATHS];
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
-        mqvpn_path_desc_t d = make_desc(10 + i, "ethX", 0);
+        mqvpn_path_desc_t d = make_desc("ethX", 0);
         snprintf(d.iface, sizeof(d.iface), "eth%d", i);
-        handles[i] = mqvpn_client_add_path_fd(c, 10 + i, &d);
+        handles[i] = add_path(c, &d, &t[i]);
         ASSERT_NE(handles[i], (mqvpn_path_handle_t)-1);
     }
     ASSERT_EQ(count_paths(c), MQVPN_MAX_PATHS);
 
     /* Overflow without removal must fail. */
-    mqvpn_path_desc_t overflow = make_desc(99, "overflow", 0);
-    ASSERT_EQ(mqvpn_client_add_path_fd(c, 99, &overflow), (mqvpn_path_handle_t)-1);
+    mqvpn_path_desc_t overflow = make_desc("overflow", 0);
+    ASSERT_EQ(add_path(c, &overflow, &t[MQVPN_MAX_PATHS]), (mqvpn_path_handle_t)-1);
 
-    /* Free one slot, then a new path fits. */
+    /* Removed but not yet released: the slot must not be recycled. */
     ASSERT_EQ(mqvpn_client_remove_path(c, handles[0]), MQVPN_OK);
-    mqvpn_path_desc_t d2 = make_desc(99, "eth_new", 0);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 99, &d2);
+    ASSERT_EQ(add_path(c, &overflow, &t[MQVPN_MAX_PATHS]), (mqvpn_path_handle_t)-1);
+
+    /* Release the old transport: the slot is freed, then a new path fits. */
+    ASSERT_EQ(mqvpn_client_on_platform_path_released(c, handles[0]), MQVPN_OK);
+    mqvpn_path_desc_t d2 = make_desc("eth_new", 0);
+    mqvpn_path_handle_t h2 = add_path(c, &d2, &t[MQVPN_MAX_PATHS + 1]);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(count_paths(c), MQVPN_MAX_PATHS);
 
@@ -356,7 +388,7 @@ main(void)
     printf("\n  Bug 2: path removal / slot lifecycle\n");
     run_remove_path_marks_closed();
     run_reactivate_fails_after_remove();
-    run_closed_slot_reused_by_add_path_fd();
+    run_closed_slot_reused_by_add_path();
     run_remove_pending_path_leaves_only_dead_primary();
     run_reactivate_fails_after_drop();
     run_remove_last_path_allowed();

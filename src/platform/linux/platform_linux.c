@@ -7,7 +7,7 @@
  * Bridges libmqvpn (sans-I/O) with Linux-specific I/O:
  *   - libevent event loop driving tick()
  *   - TUN device creation and I/O
- *   - UDP socket creation via path_mgr
+ *   - UDP path sockets, one slot each (path_table.c)
  *   - Signal handling (SIGINT/SIGTERM)
  *
  * Routing and killswitch are in separate files (routing.c, killswitch.c).
@@ -19,7 +19,6 @@
 #include "log.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
-#include "udp_offload.h" /* mqvpn_udp_gro_enable / recv_segmented / gro_seg_len */
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -27,7 +26,6 @@
 #define STATUS_INTERVAL_SEC 30
 #define BULK_READ_COUNT     64
 #define TUN_BUF_SIZE        65536
-#define SOCK_BUF_SIZE       65536
 /* Teardown RX-offload telemetry line (client and server cleanup labels).
  * ONE format definition, same drift hazard and consumers as
  * MQVPN_UDP_TX_LINE_FMT in mqvpn_internal.h. */
@@ -181,7 +179,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Start periodic dropped-path re-add timer. Carrier-up netlink events
-     * fire only once and `try_readd_removed_path()` can fail synchronously
+     * fire only once and `netmon_try_readd_removed_path()` can fail synchronously
      * (e.g. xqc_conn_create_path returning -XQC_EMP_NO_AVAIL_PATH_ID before
      * the server has distributed enough CIDs). Without this timer the slot
      * would sit in CLOSED_DROPPED indefinitely — no further netlink event
@@ -203,6 +201,15 @@ fail:
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
     p->tun_up = 0;
+    /* Host state, not wire state — the TUN, its addressing, the routes, the
+     * kill switch — so an in-process retry every ReconnectInterval seconds
+     * would fail identically forever and tell nobody; Reconnect covers the
+     * connection dropping, not a host the client cannot configure. Mark fatal
+     * so the event loop exits non-zero once the disconnect below reaches
+     * CLOSED, and leave it to the supervisor. Same as the Windows twin
+     * (platform_windows.c:232-238, its rc at :703). */
+    p->fatal_error = PLATFORM_FATAL_TUNNEL_SETUP;
+    p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
 }
 
@@ -232,16 +239,17 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
     const char *ns = (new_state < 7) ? names[new_state] : "?";
     LOG_INF("state: %s → %s", os, ns);
 
-    /* On ESTABLISHED: re-add any paths whose socket was freed by the undo
-     * logic in try_readd_removed_path() during the previous connection.
-     * This covers the budget-exhaustion reconnect scenario (issue #4276):
-     * the interface is physically UP but no netlink event will fire to
-     * re-trigger try_readd_removed_path() because the kernel already sent
-     * RTM_NEWLINK/NEWADDR before the reconnect completed. */
+    /* On ESTABLISHED: re-add any paths whose socket was freed by the
+     * rollback in netmon_try_readd_removed_path() during the previous
+     * connection. This covers the budget-exhaustion reconnect scenario
+     * (issue #4276): the interface is physically UP but no netlink event
+     * will fire to re-trigger the re-add because the kernel already sent
+     * RTM_NEWLINK/NEWADDR before the reconnect completed. Slots removed
+     * through the control API are skipped inside the re-add. */
     if (new_state == MQVPN_STATE_ESTABLISHED) {
-        for (int i = 0; i < p->path_mgr.n_paths; i++) {
-            if (p->path_mgr.paths[i].fd < 0)
-                try_readd_removed_path(p, p->path_mgr.paths[i].iface);
+        for (int i = 0; i < p->n_paths; i++) {
+            if (p->paths[i].fd < 0 && !p->paths[i].removed && p->paths[i].iface[0])
+                netmon_try_readd_removed_path(p, p->paths[i].iface);
         }
     }
 
@@ -251,11 +259,12 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
     if (new_state == MQVPN_STATE_RECONNECTING || new_state == MQVPN_STATE_CLOSED) {
         /* PR5: path lifecycle state is owned by libmqvpn — no state mirror
          * to reset here. Library handles slot recycling across reconnects.
-         * path_recover_failures IS reset — Level-2 reconnect creates a
-         * fresh xquic conn with fresh path_id namespace, so prior failures
+         * Each slot's recover_failures IS reset — Level-2 reconnect creates
+         * a fresh xquic conn with fresh path_id namespace, so prior failures
          * (e.g. -XQC_EMP_NO_AVAIL_PATH_ID due to CID lag) shouldn't count
          * against the new connection's retry budget. */
-        memset(p->path_recover_failures, 0, sizeof(p->path_recover_failures));
+        for (int i = 0; i < p->n_paths; i++)
+            p->paths[i].recover_failures = 0;
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         if (p->ev_recover) event_del(p->ev_recover);
         cleanup_killswitch(p);
@@ -282,7 +291,7 @@ cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_c
 {
     (void)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
-     * no longer mirrors recoverable / removed state — try_reactivate_by_ifname
+     * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
     const char *sn = mqvpn_path_status_string(status);
     LOG_INF("path %lld -> %s", (long long)path, sn);
@@ -510,108 +519,31 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     schedule_next_tick(p);
 }
 
-/* ─── Shared GRO drain loop (client + server read callbacks) ───
- *
- * ONE definition of the budget/truncation/split/counter semantics so the
- * client and server RX paths cannot drift (this project already lost the TX
- * half of a telemetry pair to exactly that kind of hand-synced copy).
- *
- * Budget counts receive work — datagrams delivered, plus one unit per
- * dropped or undeliverable receive — not recvmsg calls: one GRO receive can
- * carry dozens of datagrams, and counting syscalls would let a single
- * callback do far more work than before GRO and starve the tick/timer path.
- * It is a soft threshold: the current aggregate is always finished, so a
- * full one can overshoot it. Nothing is ever discarded for it.
- *
- * One coalesced buffer, N QUIC datagrams: segments are handed to `deliver`
- * one at a time, exactly as the pre-GRO loops did (seg == 0 degenerates to
- * a single iteration), so recv_rate_limit accounting and every layer above
- * stay per-packet. deliver == NULL drains without delivering (the client's
- * no-handle case): the recvmsg has already consumed the data — which is
- * what keeps the level-triggered event from refiring forever — so it
- * charges one unit and moves on, exactly like a dropped receive. */
-typedef void (*udp_rx_deliver_fn)(void *ctx, const uint8_t *pkt, size_t len,
-                                  const struct sockaddr *peer, socklen_t peer_len);
-
-static void
-drain_udp_rx(int fd, const char *tag, udp_rx_deliver_fn deliver, void *ctx,
-             uint64_t *receives, uint64_t *datagrams)
-{
-    uint8_t buf[SOCK_BUF_SIZE];
-    struct sockaddr_storage peer;
-
-    int budget = BULK_READ_COUNT;
-    while (budget > 0) {
-        socklen_t peer_len = sizeof(peer); /* value-result, reset per call */
-        size_t seg = 0;
-        // codeql[cpp/uncontrolled-allocation-size] buf is stack-allocated and bounded by
-        // sizeof(buf); xquic validates internally
-        ssize_t n = mqvpn_udp_recv_segmented(fd, buf, sizeof(buf),
-                                             (struct sockaddr *)&peer, &peer_len, &seg);
-        if (n == MQVPN_RECV_DROP) {
-            LOG_DBG("%s: truncated datagram dropped", tag);
-            budget--;
-            continue;
-        }
-        if (n <= 0) break;
-
-        /* Counted only when delivering: a drained-but-undelivered receive
-         * (defensive no-handle path) reaches neither counter, so the logged
-         * datagrams/receives coalescing factor cannot dip below 1.0 on a
-         * path that never delivered anything. */
-        if (!deliver) {
-            budget--;
-            continue;
-        }
-        (*receives)++;
-
-        size_t sl;
-        for (size_t off = 0; (sl = mqvpn_gro_seg_len((size_t)n, seg, off)) > 0;
-             off += sl) {
-            deliver(ctx, buf + off, sl, (const struct sockaddr *)&peer, peer_len);
-            (*datagrams)++;
-            budget--;
-        }
-    }
-}
-
-/* drain_udp_rx deliver thunk: client needs the resolved path handle. */
-typedef struct {
-    mqvpn_client_t *client;
-    mqvpn_path_handle_t handle;
-} client_rx_ctx_t;
-
-static void
-client_rx_deliver(void *arg, const uint8_t *pkt, size_t len, const struct sockaddr *peer,
-                  socklen_t peer_len)
-{
-    client_rx_ctx_t *rc = (client_rx_ctx_t *)arg;
-    mqvpn_client_on_socket_recv(rc->client, rc->handle, pkt, len, peer, peer_len);
-}
-
 void
 on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
-    platform_ctx_t *p = (platform_ctx_t *)arg;
+    /* The event's arg is its slot (platform_path_arm), so no fd -> slot
+     * scan: nothing on the receive path mutates the table — the netlink
+     * re-add runs from its own libevent event, never reentrantly here. */
+    platform_path_t *s = (platform_path_t *)arg;
+    platform_ctx_t *p = s->p;
 
-    /* fd is constant for this callback, so resolve the path handle once.
-     * Safe to hoist: nothing on the receive path mutates path_mgr —
-     * cb_path_event is log-only, and the netlink re-add runs from its own
-     * libevent event, never reentrantly inside this one. handle < 0 is
-     * defensive — events are registered only after the library accepted the
-     * path — and downgrades to a delivery-less drain. */
-    client_rx_ctx_t rc = {.client = p->client, .handle = -1};
-    for (int j = 0; j < p->path_mgr.n_paths; j++) {
-        if (p->path_mgr.paths[j].fd == fd) {
-            rc.handle = p->lib_path_handles[j];
-            break;
-        }
+    if (!s->bind_ctx) {
+        /* Unreachable by construction: a read event is armed only after
+         * add_path succeeded (startup loop, netmon re-add), and
+         * platform_path_close_socket frees it before the transport is
+         * released. Kept anyway: were an invariant ever broken, a
+         * level-triggered event on a socket nobody drains would spin at
+         * 100 % CPU — disarming it turns that into this one WARN. */
+        LOG_WRN("path rx: no transport for fd=%d, disarming its event", (int)fd);
+        platform_path_disarm(s);
+        return;
     }
-    if (rc.handle < 0) LOG_DBG("path rx: no handle for fd=%d, draining", (int)fd);
-
-    drain_udp_rx(fd, "path rx", rc.handle >= 0 ? client_rx_deliver : NULL, &rc,
-                 &p->gro_receives, &p->gro_datagrams);
+    /* Budget, truncation, GRO split and counters all live in the bind now
+     * (shared with the server's read path). A hard error is ignored here,
+     * as before: netlink owns drop detection. */
+    (void)mqvpn_bind_posix_path_drain(s->bind_ctx, p->client, s->handle, BULK_READ_COUNT);
 
     /* Drive engine after receiving packets */
     mqvpn_client_tick(p->client);
@@ -628,55 +560,150 @@ on_signal(evutil_socket_t sig, short what, void *arg)
     LOG_INF("received signal, shutting down...");
     p->shutting_down = 1;
     mqvpn_client_disconnect(p->client);
-    /* state_changed callback will call event_base_loopbreak on CLOSED */
+    /* Break the loop here rather than from the CLOSED transition:
+     * mqvpn_client_disconnect() returns early when the state is already
+     * CLOSED or IDLE, so a client that got there by itself delivers no
+     * transition, cb_state_changed never runs, and the process keeps ticking
+     * a dead client through every SIGTERM. svr_on_signal() already breaks the
+     * loop directly. Harmless when the disconnect did transition and
+     * cb_state_changed broke the loop already: loopbreak only sets a flag the
+     * loop reads once. */
+    event_base_loopbreak(p->eb);
 }
 
 /* ================================================================
  *  Runtime path management (called from control API)
  * ================================================================ */
 
-int
-platform_add_path(platform_ctx_t *p, const char *iface, int backup)
+/* Control-API view of the client's receive-side offload counters
+ * (ctrl_rx_stats_fn): the totals already folded into p by the release sites,
+ * plus the live counters of every transport the library still holds — the
+ * client twin of svr_rx_stats. Nothing is counted twice: a release adds a
+ * ctx's numbers to p only once the library has finalised it (bind_ctx NULL),
+ * and the teardown harvest runs after ctrl_socket_destroy. */
+static void
+cli_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
 {
-    if (!p || !iface || iface[0] == '\0') return -1;
-    if (p->path_mgr.n_paths >= MQVPN_MAX_PATHS) return -1;
+    platform_ctx_t *p = (platform_ctx_t *)arg;
+    *receives = p->gro_receives;
+    *datagrams = p->gro_datagrams;
+    for (int i = 0; i < p->n_paths; i++) {
+        uint64_t r, d;
+        platform_read_rx_stats(&p->paths[i], &r, &d);
+        *receives += r;
+        *datagrams += d;
+    }
+}
 
-    int idx = mqvpn_path_mgr_add(&p->path_mgr, iface, &p->server_addr);
-    if (idx < 0) return -1;
+/* Open, pin and register one path besides the startup slots: a backup
+ * (failover) interface from the config, or an interface added through the
+ * control API. Reuses a slot removed through the control API once the
+ * library has released its transport (the table is append-only and slot
+ * pointers are event args, so slots are recycled, never moved); appends
+ * otherwise. Returns the slot, or NULL (already logged; nothing is left
+ * registered or open). */
+static platform_path_t *
+attach_extra_path(platform_ctx_t *p, const char *iface, uint32_t flags)
+{
+    platform_path_t *s = NULL;
+    for (int i = 0; i < p->n_paths; i++) {
+        platform_path_t *c = &p->paths[i];
+        if (!c->removed || c->fd >= 0 || c->bind_ctx) continue;
+        if (!s || strcmp(c->iface, iface) == 0) s = c;
+    }
+    if (s) {
+        memset(s, 0, sizeof(*s));
+        s->p = p;
+        s->fd = -1;
+        s->handle = -1;
+        snprintf(s->iface, sizeof(s->iface), "%s", iface);
+    } else {
+        s = platform_path_append(p, iface);
+    }
+    if (!s) {
+        LOG_ERR("path %s: max paths (%d) reached", iface, MQVPN_MAX_PATHS);
+        return NULL;
+    }
+    s->flags = flags;
 
-    mqvpn_path_t *mp = &p->path_mgr.paths[idx];
+    int step = 0;
+    s->fd = platform_path_socket_open(p->server_addr.ss_family, &step);
+    if (s->fd < 0) {
+        LOG_ERR("path %s: %s: %s", iface,
+                step == PLATFORM_PATH_STEP_SOCKET     ? "socket"
+                : step == PLATFORM_PATH_STEP_NONBLOCK ? "set_nonblock"
+                                                      : "bind",
+                strerror(errno));
+        goto fail;
+    }
 
     /* Pin the new socket to its interface so the kernel doesn't route it
      * via a stale split-tunnel host route (e.g. 10.x.x.1 dev veth-a0)
      * that was set up for a different path. */
-    if (linux_pin_socket_to_iface(mp->fd, mp->iface) < 0) {
-        mqvpn_path_mgr_remove_at(&p->path_mgr, idx);
-        return -1;
+    if (linux_pin_socket_to_iface(s->fd, s->iface) < 0) goto fail;
+
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = p->udp_gso;
+    bopts.udp_gro = p->udp_gro;
+    bopts.socket_buf_bytes = 0;
+    snprintf(bopts.tag, sizeof(bopts.tag), "%s", s->iface);
+    void *tctx = NULL;
+    if (mqvpn_bind_posix_path_new(s->fd, &bopts, &tctx) != MQVPN_OK) {
+        LOG_ERR("path %s: transport setup failed", iface);
+        goto fail;
+    }
+    if (p->udp_gro) {
+        if (mqvpn_bind_posix_path_gro_enabled(tctx))
+            LOG_INF("udp-gro: enabled on path '%s'", iface);
+        else
+            LOG_INF("udp-gro: unavailable on path '%s' (%s)", iface,
+                    strerror(mqvpn_bind_posix_path_gro_errno(tctx)));
     }
 
-    mqvpn_path_desc_t desc = {0};
-    desc.struct_size = sizeof(desc);
-    desc.fd = mp->fd;
-    desc.flags = backup ? MQVPN_PATH_FLAG_BACKUP : 0;
-    snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
-    if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
-        memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
-        desc.local_addr_len = mp->local_addrlen;
+    mqvpn_path_desc_t desc;
+    platform_path_fill_desc(p, s, &desc);
+    mqvpn_path_handle_t h =
+        mqvpn_client_add_path(p->client, &desc, mqvpn_bind_posix_path_ops(), tctx, NULL);
+    if (h < 0) {
+        LOG_ERR("path %s: library registration failed", iface);
+        mqvpn_bind_posix_path_free(tctx); /* add failed: still ours */
+        goto fail;
     }
+    s->handle = h;
+    s->bind_ctx = tctx; /* library-owned from here */
 
-    p->lib_path_handles[idx] = mqvpn_client_add_path_fd(p->client, mp->fd, &desc);
-    if (p->lib_path_handles[idx] < 0) {
-        mqvpn_path_mgr_remove_at(&p->path_mgr, idx);
-        return -1;
+    if (platform_path_arm(s) < 0) {
+        LOG_ERR("path %s: read event setup failed", iface);
+        /* Give the registered path back, then leave the slot reusable. */
+        netmon_remove_path_on_request(p, s);
+        return NULL;
     }
+    return s;
 
-    p->ev_udp[idx] = event_new(p->eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, p);
-    if (!p->ev_udp[idx]) {
-        mqvpn_client_remove_path(p->client, p->lib_path_handles[idx]);
-        mqvpn_path_mgr_remove_at(&p->path_mgr, idx);
-        return -1;
+fail:
+    platform_path_close_socket(s);
+    s->removed = 1; /* nothing registered: reusable by the next add */
+    return NULL;
+}
+
+/* A slot on iface that has not been removed through the control API. */
+static platform_path_t *
+find_live_slot(platform_ctx_t *p, const char *iface)
+{
+    for (int i = 0; i < p->n_paths; i++) {
+        platform_path_t *s = &p->paths[i];
+        if (!s->removed && strcmp(s->iface, iface) == 0) return s;
     }
-    event_add(p->ev_udp[idx], NULL);
+    return NULL;
+}
+
+int
+platform_add_path(platform_ctx_t *p, const char *iface, int backup)
+{
+    if (!p || !iface || iface[0] == '\0') return -1;
+
+    if (!attach_extra_path(p, iface, backup ? MQVPN_PATH_FLAG_BACKUP : 0)) return -1;
     LOG_INF("path added: %s", iface);
     return 0;
 }
@@ -685,40 +712,19 @@ int
 platform_remove_path(platform_ctx_t *p, const char *iface)
 {
     if (!p || !iface || iface[0] == '\0') return -1;
-    if (p->path_mgr.n_paths <= 1) return -1; /* refuse to remove last path */
 
-    int idx = -1;
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx < 0) return -1;
+    int n_live = 0;
+    for (int i = 0; i < p->n_paths; i++)
+        if (!p->paths[i].removed) n_live++;
+    if (n_live <= 1) return -1; /* refuse to remove last path */
 
-    /* Save handle before compact so we can notify the library after fd close */
-    mqvpn_path_handle_t removed_handle = p->lib_path_handles[idx];
+    platform_path_t *s = find_live_slot(p, iface);
+    if (!s) return -1;
 
-    /* Tear down libevent + library before closing fd */
-    if (p->ev_udp[idx]) {
-        event_del(p->ev_udp[idx]);
-        event_free(p->ev_udp[idx]);
-    }
-    mqvpn_client_remove_path(p->client, removed_handle);
-
-    /* Compact ev_udp and lib_path_handles in parallel with path_mgr */
-    for (int i = idx; i < p->path_mgr.n_paths - 1; i++) {
-        p->ev_udp[i] = p->ev_udp[i + 1];
-        p->lib_path_handles[i] = p->lib_path_handles[i + 1];
-    }
-    p->ev_udp[p->path_mgr.n_paths - 1] = NULL;
-    p->lib_path_handles[p->path_mgr.n_paths - 1] = -1;
-
-    mqvpn_path_mgr_remove_at(&p->path_mgr, idx); /* closes fd, compacts paths[] */
-
-    /* Tell the library the fd is gone so the CLOSED_DROPPED slot can
-     * reach CLOSED_FREE once xquic also confirms path removal. */
-    mqvpn_client_on_platform_fd_closed(p->client, removed_handle);
+    /* REMOVE_API, socket close, then the release report, so the library's
+     * CLOSED_DROPPED slot can reach CLOSED_FREE once xquic also confirms
+     * the path removal. */
+    netmon_remove_path_on_request(p, s);
 
     LOG_INF("path removed: %s", iface);
     return 0;
@@ -728,9 +734,11 @@ int
 platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
 {
     if (!p || !names || max <= 0) return 0;
-    int n = p->path_mgr.n_paths < max ? p->path_mgr.n_paths : max;
-    for (int i = 0; i < n; i++)
-        snprintf(names[i], IFNAMSIZ, "%s", p->path_mgr.paths[i].iface);
+    int n = 0;
+    for (int i = 0; i < p->n_paths && n < max; i++) {
+        if (p->paths[i].removed) continue;
+        snprintf(names[n++], IFNAMSIZ, "%s", p->paths[i].iface);
+    }
     return n;
 }
 
@@ -739,19 +747,12 @@ platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight)
 {
     if (!p || !iface || iface[0] == '\0') return -1;
 
-    int idx = -1;
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx < 0) return -1;
+    platform_path_t *s = find_live_slot(p, iface);
+    if (!s || s->handle < 0) return -1;
 
-    mqvpn_path_handle_t h = p->lib_path_handles[idx];
-    if (h < 0) return -1;
-
-    return mqvpn_client_set_path_weight(p->client, h, weight);
+    int rc = mqvpn_client_set_path_weight(p->client, s->handle, weight);
+    if (rc == MQVPN_OK) s->weight = weight; /* carried into a later re-add */
+    return rc;
 }
 
 int
@@ -759,19 +760,12 @@ platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_
 {
     if (!p || !iface || iface[0] == '\0') return -1;
 
-    int idx = -1;
-    for (int i = 0; i < p->path_mgr.n_paths; i++) {
-        if (strcmp(p->path_mgr.paths[i].iface, iface) == 0) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx < 0) return -1;
+    platform_path_t *s = find_live_slot(p, iface);
+    if (!s || s->handle < 0) return -1;
 
-    mqvpn_path_handle_t h = p->lib_path_handles[idx];
-    if (h < 0) return -1;
-
-    return mqvpn_client_set_path_dscp_mask(p->client, h, dscp_mask);
+    int rc = mqvpn_client_set_path_dscp_mask(p->client, s->handle, dscp_mask);
+    if (rc == MQVPN_OK) s->dscp_mask = dscp_mask; /* carried into a later re-add */
+    return rc;
 }
 
 /* ================================================================
@@ -795,6 +789,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
      * always 1 — no config surface of its own yet, see mqvpn_config_defaults). */
     ctx.manage_routes = cfg->manage_routes && !cfg->no_routes;
     ctx.udp_gro = cfg->udp_gro;
+    ctx.udp_gso = cfg->udp_gso;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -827,15 +822,17 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         return 1;
     }
 
-    mqvpn_config_set_server(lib_cfg, cfg->server_addr, cfg->server_port);
-    if (cfg->tls_server_name)
-        mqvpn_config_set_tls_server_name(lib_cfg, cfg->tls_server_name);
-    if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
-    if (cfg->auth_username && cfg->auth_username[0])
-        mqvpn_config_set_auth_username(lib_cfg, cfg->auth_username);
-    if (cfg->tls_ciphers && cfg->tls_ciphers[0])
-        mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
-    mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
+    mqvpn_platform_apply_client_config(lib_cfg, cfg);
+    /* Linux-only knobs, deliberately outside the shared bridge (vpn_client.h).
+     * Multipath is also needed with a single primary path when there is at
+     * least one backup path (failover needs multipath negotiation;
+     * cfg->n_paths == 0 means one implicit primary is created below, so the
+     * total would be >= 2), or when a control port is configured: the
+     * control socket exposes add_path/remove_path commands, so the user
+     * intends dynamic path management and multipath negotiation must happen
+     * at connection setup time. */
+    if (cfg->n_backup_paths > 0 || cfg->control_port > 0)
+        mqvpn_config_set_multipath(lib_cfg, 1);
     if (cfg->pinned_pubkey &&
         mqvpn_config_set_pinned_pubkey(lib_cfg, cfg->pinned_pubkey) != MQVPN_OK) {
         LOG_ERR("invalid PinnedPubkey \"%s\": expected base64 SHA-256 pins "
@@ -844,60 +841,13 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         mqvpn_config_free(lib_cfg);
         return 1;
     }
-    /* Enable multipath when there are multiple primary paths, or when there is at
-     * least one backup path (even a single auto-detected primary + one backup needs
-     * multipath negotiation for failover to work; cfg->n_paths == 0 means one
-     * implicit primary is created below, so the total would be >= 2).
-     * Also enable when a control port is configured: the control socket exposes
-     * add_path/remove_path commands, so the user intends dynamic path management
-     * and multipath negotiation must happen at connection setup time. */
-    mqvpn_config_set_multipath(
-        lib_cfg,
-        (cfg->n_paths > 1 || cfg->n_backup_paths > 0 || cfg->control_port > 0) ? 1 : 0);
-    mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
-                               cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);
-    mqvpn_config_set_killswitch_hint(lib_cfg, cfg->kill_switch);
-
-    mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
-
-    mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
-    switch (cfg->scheduler) {
-    case MQVPN_SCHED_WLB: sched = MQVPN_SCHED_WLB; break;
-    case MQVPN_SCHED_BACKUP: sched = MQVPN_SCHED_BACKUP; break;
-    case MQVPN_SCHED_BACKUP_FEC: sched = MQVPN_SCHED_BACKUP_FEC; break;
-    case MQVPN_SCHED_RAP: sched = MQVPN_SCHED_RAP; break;
-    case MQVPN_SCHED_WLB_UDP_PIN: sched = MQVPN_SCHED_WLB_UDP_PIN; break;
-    case MQVPN_SCHED_WRTT: sched = MQVPN_SCHED_WRTT; break;
-    case MQVPN_SCHED_WRR: sched = MQVPN_SCHED_WRR; break;
-    case MQVPN_SCHED_REDUNDANT: sched = MQVPN_SCHED_REDUNDANT; break;
-    case MQVPN_SCHED_DSCP: sched = MQVPN_SCHED_DSCP; break;
-    default: break;
-    }
-    mqvpn_config_set_scheduler(lib_cfg, sched);
-    mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
-    mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
-    mqvpn_config_set_reinjection_deadline_params(lib_cfg, cfg->reinj_srtt_factor_pct,
-                                                 cfg->reinj_hard_deadline_ms,
-                                                 cfg->reinj_deadline_lower_bound_ms);
-    mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
-    mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
-    mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
-    mqvpn_config_set_fec_scheme(lib_cfg, (mqvpn_fec_scheme_t)cfg->fec_scheme);
-    mqvpn_config_apply_reorder(lib_cfg,
-                               &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
-    mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
-    if (cfg->recv_rate_limit)
-        mqvpn_config_set_recv_rate_limit(lib_cfg, cfg->recv_rate_limit);
     /* Unconditional: 0 is a meaningful explicit-disable, not "unset". */
     mqvpn_config_set_udp_gso(lib_cfg, cfg->udp_gso);
-    mqvpn_config_set_sync_path_labels(lib_cfg, cfg->sync_path_labels);
-    mqvpn_config_set_push_path_labels(lib_cfg, cfg->push_path_labels);
 
     /* Create callbacks */
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = cb_tun_output;
     cbs.tunnel_config_ready = cb_tunnel_config_ready;
-    cbs.send_packet = NULL; /* fd-only mode */
     cbs.tunnel_closed = cb_tunnel_closed;
     cbs.ready_for_tun = cb_ready_for_tun;
     cbs.state_changed = cb_state_changed;
@@ -925,103 +875,70 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         goto cleanup;
     }
 
-    /* Create UDP sockets */
-    mqvpn_path_mgr_init(&ctx.path_mgr);
-    if (cfg->n_paths > 0) {
-        for (int i = 0; i < cfg->n_paths; i++) {
-            if (mqvpn_path_mgr_add(&ctx.path_mgr, cfg->path_ifaces[i], &ctx.server_addr) <
-                0) {
-                LOG_ERR("failed to create UDP socket for path[%d] '%s'", i,
-                        cfg->path_ifaces[i]);
-                goto cleanup;
-            }
-        }
-    } else {
-        if (mqvpn_path_mgr_add(&ctx.path_mgr, NULL, &ctx.server_addr) < 0) {
-            LOG_ERR("failed to create UDP socket");
-            goto cleanup;
-        }
-    }
+    /* Create UDP sockets: one slot per configured interface, or one "any" slot */
+    if (platform_paths_open(&ctx, cfg->n_paths, cfg->path_ifaces) < 0) goto cleanup;
 
-    /* Register primary paths with library and create socket events */
-    for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
-        mqvpn_path_t *mp = &ctx.path_mgr.paths[i];
+    /* Register paths with library and create socket events */
+    for (int i = 0; i < ctx.n_paths; i++) {
+        platform_path_t *s = &ctx.paths[i];
 
-        if (mp->iface[0]) {
-            if (linux_pin_socket_to_iface(mp->fd, mp->iface) < 0) {
+        if (s->iface[0]) {
+            if (linux_pin_socket_to_iface(s->fd, s->iface) < 0) {
                 LOG_ERR("path[%d] iface pin failed for '%s'; --path values must "
                         "be valid interface names (see `ip link`)",
-                        i, mp->iface);
+                        i, s->iface);
                 goto cleanup;
             }
         }
 
-        /* GRO is per-socket and must be set before the socket is polled.
-         * Deliberately not inside the iface-pin branch above: the default
-         * no-iface single-path config would silently miss it. The "udp-gro: "
-         * prefix is asserted per-arm by scripts/ci_e2e/
-         * run_udp_gso_config_test.sh — keep the two in sync. */
+        /* Transport ctx borrows the fd. Buffers (7 MiB, as before) and GRO
+         * are its job; "udp-gro: " is logged HERE (site-specific wording the
+         * e2e config test asserts, Arm C requires absence when UdpGro=false). */
+        mqvpn_bind_posix_opts_t bopts = {0};
+        bopts.struct_size = sizeof(bopts);
+        bopts.udp_gso = cfg->udp_gso;
+        bopts.udp_gro = ctx.udp_gro;
+        bopts.socket_buf_bytes = 0;
+        snprintf(bopts.tag, sizeof(bopts.tag), "%s", s->iface[0] ? s->iface : "path");
+        void *tctx = NULL;
+        if (mqvpn_bind_posix_path_new(s->fd, &bopts, &tctx) != MQVPN_OK) {
+            LOG_ERR("path[%d] transport setup failed", i);
+            goto cleanup;
+        }
         if (ctx.udp_gro) {
-            if (mqvpn_udp_gro_enable(mp->fd) == 0) {
+            if (mqvpn_bind_posix_path_gro_enabled(tctx)) {
                 LOG_INF("udp-gro: enabled on path[%d]", i);
             } else {
                 LOG_INF("udp-gro: unavailable on path[%d] (%s); receiving one "
                         "datagram per syscall",
-                        i, strerror(errno));
+                        i, strerror(mqvpn_bind_posix_path_gro_errno(tctx)));
             }
         }
 
-        mqvpn_path_desc_t desc = {0};
-        desc.struct_size = sizeof(desc);
-        desc.fd = mp->fd;
-        snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
-        if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
-            memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
-            desc.local_addr_len = mp->local_addrlen;
-        }
-
-        ctx.lib_path_handles[i] = mqvpn_client_add_path_fd(ctx.client, mp->fd, &desc);
-        if (ctx.lib_path_handles[i] < 0) {
+        mqvpn_path_desc_t desc;
+        platform_path_fill_desc(&ctx, s, &desc);
+        s->handle = mqvpn_client_add_path(ctx.client, &desc, mqvpn_bind_posix_path_ops(),
+                                          tctx, NULL);
+        if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
+            mqvpn_bind_posix_path_free(tctx); /* add failed: still ours */
             goto cleanup;
         }
+        s->bind_ctx = tctx; /* library-owned from here */
 
-        ctx.ev_udp[i] =
-            event_new(ctx.eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, &ctx);
-        event_add(ctx.ev_udp[i], NULL);
+        if (platform_path_arm(s) < 0) {
+            LOG_ERR("path[%d] read event setup failed on %s", i,
+                    s->iface[0] ? s->iface : "(any)");
+            goto cleanup;
+        }
     }
 
     /* Register backup (failover) paths */
     for (int i = 0; i < cfg->n_backup_paths; i++) {
-        int idx =
-            mqvpn_path_mgr_add(&ctx.path_mgr, cfg->backup_ifaces[i], &ctx.server_addr);
-        if (idx < 0) {
-            LOG_WRN("backup path %s: socket creation failed, skipping",
-                    cfg->backup_ifaces[i]);
+        if (!attach_extra_path(&ctx, cfg->backup_ifaces[i], MQVPN_PATH_FLAG_BACKUP)) {
+            LOG_WRN("backup path %s: setup failed, skipping", cfg->backup_ifaces[i]);
             continue;
         }
-        mqvpn_path_t *mp = &ctx.path_mgr.paths[idx];
-        mqvpn_path_desc_t desc = {0};
-        desc.struct_size = sizeof(desc);
-        desc.fd = mp->fd;
-        desc.flags = MQVPN_PATH_FLAG_BACKUP;
-        snprintf(desc.iface, sizeof(desc.iface), "%s", mp->iface);
-        if (mp->local_addrlen > 0 && mp->local_addrlen <= sizeof(desc.local_addr)) {
-            memcpy(desc.local_addr, &mp->local_addr, mp->local_addrlen);
-            desc.local_addr_len = mp->local_addrlen;
-        }
-
-        ctx.lib_path_handles[idx] = mqvpn_client_add_path_fd(ctx.client, mp->fd, &desc);
-        if (ctx.lib_path_handles[idx] < 0) {
-            LOG_WRN("backup path %s: library registration failed, skipping",
-                    cfg->backup_ifaces[i]);
-            mqvpn_path_mgr_remove_at(&ctx.path_mgr, idx);
-            continue;
-        }
-
-        ctx.ev_udp[idx] =
-            event_new(ctx.eb, mp->fd, EV_READ | EV_PERSIST, on_socket_read, &ctx);
-        event_add(ctx.ev_udp[idx], NULL);
         LOG_INF("backup path registered: %s", cfg->backup_ifaces[i]);
     }
 
@@ -1040,7 +957,7 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Control API (optional) */
     if (cfg->control_port > 0) {
         ctx.ctrl = ctrl_socket_create(ctx.eb, cfg->control_addr, cfg->control_port, NULL,
-                                      &ctx, &ctx.gro_receives, &ctx.gro_datagrams);
+                                      &ctx, cli_rx_stats, &ctx);
         if (!ctx.ctrl) LOG_WRN("client control API setup failed — continuing without it");
     }
 
@@ -1055,35 +972,42 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     LOG_INF("entering event loop...");
     event_base_dispatch(ctx.eb);
-    rc = 0;
+    rc = ctx.fatal_error ? 1 : 0;
+    if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
+        LOG_ERR("exiting: path release refused by the library");
+    else if (rc)
+        LOG_ERR("exiting: tunnel setup failed");
 
 cleanup:
     ctrl_socket_destroy(ctx.ctrl);
 
-    /* Receive-side offload summary (counters documented in platform_ctx_t).
-     * Emitted on every teardown path — including gro_config=0 — so the bench
-     * and e2e can parse one stable line per run regardless of configuration.
-     * (The few pre-init failures that `return` instead of `goto cleanup` —
-     * host resolve, config alloc, client create — emit nothing; every later
-     * failure reaches here and emits zeros. Either way the run carried no
-     * traffic, so a consumer must treat a missing line and a zero line the
-     * same.) Deliberately NOT prefixed "udp-gro: ": that
-     * prefix is an enablement marker whose absence is asserted when
-     * UdpGro=false. */
-    LOG_INF(UDP_RX_LINE_FMT, ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
+    /* Whole-client teardown contract:
+     *   1. RX is quiesced (the loop has exited; events are freed below, but
+     *      no callback runs anymore because dispatch returned).
+     *   2. Harvest every still-attached transport's RX counters NOW — the
+     *      ctxs are finalised inside client_destroy and dangle afterwards.
+     *   3. client_destroy: final flush (sends on the still-open fds), engine
+     *      teardown, ctx finalisation. Never call on_platform_path_released
+     *      after this.
+     *   4. Emit the udp-rx line, then close the fds (platform_paths_close_all).
+     *      Step 2 already took the numbers off the ctxs, so these last two
+     *      are order-independent — the server does them the other way
+     *      round, and both lines report the same totals either way. */
+    for (int i = 0; i < ctx.n_paths; i++) {
+        uint64_t r, d;
+        platform_read_rx_stats(&ctx.paths[i], &r, &d);
+        ctx.gro_receives += r;
+        ctx.gro_datagrams += d;
+    }
 
     /* Library teardown FIRST, while every callback-owned platform object is
-     * still alive: the destroy-time deferred flush drives the engine, which
-     * can fire the same callbacks as normal operation — cb_state_changed
-     * pauses/frees events and tears down the TUN, NULLing ctx fields as it
-     * goes, exactly as it does for an in-loop close. Freeing those objects
-     * before the destroy (the old order) handed the callbacks freed events
-     * and a dead TUN. After destroy returns no callback can fire, and the
-     * NULL guards below skip whatever the callbacks already released. Path
-     * fds must also outlive the destroy (the flush sends on them), so
-     * path_mgr_destroy stays below as well. */
-    mqvpn_client_destroy(ctx.client);
+     * still alive (see the pre-refactor comment history: the destroy-time
+     * flush drives the engine and can fire cb_state_changed). Path fds must
+     * outlive the destroy (the flush sends on them). */
+    if (ctx.client) mqvpn_client_destroy(ctx.client);
     ctx.client = NULL;
+    for (int i = 0; i < ctx.n_paths; i++)
+        ctx.paths[i].bind_ctx = NULL; /* finalised by destroy */
 
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
@@ -1096,13 +1020,6 @@ cleanup:
             event_free(ctx.ev_tun);
         }
         mqvpn_tun_destroy(&ctx.tun);
-    }
-
-    for (int i = 0; i < ctx.path_mgr.n_paths; i++) {
-        if (ctx.ev_udp[i]) {
-            event_del(ctx.ev_udp[i]);
-            event_free(ctx.ev_udp[i]);
-        }
     }
 
     if (ctx.ev_netlink) {
@@ -1132,10 +1049,22 @@ cleanup:
         event_free(ctx.ev_recover);
     }
 
-    /* Path fds close only here, after the library is gone (see the destroy
-     * comment at the top of this cleanup): the destroy-time flush sends on
-     * them, and the library never closes them itself. */
-    mqvpn_path_mgr_destroy(&ctx.path_mgr);
+    /* Receive-side offload summary (counters documented in platform_ctx_t).
+     * Emitted on every teardown path — including gro_config=0 — so the bench
+     * and e2e can parse one stable line per run regardless of configuration.
+     * (The few pre-init failures that `return` instead of `goto cleanup` —
+     * host resolve, config alloc, client create — emit nothing; every later
+     * failure reaches here and emits zeros. Either way the run carried no
+     * traffic, so a consumer must treat a missing line and a zero line the
+     * same.) Deliberately NOT prefixed "udp-gro: ": that prefix is an
+     * enablement marker whose absence is asserted when UdpGro=false. */
+    LOG_INF(UDP_RX_LINE_FMT, ctx.gro_receives, ctx.gro_datagrams, ctx.udp_gro);
+
+    /* Path fds (and their read events) close only here, after the library
+     * is gone (see the destroy comment at the top of this cleanup): the
+     * destroy-time flush sends on them, and the library never closes them
+     * itself. */
+    platform_paths_close_all(&ctx);
 
     if (ctx.eb) event_base_free(ctx.eb);
 
@@ -1170,13 +1099,18 @@ typedef struct server_platform_ctx_s {
     mqvpn_tun_t tun;
     int tun_up;
     int udp_fd;
+    /* mqvpn_bind_posix server transport over udp_fd; owned by the library
+     * after set_transport (finalised inside mqvpn_server_destroy). */
+    void *bind_ctx;
     int shutting_down;
     ctrl_socket_t *ctrl;
 
-    /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair,
-     * written by svr_on_socket_read and read once at teardown. No udp_gro flag
-     * here: the listen socket is created exactly once, so the sockopt hook
-     * takes the flag as a parameter and teardown reads cfg->udp_gro. */
+    /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair.
+     * Accumulators only: the bind counts inside the transport ctx, so these
+     * hold what has already been harvested (at teardown) and svr_rx_stats
+     * adds the live ctx numbers on top when the control API asks. No udp_gro
+     * flag here: the listen socket is created exactly once, so teardown reads
+     * cfg->udp_gro. */
     uint64_t gro_receives;  /* recvmsg calls whose data was delivered —
                              * same exclusions as platform_ctx_t's pair */
     uint64_t gro_datagrams; /* datagrams delivered to the library */
@@ -1306,24 +1240,17 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     svr_schedule_next_tick(sp);
 }
 
-/* drain_udp_rx deliver thunk: the server has one socket, no path handle. */
-static void
-svr_rx_deliver(void *arg, const uint8_t *pkt, size_t len, const struct sockaddr *peer,
-               socklen_t peer_len)
-{
-    mqvpn_server_on_socket_recv((mqvpn_server_t *)arg, pkt, len, peer, peer_len);
-}
-
 static void
 svr_on_socket_read(evutil_socket_t fd, short what, void *arg)
 {
+    (void)fd; /* the transport ctx owns the fd */
     (void)what;
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
 
-    /* Semantics (budget, truncation, GRO split, counters) live in
-     * drain_udp_rx — shared with the client's on_socket_read. */
-    drain_udp_rx(fd, "svr rx", svr_rx_deliver, sp->server, &sp->gro_receives,
-                 &sp->gro_datagrams);
+    /* Semantics (budget, truncation, GRO split, counters) live in the bind —
+     * shared with the client's on_socket_read. A hard error is ignored here,
+     * as before. */
+    (void)mqvpn_bind_posix_server_drain(sp->bind_ctx, sp->server, BULK_READ_COUNT);
 
     mqvpn_server_tick(sp->server);
     svr_schedule_next_tick(sp);
@@ -1440,7 +1367,7 @@ svr_on_signal(evutil_socket_t sig, short what, void *arg)
 
 static int
 svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_addr,
-                      socklen_t *out_addrlen, int udp_gro)
+                      socklen_t *out_addrlen)
 {
     sa_family_t af = AF_INET;
     struct in_addr addr4;
@@ -1471,19 +1398,11 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+    /* The platform sizes its own listen socket, so the transport ctx is told
+     * to leave the buffers alone (socket_buf_bytes = -1). */
     int bufsize = 1 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-
-    if (udp_gro) {
-        if (mqvpn_udp_gro_enable(fd) == 0) {
-            /* marker asserted by scripts/ci_e2e/run_udp_gso_config_test.sh */
-            LOG_INF("udp-gro: enabled");
-        } else {
-            LOG_INF("udp-gro: unavailable (%s); receiving one datagram per syscall",
-                    strerror(errno));
-        }
-    }
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1518,6 +1437,22 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
     LOG_INF("UDP socket bound to %s:%d",
             addr ? addr : (af == AF_INET6 ? "::" : "0.0.0.0"), port);
     return fd;
+}
+
+/* Control-API view of the receive-side offload counters (ctrl_rx_stats_fn).
+ * The live numbers sit in the transport ctx while sp holds the totals of
+ * whatever has already been harvested, so BOTH halves are added or the
+ * control API under-reports. Nothing can be counted twice: the teardown
+ * harvest runs after ctrl_socket_destroy, so no request survives to see a
+ * ctx's numbers both live and accumulated. */
+static void
+svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
+    mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
+    if (sp->bind_ctx) mqvpn_bind_posix_server_get_stats(sp->bind_ctx, &st);
+    *receives = sp->gro_receives + st.rx_receives;
+    *datagrams = sp->gro_datagrams + st.rx_datagrams;
 }
 
 int
@@ -1598,7 +1533,6 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
     cbs.tun_output = svr_cb_tun_output;
     cbs.tunnel_config_ready = svr_cb_tunnel_config_ready;
-    cbs.send_packet = NULL; /* fd-only mode */
     cbs.log = svr_cb_log;
     cbs.egress_fd_register = platform_egress_fd_register;
     cbs.egress_fd_unregister = platform_egress_fd_unregister;
@@ -1630,11 +1564,35 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
-                                      &local_addrlen, cfg->udp_gro);
+                                      &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
 
-    mqvpn_server_set_socket_fd(sp.server, sp.udp_fd, (struct sockaddr *)&local_addr,
-                               local_addrlen);
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = cfg->udp_gso;
+    bopts.udp_gro = cfg->udp_gro;
+    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    snprintf(bopts.tag, sizeof(bopts.tag), "server");
+    if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
+        LOG_ERR("server transport setup failed");
+        goto cleanup;
+    }
+    if (cfg->udp_gro) {
+        /* marker asserted by scripts/ci_e2e/run_udp_gso_config_test.sh */
+        if (mqvpn_bind_posix_server_gro_enabled(sp.bind_ctx))
+            LOG_INF("udp-gro: enabled");
+        else
+            LOG_INF("udp-gro: unavailable (%s); receiving one datagram per syscall",
+                    strerror(mqvpn_bind_posix_server_gro_errno(sp.bind_ctx)));
+    }
+    if (mqvpn_server_set_transport(sp.server, mqvpn_bind_posix_server_ops(), sp.bind_ctx,
+                                   (struct sockaddr *)&local_addr,
+                                   local_addrlen) != MQVPN_OK) {
+        LOG_ERR("server transport install failed");
+        mqvpn_bind_posix_server_free(sp.bind_ctx); /* refused: still ours */
+        sp.bind_ctx = NULL;
+        goto cleanup;
+    }
 
     /* Create event base */
     sp.eb = event_base_new();
@@ -1667,12 +1625,13 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     /* Control API (optional) */
     if (cfg->control_port > 0) {
         /* sp outlives the control socket (both are torn down in this
-         * function's cleanup, ctrl first), so lending the RX counters is
-         * safe. They are written only by svr_on_socket_read, on this same
-         * event loop. cli_ctx is NULL — path-management commands are
-         * client-mode only (see dispatch()'s cli_ctx checks). */
+         * function's cleanup, ctrl first), so lending the RX-counter getter
+         * is safe: it reads the transport ctx and sp's accumulators, both
+         * still alive, from this same event loop. cli_ctx is NULL —
+         * path-management commands are client-mode only (see dispatch()'s
+         * cli_ctx checks). */
         sp.ctrl = ctrl_socket_create(sp.eb, cfg->control_addr, cfg->control_port,
-                                     sp.server, NULL, &sp.gro_receives, &sp.gro_datagrams);
+                                     sp.server, NULL, svr_rx_stats, &sp);
         if (!sp.ctrl) LOG_WRN("control API setup failed — continuing without it");
     }
 
@@ -1684,12 +1643,18 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     rc = 0;
 
 cleanup:
-    /* Receive-side offload summary — same contract as the client's line in
-     * linux_platform_run_client(). */
-    LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
-
+    /* Teardown contract (same as the client): RX quiesced (dispatch returned),
+     * harvest the transport's RX counters BEFORE server_destroy finalises the
+     * ctx, then destroy (final flush still sends on the open fd), then close
+     * the fd and emit the udp-rx line. */
     LOG_INF("server shutting down");
     ctrl_socket_destroy(sp.ctrl);
+    if (sp.bind_ctx) {
+        mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
+        mqvpn_bind_posix_server_get_stats(sp.bind_ctx, &st);
+        sp.gro_receives += st.rx_receives;
+        sp.gro_datagrams += st.rx_datagrams;
+    }
 
     /* Library teardown FIRST, while the TUN, the UDP socket and the egress
      * fd registry are all still alive: the destroy-time deferred flush
@@ -1699,9 +1664,16 @@ cleanup:
      * first, so those late writes went to a closed — possibly recycled —
      * fd. After destroy returns no callback can fire, and the platform
      * frees everything at its leisure. */
-    mqvpn_server_destroy(sp.server);
+    if (sp.server) mqvpn_server_destroy(sp.server);
     sp.server = NULL;
+    sp.bind_ctx = NULL; /* finalised by destroy */
     if (sp.udp_fd >= 0) close(sp.udp_fd);
+
+    /* Receive-side offload summary. Same harvest-before-destroy contract as
+     * the client's line, but emitted AFTER the fd close rather than before
+     * it: the numbers came off the ctx in the harvest above, so neither
+     * order can change them. */
+    LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
     if (sp.tun_up) {
         if (sp.ev_tun) {

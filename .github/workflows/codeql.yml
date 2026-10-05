@@ -2,9 +2,9 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     - cron: '0 6 * * 1'  # Weekly Monday 6:00 UTC
 
@@ -58,8 +58,13 @@ jobs:
                 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
 
+      # Deliberately not gated on the cache miss: a cache restored from before
+      # the CMAKE_BUILD_TYPE fix is exactly what this is meant to catch.
+      - name: Verify BoringSSL is an optimized build
+        run: bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
+
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.7
+        uses: github/codeql-action/init@v4.38.2
         with:
           languages: c-cpp
           queries: security-and-quality
@@ -99,6 +104,6 @@ jobs:
           make -j$(nproc)
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v4.37.7
+        uses: github/codeql-action/analyze@v4.38.2
         with:
           category: "/language:c-cpp"

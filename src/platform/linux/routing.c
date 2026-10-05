@@ -24,17 +24,19 @@
 #define ROUTE_DISCOVER_MAX_ATTEMPTS 6
 #define ROUTE_DISCOVER_RETRY_DELAY_SEC 1
 
-/* Try known absolute paths for the 'ip' binary before falling back to PATH.
- * On some distributions /usr/sbin is not in root's PATH under sudo. */
+/* Search PATH for the 'ip' binary first, then fall back to known absolute
+ * paths: on some distributions /usr/sbin is not in root's PATH under sudo.
+ * PATH first so a PATH-stubbed `ip` (tests/test_routing_linux.c) is the one
+ * that runs. Returns only if every exec failed. */
 static void
 exec_ip(char *const argv[])
 {
     static const char *const paths[] = {
         "/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip", NULL
     };
+    execvp("ip", argv);
     for (int i = 0; paths[i]; i++)
         execv(paths[i], argv);
-    execvp("ip", argv); /* last resort: search PATH */
 }
 
 static int
@@ -77,26 +79,59 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     }
 
     close(fds[1]);
-    /* Read until EOF — a single read() call may not capture all output. */
+
+    /* Read until EOF, as the Darwin twin (route_get_and_parse) does. `ip -4
+     * route get` prints two lines (the route, then "    cache"), and a
+     * musl-linked iproute2 (Alpine, OpenWrt) writes them with two separate
+     * write()s: musl's stdout is line-buffered until its first flush. A
+     * single read() can therefore return only the first line; closing the
+     * pipe then kills `ip` with SIGPIPE on its second write (Linux clients
+     * keep the default disposition, which survives exec), and the
+     * WIFEXITED check below discards an answer that was already complete,
+     * aborting the tunnel with "could not determine original iface".
+     * Retry EINTR; treat buffer-full-before-EOF as a failed capture. */
     char out[1024];
-    size_t total = 0;
-    ssize_t n;
-    while (total < sizeof(out) - 1 &&
-           (n = read(fds[0], out + total, sizeof(out) - 1 - total)) > 0)
-        total += (size_t)n;
+    size_t used = 0;
+    int read_failed = 0, overflowed = 0;
+    for (;;) {
+        if (used >= sizeof(out) - 1) {
+            /* Buffer full — probe one more byte to distinguish "output
+             * exactly fits" from truncation. */
+            char probe;
+            ssize_t r = read(fds[0], &probe, 1);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                read_failed = 1;
+            } else if (r > 0) {
+                overflowed = 1;
+            }
+            break;
+        }
+        ssize_t r = read(fds[0], out + used, sizeof(out) - 1 - used);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            read_failed = 1;
+            break;
+        }
+        if (r == 0) break; /* EOF */
+        used += (size_t)r;
+    }
     close(fds[0]);
 
     int status = 0;
     while (waitpid(pid, &status, 0) < 0)
         if (errno != EINTR) return -1;
 
-    out[total] = '\0';
+    if (read_failed || overflowed) {
+        LOG_WRN("ip route get %s: output capture failed (%s)", server_ip,
+                read_failed ? "read error" : "output truncated");
+        return -1;
+    }
+    out[used] = '\0';
 
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || total == 0) {
-        LOG_WRN("ip route get %s: exit=%d output='%s'",
-                server_ip,
-                WIFEXITED(status) ? WEXITSTATUS(status) : -1,
-                out);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || used == 0) {
+        LOG_WRN("ip route get %s: exit=%d output='%s'", server_ip,
+                WIFEXITED(status) ? WEXITSTATUS(status) : -1, out);
         return -1;
     }
 
@@ -244,9 +279,8 @@ setup_routes(platform_ctx_t *p)
     {
         /* On OpenMPTCProuter, policy rules/routes can appear shortly after
          * process startup. Retry route discovery before giving up. */
-        const char *first_iface = (p->path_mgr.n_paths > 0 &&
-                                   p->path_mgr.paths[0].iface[0])
-                                  ? p->path_mgr.paths[0].iface : NULL;
+        const char *first_iface =
+            (p->n_paths > 0 && p->paths[0].iface[0]) ? p->paths[0].iface : NULL;
         int route_ok = 0;
 
         for (int attempt = 1; attempt <= ROUTE_DISCOVER_MAX_ATTEMPTS; attempt++) {
@@ -367,9 +401,20 @@ setup_routes(platform_ctx_t *p)
                              "::/1", "dev", p->tun.name, NULL};
         const char *v6h[] = {"ip",       "-6",  "route",     "replace",
                              "8000::/1", "dev", p->tun.name, NULL};
-        if (run_ip_cmd(v6l) == 0 && run_ip_cmd(v6h) == 0) {
-            p->routing6_configured = 1;
-            LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
+        if (run_ip_cmd(v6l) == 0) {
+            if (run_ip_cmd(v6h) == 0) {
+                p->routing6_configured = 1;
+                LOG_INF("IPv6 catch-all routes set via %s", p->tun.name);
+            } else {
+                /* Partial install must not outlive the failure: with
+                 * routing6_configured still 0, cleanup_routes() skips the
+                 * IPv6 deletes, so a ::/1 left behind here would keep
+                 * routing half the v6 space into the TUN after disconnect. */
+                const char *v6u[] = {"ip",   "-6",  "route",     "del",
+                                     "::/1", "dev", p->tun.name, NULL};
+                (void)run_ip_cmd(v6u);
+                LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
+            }
         } else {
             LOG_WRN("failed to set IPv6 catch-all routes (continuing IPv4-only)");
         }

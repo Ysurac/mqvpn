@@ -16,6 +16,7 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_internal.h"
+#include "fake_transport.h"
 
 /* ── Test infrastructure ── */
 
@@ -133,6 +134,21 @@ make_client_with_events(void)
 
 /* ── Helpers ── */
 
+/* One fake transport per add_path call; index = order of creation. Sized so
+ * no test (at most MQVPN_MAX_PATHS live paths plus a few failed adds) can
+ * wrap around onto a transport still owned by its client. */
+#define N_FAKES (2 * MQVPN_MAX_PATHS)
+static fake_transport_t g_fake[N_FAKES];
+static int g_fake_next;
+
+static mqvpn_path_handle_t
+add_fake_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc)
+{
+    fake_transport_t *t = &g_fake[g_fake_next++ % N_FAKES];
+    fake_transport_init(t);
+    return mqvpn_client_add_path(c, desc, fake_path_ops(), t, NULL);
+}
+
 /* Find path info by handle; returns 1 on success. */
 static int
 find_path_info(mqvpn_client_t *c, mqvpn_path_handle_t h, mqvpn_path_info_t *out)
@@ -154,11 +170,11 @@ TEST(backup_flag_stored_in_path_info)
     ASSERT_NOT_NULL(c);
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd    = 50;
-    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    desc.struct_size = sizeof(desc);
+    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 50, &desc);
+    mqvpn_path_handle_t h = add_fake_path(c, &desc);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     mqvpn_path_info_t info;
@@ -175,10 +191,10 @@ TEST(primary_path_has_no_backup_flag)
     ASSERT_NOT_NULL(c);
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd = 10;
+    desc.struct_size = sizeof(desc);
     snprintf(desc.iface, sizeof(desc.iface), "eth0");
 
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 10, &desc);
+    mqvpn_path_handle_t h = add_fake_path(c, &desc);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     mqvpn_path_info_t info;
@@ -202,11 +218,11 @@ TEST(backup_path_status_pending_before_connect)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd    = 52;
-    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    desc.struct_size = sizeof(desc);
+    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 52, &desc);
+    mqvpn_path_handle_t h = add_fake_path(c, &desc);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     mqvpn_path_info_t info;
@@ -221,10 +237,10 @@ TEST(primary_path_status_pending_before_connect)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd = 11;
+    desc.struct_size = sizeof(desc);
     snprintf(desc.iface, sizeof(desc.iface), "eth0");
 
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 11, &desc);
+    mqvpn_path_handle_t h = add_fake_path(c, &desc);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     mqvpn_path_info_t info;
@@ -241,12 +257,12 @@ TEST(mixed_primary_backup_flags_independent)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t dp = {0}, db = {0};
-    dp.fd = 60; snprintf(dp.iface, sizeof(dp.iface), "eth0");
-    db.fd = 61; db.flags = MQVPN_PATH_FLAG_BACKUP;
+    dp.struct_size = sizeof(dp); snprintf(dp.iface, sizeof(dp.iface), "eth0");
+    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(db.iface, sizeof(db.iface), "lte0");
 
-    mqvpn_path_handle_t hp = mqvpn_client_add_path_fd(c, 60, &dp);
-    mqvpn_path_handle_t hb = mqvpn_client_add_path_fd(c, 61, &db);
+    mqvpn_path_handle_t hp = add_fake_path(c, &dp);
+    mqvpn_path_handle_t hb = add_fake_path(c, &db);
     ASSERT_NE(hp, (mqvpn_path_handle_t)-1);
     ASSERT_NE(hb, (mqvpn_path_handle_t)-1);
 
@@ -265,13 +281,13 @@ TEST(two_backup_paths_both_reported)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t db1 = {0}, db2 = {0};
-    db1.fd = 70; db1.flags = MQVPN_PATH_FLAG_BACKUP;
+    db1.struct_size = sizeof(db1); db1.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(db1.iface, sizeof(db1.iface), "lte0");
-    db2.fd = 71; db2.flags = MQVPN_PATH_FLAG_BACKUP;
+    db2.struct_size = sizeof(db2); db2.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(db2.iface, sizeof(db2.iface), "lte1");
 
-    mqvpn_path_handle_t h1 = mqvpn_client_add_path_fd(c, 70, &db1);
-    mqvpn_path_handle_t h2 = mqvpn_client_add_path_fd(c, 71, &db2);
+    mqvpn_path_handle_t h1 = add_fake_path(c, &db1);
+    mqvpn_path_handle_t h2 = add_fake_path(c, &db2);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
 
@@ -296,11 +312,11 @@ TEST(no_path_event_before_connect)
     reset_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd    = 80;
-    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    desc.struct_size = sizeof(desc);
+    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
-    mqvpn_client_add_path_fd(c, 80, &desc);
+    add_fake_path(c, &desc);
 
     ASSERT_EQ(g_path_event_count, 0);
 
@@ -313,9 +329,9 @@ TEST(path_event_count_zero_for_primary_before_connect)
     reset_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd = 12;
+    desc.struct_size = sizeof(desc);
     snprintf(desc.iface, sizeof(desc.iface), "eth0");
-    mqvpn_client_add_path_fd(c, 12, &desc);
+    add_fake_path(c, &desc);
 
     ASSERT_EQ(g_path_event_count, 0);
 
@@ -331,11 +347,11 @@ TEST(backup_path_removable)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd    = 90;
-    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    desc.struct_size = sizeof(desc);
+    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 90, &desc);
+    mqvpn_path_handle_t h = add_fake_path(c, &desc);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     ASSERT_EQ(mqvpn_client_remove_path(c, h), MQVPN_OK);
@@ -354,21 +370,24 @@ TEST(backup_path_slot_reusable_after_remove)
 
     /* Fill all MQVPN_MAX_PATHS slots — first two as primary + backup */
     mqvpn_path_desc_t dp = {0}, db = {0};
-    dp.fd = 100;
-    db.fd = 101; db.flags = MQVPN_PATH_FLAG_BACKUP;
+    dp.struct_size = sizeof(dp);
+    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
 
-    mqvpn_path_handle_t hp = mqvpn_client_add_path_fd(c, 100, &dp);
-    mqvpn_path_handle_t hb = mqvpn_client_add_path_fd(c, 101, &db);
-    for (int i = 102; i < 100 + MQVPN_MAX_PATHS; i++)
-        mqvpn_client_add_path_fd(c, i, NULL);
+    mqvpn_path_handle_t hp = add_fake_path(c, &dp);
+    mqvpn_path_handle_t hb = add_fake_path(c, &db);
+    for (int i = 2; i < MQVPN_MAX_PATHS; i++)
+        add_fake_path(c, NULL);
 
     /* One beyond the limit must fail */
-    ASSERT_EQ(mqvpn_client_add_path_fd(c, 100 + MQVPN_MAX_PATHS, NULL),
+    ASSERT_EQ(add_fake_path(c, NULL),
               (mqvpn_path_handle_t)-1);
 
-    /* Remove backup, then adding one more should succeed */
+    /* Remove backup: the slot is only recycled once the platform has
+     * released its transport, then adding one more should succeed */
     ASSERT_EQ(mqvpn_client_remove_path(c, hb), MQVPN_OK);
-    mqvpn_path_handle_t h_new = mqvpn_client_add_path_fd(c, 200, NULL);
+    ASSERT_EQ(add_fake_path(c, NULL), (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_on_platform_path_released(c, hb), MQVPN_OK);
+    mqvpn_path_handle_t h_new = add_fake_path(c, NULL);
     ASSERT_NE(h_new, (mqvpn_path_handle_t)-1);
 
     (void)hp;
@@ -382,11 +401,11 @@ TEST(get_paths_counts_backup_paths)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t dp = {0}, db = {0};
-    dp.fd = 200;
-    db.fd = 201; db.flags = MQVPN_PATH_FLAG_BACKUP;
+    dp.struct_size = sizeof(dp);
+    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
 
-    mqvpn_client_add_path_fd(c, 200, &dp);
-    mqvpn_client_add_path_fd(c, 201, &db);
+    add_fake_path(c, &dp);
+    add_fake_path(c, &db);
 
     mqvpn_path_info_t infos[4];
     int n = 0;
@@ -402,12 +421,11 @@ TEST(get_paths_truncates_to_max_out)
 
     /* Add 3 paths (1 primary + 2 backup) */
     mqvpn_path_desc_t d = {0};
-    d.fd = 300;
-    mqvpn_client_add_path_fd(c, 300, &d);
-    d.fd = 301; d.flags = MQVPN_PATH_FLAG_BACKUP;
-    mqvpn_client_add_path_fd(c, 301, &d);
-    d.fd = 302;
-    mqvpn_client_add_path_fd(c, 302, &d);
+    d.struct_size = sizeof(d);
+    add_fake_path(c, &d);
+    d.flags = MQVPN_PATH_FLAG_BACKUP;
+    add_fake_path(c, &d);
+    add_fake_path(c, &d);
 
     /* Request only 2 slots */
     mqvpn_path_info_t infos[2];
@@ -425,10 +443,10 @@ TEST(tick_safe_with_backup_paths_no_connection)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd    = 400;
-    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    desc.struct_size = sizeof(desc);
+    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
-    mqvpn_client_add_path_fd(c, 400, &desc);
+    add_fake_path(c, &desc);
 
     /* tick() must not crash without a live connection */
     ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
@@ -442,10 +460,10 @@ TEST(tick_safe_mixed_paths_no_connection)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t dp = {0}, db = {0};
-    dp.fd = 500;
-    db.fd = 501; db.flags = MQVPN_PATH_FLAG_BACKUP;
-    mqvpn_client_add_path_fd(c, 500, &dp);
-    mqvpn_client_add_path_fd(c, 501, &db);
+    dp.struct_size = sizeof(dp);
+    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
+    add_fake_path(c, &dp);
+    add_fake_path(c, &db);
 
     ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
 
@@ -459,14 +477,14 @@ TEST(drop_path_on_backup)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t desc = {0};
-    desc.fd    = 600;
-    desc.flags = MQVPN_PATH_FLAG_BACKUP;
+    desc.struct_size = sizeof(desc);
+    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 600, &desc);
+    mqvpn_path_handle_t h = add_fake_path(c, &desc);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
-    /* drop_path does an immediate remove (fd is dead) — must not crash */
+    /* drop_path does an immediate remove (transport is dead) — must not crash */
     ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
 
     /* Slot stays in the array but is marked CLOSED */
@@ -483,7 +501,7 @@ TEST(add_path_null_desc_still_works)
 {
     /* NULL desc is allowed — path gets default flags (no BACKUP) */
     mqvpn_client_t *c = make_client_with_events();
-    mqvpn_path_handle_t h = mqvpn_client_add_path_fd(c, 700, NULL);
+    mqvpn_path_handle_t h = add_fake_path(c, NULL);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     mqvpn_path_info_t info;
