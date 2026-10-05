@@ -1,3 +1,21 @@
+mqvpn (0.16.3-1) UNRELEASED; urgency=medium
+
+  * feat(client): PinnedPubkey (INI [Server] PinnedPubkey, JSON
+    pinned_pubkey, --pinned-pubkey, mqvpn_config_set_pinned_pubkey()) --
+    pin the server's public key (base64 SHA-256 of its SubjectPublicKeyInfo,
+    curl --pinnedpubkey format, "sha256//" optional, up to 4 ';'-separated
+    for rotation). Insecure verifies nothing, so any on-path server that
+    completes the handshake received the PSK in the CONNECT-IP Authorization
+    header and could replay it (GHSA-qq6x-5r9f-2w3m). With a pin, the
+    client checks the leaf key (proven by the TLS 1.3 CertificateVerify)
+    right after the handshake and closes before sending anything; the pin
+    replaces CA, hostname and expiry validation, so a self-signed server
+    needs no Insecure, and it overrides Insecure when both are set. A
+    malformed pin is a startup error. New e2e run_pinned_pubkey_test.sh
+    reproduces the leak with Insecure and checks the pin blocks it.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 05 Oct 2026 18:00:00 +0200
+
 mqvpn (0.16.2-1) UNRELEASED; urgency=medium
 
   * fix(server): one live CONNECT-IP tunnel per connection, stream-scoped
