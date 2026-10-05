@@ -27,6 +27,12 @@ paths = [
 regexes = [
   '''tiiUC0/Fx51w5XuxAnpOgdRZb19SLqglwFdhxbbsbnM=''',
   '''mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=''',
+  # PinnedPubkey test fixtures (tests/test_api.c, tests/test_config.c): the
+  # SPKI SHA-256 of the fixed test certificate PIN_CERT_DER and its malformed
+  # variants, and PIN_B (bytes 0x00..0x1f). Public-key digests, not secrets;
+  # same 32-byte base64 shape as a PSK.
+  '''kKiP1neKCSfrQuBKbSCIizKWyjBb06ucfpdcVgoJp''',
+  '''AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=''',
   # GitHub Actions cache keys (ci.yml/release.yml convention: dep name +
   # commit prefix + platform slug + trailing -vN bump suffix). High-entropy
   # enough to trip the generic-api-key rule (e.g. the ios job's
