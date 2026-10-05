@@ -1,3 +1,4 @@
 usr/include/libmqvpn.h
+usr/include/mqvpn_bind_posix.h
 usr/lib/libmqvpn.a
 usr/lib/libmqvpn.so
