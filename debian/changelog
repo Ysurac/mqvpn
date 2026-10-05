@@ -25,6 +25,75 @@ mqvpn (0.16.3-1) UNRELEASED; urgency=medium
     BackupPath when no attached primary is left, so Path + BackupPath
     also reconnects over the backup. New e2e run_primary_removal_test.sh
     (Pierre-Yves Le Borgne, PR #1).
+  * Merge upstream mqvpn main (0.16.3):
+  * refactor: ABI 3 transport contract -- the library core no longer
+    touches sockets. mqvpn_client_add_path() now takes a per-path transport
+    (ops table + opaque ctx) instead of an fd, mqvpn_client_add_path_fd(),
+    mqvpn_path_desc_t.fd and the send_packet API are gone, and
+    mqvpn_client_on_platform_fd_closed() becomes
+    mqvpn_client_on_platform_path_released(). The bundled POSIX bind
+    (src/bind/, also used by the server with per-connection TX scopes) and
+    a Winsock bind carry the UDP I/O, GSO/GRO included. path_mgr is
+    removed: Linux, Darwin and Windows keep per-path state in one slot
+    table, which also fixes two re-add bugs (a slot that still owns its
+    socket is reactivated instead of re-added; a path whose library slot
+    was recycled for another path is re-added again).
+  * refactor(platform): shared POSIX network-monitor decision layer
+    (netmon_common.c) for Linux netlink and Darwin route monitoring, and a
+    shared CLI-to-library config bridge (client_config_bridge.c) so a
+    setting can no longer be forwarded on one platform and dropped on
+    another (InitMaxPathId was, on Windows).
+  * feat(config): mqvpn_config_set_cert_verifier() -- platform-owned TLS
+    verification (xquic APP_VERIFY); the client reports MQVPN_ERR_TLS only
+    for a verifier rejection and warns when Insecure overrides a verifier.
+    Windows verifies against the CryptoAPI stores unless SSL_CERT_FILE /
+    SSL_CERT_DIR is set; Android and iOS install platform verifiers
+    (PlatformTrust / SecTrust). The server certificate file must be the
+    full chain: clients do not fetch missing intermediates.
+  * fix(server): send IPv6 ADDRESS_ASSIGN as /128 (RFC 9484 S4.7.1); the
+    pool prefix with host bits set advertised the whole pool as permitted
+    sources. The client widens its TUN width locally (/112 cap), so it
+    still works with older servers.
+  * fix(platform): exit non-zero when tunnel setup aborts (TUN, address,
+    MTU, routes or kill switch failure), so Restart=on-failure acts
+    instead of leaving a process with no tunnel and no retry; break the
+    event loop on SIGTERM/SIGINT when the client is already CLOSED (only
+    SIGKILL stopped it before).
+  * fix(routing): read `ip route get` to EOF -- musl iproute2 (OpenWrt,
+    Alpine) writes its two output lines separately, so a single read()
+    could miss the second, SIGPIPE `ip` and abort the tunnel with "could
+    not determine original iface"; roll back ::/1 when the 8000::/1
+    catch-all fails (it was left routed into the TUN after disconnect).
+  * fix(hybrid): cap the stream backlog waiting unsent in xquic so it no
+    longer delays DATAGRAMs; budget the server egress relay loop so
+    parallel TCP flows share the send grant; destroy an egress flow before
+    resetting its stream (an EPIPE loop logged ~64k lines in two seconds).
+  * fix(status): read the whole control-API reply -- `mqvpn --status`
+    truncated get_status at 32 KiB (about 15 clients) and printed a short,
+    valid-looking client list.
+  * fix(windows): remove the WFP kill switch objects through a dynamic
+    session; the old cleanup left every filter, block-all included, in
+    place until reboot.
+  * fix: keep the Linux netlink message cursor signed; Darwin destroys the
+    client before freeing callback-owned platform objects.
+  * chore(deps): bump the xquic fork to upstream mqvpn-main -- WLB
+    scheduler series (a silently blackholed path no longer stalls the
+    weight rounds: 40/100 -> 1/100 failures over 100 blackhole cycles),
+    two-tier stream reassembly cap, framed-but-unsent stream cap,
+    APP_VERIFY, BoringSSL 0.20260903.0.
+  * android/ios: engine on a dedicated reactor thread with paths through
+    the bundled bind; Android keeps Wi-Fi, cellular and Ethernet up
+    together (optional Bluetooth path); iOS tunnel session coordinator.
+  * Merge port of dev features onto ABI 3: backup paths and the
+    control-API add_path/remove_path/list_paths/set_path_weight/
+    set_path_dscp_mask commands run on the Linux slot table (a path
+    removed through the API is never re-added by the monitor); re-added
+    paths keep their backup flag, weight and dscp_mask; dev's client
+    settings (auth username, TLS ciphers, FEC, path-label sync/push,
+    WRTT/WRR/redundant/DSCP schedulers) go through the shared config
+    bridge on every platform; removing the initial path still sends the
+    closing frames over a live sibling; `ip` is searched in PATH before
+    the absolute-path fallbacks.
 
  -- mqvpn maintainers <maintainers@example.com>  Mon, 05 Oct 2026 18:00:00 +0200
 
