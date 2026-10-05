@@ -836,6 +836,14 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     if (cfg->tls_ciphers && cfg->tls_ciphers[0])
         mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
+    if (cfg->pinned_pubkey &&
+        mqvpn_config_set_pinned_pubkey(lib_cfg, cfg->pinned_pubkey) != MQVPN_OK) {
+        LOG_ERR("invalid PinnedPubkey \"%s\": expected base64 SHA-256 pins "
+                "(\"sha256//\" optional), at most 4, ';'-separated",
+                cfg->pinned_pubkey);
+        mqvpn_config_free(lib_cfg);
+        return 1;
+    }
     /* Enable multipath when there are multiple primary paths, or when there is at
      * least one backup path (even a single auto-detected primary + one backup needs
      * multipath negotiation for failover to work; cfg->n_paths == 0 means one

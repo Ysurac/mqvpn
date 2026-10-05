@@ -414,6 +414,13 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->insecure = iv;
     }
 
+    v = json_find_key(json_text, "pinned_pubkey");
+    if (v) {
+        if (json_read_string(v, tmp, sizeof(tmp)) != MQVPN_OK ||
+            mqvpn_config_set_pinned_pubkey(cfg, tmp) != MQVPN_OK)
+            return MQVPN_ERR_INVALID_ARG;
+    }
+
     int multipath_explicitly_set = 0;
     v = json_find_key(json_text, "multipath");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
@@ -593,6 +600,22 @@ mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->insecure = insecure;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_pinned_pubkey(mqvpn_config_t *cfg, const char *pins)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    if (!pins || pins[0] == '\0') {
+        cfg->n_pinned_pubkeys = 0;
+        return MQVPN_OK;
+    }
+    uint8_t parsed[MQVPN_MAX_PINNED_PUBKEYS][MQVPN_PIN_LEN];
+    int n = 0;
+    if (mqvpn_cert_pin_parse(pins, parsed, &n) < 0) return MQVPN_ERR_INVALID_ARG;
+    memcpy(cfg->pinned_pubkeys, parsed, sizeof(parsed));
+    cfg->n_pinned_pubkeys = n;
     return MQVPN_OK;
 }
 

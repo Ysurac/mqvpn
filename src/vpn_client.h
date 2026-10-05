@@ -21,6 +21,7 @@ typedef struct mqvpn_client_cfg_s {
     const char *tun_name;        /* TUN device name */
     const char *tls_ciphers;     /* TLS cipher suites list */
     int insecure;                /* skip TLS cert verification */
+    const char *pinned_pubkey;   /* server key pins, override insecure (NULL = none) */
     int log_level;               /* mqvpn_log_level_t */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
     int n_paths;                /* number of path interfaces (0 = single-path) */

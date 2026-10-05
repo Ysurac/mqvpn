@@ -156,6 +156,7 @@ test_parse_client_config(void)
                       "Address = vpn.example.com:443\n"
                       "ServerName = sni.example.com\n"
                       "Insecure = true\n"
+                      "PinnedPubkey = kKiP1neKCSfrQuBKbSCIizKWyjBb06ucfpdcVgoJpQU=\n"
                       "\n"
                       "[Auth]\n"
                       "Key = myclientkey\n"
@@ -184,6 +185,8 @@ test_parse_client_config(void)
     ASSERT_EQ_STR(cfg.server_addr, "vpn.example.com:443", "server_addr");
     ASSERT_EQ_STR(cfg.tls_server_name, "sni.example.com", "tls_server_name");
     ASSERT_EQ_INT(cfg.insecure, 1, "insecure");
+    ASSERT_EQ_STR(cfg.pinned_pubkey,
+                  "kKiP1neKCSfrQuBKbSCIizKWyjBb06ucfpdcVgoJpQU=", "pinned_pubkey");
     ASSERT_EQ_STR(cfg.auth_key, "myclientkey", "auth_key");
     ASSERT_EQ_STR(cfg.tun_name, "tun-client", "tun_name");
     ASSERT_EQ_INT(cfg.n_dns, 2, "n_dns");
@@ -1200,6 +1203,8 @@ test_json_client_config_load(void)
                        "\"tls_server_name\":\"sni.example.com\","
                        "\"auth_key\":\"client-key\","
                        "\"insecure\":true,"
+                       "\"pinned_pubkey\":"
+                       "\"kKiP1neKCSfrQuBKbSCIizKWyjBb06ucfpdcVgoJpQU=\","
                        "\"tun_name\":\"mqvpn7\","
                        "\"log_level\":\"debug\","
                        "\"dns\":[\"1.1.1.1\",\"8.8.8.8\"],"
@@ -1223,6 +1228,8 @@ test_json_client_config_load(void)
     ASSERT_EQ_STR(cfg.tls_server_name, "sni.example.com", "json client tls_server_name");
     ASSERT_EQ_STR(cfg.auth_key, "client-key", "json client auth_key");
     ASSERT_EQ_INT(cfg.insecure, 1, "json client insecure");
+    ASSERT_EQ_STR(cfg.pinned_pubkey, "kKiP1neKCSfrQuBKbSCIizKWyjBb06ucfpdcVgoJpQU=",
+                  "json client pinned_pubkey");
     ASSERT_EQ_STR(cfg.tun_name, "mqvpn7", "json client tun_name");
     ASSERT_EQ_STR(cfg.log_level, "debug", "json client log_level");
     ASSERT_EQ_INT(cfg.n_dns, 2, "json client dns count");
@@ -2455,6 +2462,7 @@ test_ini_json_scalar_parity(void)
                       "Address = vpn.parity.test:4433\n"
                       "ServerName = sni.parity.test\n"
                       "Insecure = true\n"
+                      "PinnedPubkey = AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n"
                       "[TLS]\n"
                       "Cert = /tmp/parity.crt\n"
                       "Key = /tmp/parity.key\n"
@@ -2514,6 +2522,8 @@ test_ini_json_scalar_parity(void)
                        "\"server_addr\":\"vpn.parity.test:4433\","
                        "\"tls_server_name\":\"sni.parity.test\","
                        "\"insecure\":true,"
+                       "\"pinned_pubkey\":"
+                       "\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\","
                        "\"cert_file\":\"/tmp/parity.crt\","
                        "\"key_file\":\"/tmp/parity.key\","
                        "\"auth_key\":\"parity-secret\","

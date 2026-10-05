@@ -61,6 +61,7 @@ typedef struct mqvpn_file_config_s {
     char server_addr[280]; /* "host:port" */
     char tls_server_name[256];
     int insecure;
+    char pinned_pubkey[256]; /* PinnedPubkey: up to 4 ';'-separated pins */
 
     /* [Auth] — client */
     char auth_key[256];

@@ -222,6 +222,11 @@ else()
         HINTS ${BORINGSSL_BUILD_DIR} ${BORINGSSL_BUILD_DIR}/crypto /usr/local/lib /usr/local/babassl/lib)
 endif()
 message(STATUS "SSL_LIB=${SSL_LIB} CRYPTO_LIB=${CRYPTO_LIB}")
+# BoringSSL headers, for the few libmqvpn sources that use it directly
+# (cert_pin_ssl.c). Same tree as the archives above.
+if(NOT BORINGSSL_INCLUDE_DIR)
+    set(BORINGSSL_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/xquic/third_party/boringssl/include")
+endif()
 
 # ---------- xquic capability probe: xqc_conn_settings_t.defer_send_flush ----------
 # Added upstream in "Feat/defer stream flush" — some pinned xquic forks (e.g.
@@ -259,6 +264,8 @@ set(MQVPN_LIB_SOURCES
     src/mqvpn_path_label.c
     src/addr_pool.c
     src/auth.c
+    src/cert_pin.c
+    src/cert_pin_ssl.c
     src/log.c
     src/path_rotation.c
     src/icmp.c
@@ -427,7 +434,7 @@ else()
 endif()
 target_include_directories(mqvpn_lib
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR} ${BORINGSSL_INCLUDE_DIR}
 )
 if(ANDROID_CROSS_COMPILE)
     # Android NDK: pthread is in libc, no separate -lpthread
@@ -608,7 +615,7 @@ set_target_properties(mqvpn_shared PROPERTIES
 )
 target_include_directories(mqvpn_shared
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR} ${BORINGSSL_INCLUDE_DIR}
 )
 # Shared lib links shared xquic, same as Linux (static .a is unusable there
 # for -fPIC reasons; kept symmetric here even though clang on Darwin emits
@@ -726,7 +733,7 @@ set_target_properties(mqvpn_shared PROPERTIES
 )
 target_include_directories(mqvpn_shared
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR}
+    PRIVATE ${CMAKE_SOURCE_DIR}/src ${XQUIC_INCLUDE_DIR} ${BORINGSSL_INCLUDE_DIR}
 )
 # Shared lib needs shared xquic (static .a lacks -fPIC)
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
@@ -812,8 +819,8 @@ if(BUILD_TESTING)
     # test_reorder_rx #include's src/reorder_rx.c to reach the file-local ring;
     # do NOT also list reorder_rx.c here (it would compile the TU twice).
     # mqvpn_config.c is linked (separate TU) for the composed-builder bridge test.
-    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/log.c)
-    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/config.c src/log.c)
+    add_executable(test_reorder_rx tests/test_reorder_rx.c src/mqvpn_config.c src/cert_pin.c src/log.c)
+    add_executable(test_reorder_config tests/test_reorder_config.c src/mqvpn_config.c src/cert_pin.c src/config.c src/log.c)
     add_executable(test_classifier tests/test_classifier.c src/hybrid/classifier.c)
     add_executable(test_icmp tests/test_icmp.c src/icmp.c)
     # test_reorder_gate exercises src/reorder_gate.h (shared STAMP/RAW/DROP_MTU

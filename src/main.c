@@ -60,6 +60,10 @@ usage(const char *prog)
         "  --cipher LIST             TLS cipher suites list (colon-separated)\n"
         "  --tls-server-name NAME    TLS SNI / cert verify name (client mode)\n"
         "  --insecure                Accept untrusted certs (client mode, testing only)\n"
+        "  --pinned-pubkey PINS      Accept only a server with this key: base64\n"
+        "                            SHA-256 of its SubjectPublicKeyInfo, prefix\n"
+        "                            \"sha256//\" optional, ';'-separated (client\n"
+        "                            mode; replaces CA checks, overrides --insecure)\n"
         "  --auth-key KEY            PSK for authentication\n"
         "  --user NAME:KEY           Add a server user credential (repeatable)\n"
         "  --genkey                  Generate a random PSK and exit\n"
@@ -198,6 +202,7 @@ main(int argc, char *argv[])
         {"no-routes", no_argument, NULL, 'W'},
         {"noroutes", no_argument, NULL, 'W'},
         {"tls-server-name", required_argument, NULL, 0x104},
+        {"pinned-pubkey", required_argument, NULL, 0x107},
         {"no-sync-path-labels", no_argument, NULL, 0x105},
         {"push-path-labels", no_argument, NULL, 0x106},
         {"control-port", required_argument, NULL, 'X'},
@@ -220,6 +225,7 @@ main(int argc, char *argv[])
     const char *cipher_list = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
     const char *tls_server_name = NULL;
+    const char *pinned_pubkey = NULL;
     const char *auth_key = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
     char cli_user_keys[MQVPN_CONFIG_MAX_USERS][256];
@@ -365,6 +371,7 @@ main(int argc, char *argv[])
         case 'w': route_via_server = 1; break;
         case 'W': no_routes = 1; break;
         case 0x104: tls_server_name = optarg; break;
+        case 0x107: pinned_pubkey = optarg; break;
         case 0x105: sync_path_labels = 0; break;
         case 0x106: push_path_labels = 1; break;
         case 'X':
@@ -634,7 +641,11 @@ main(int argc, char *argv[])
             return 1;
         }
 
-        if (eff_insecure) {
+        const char *eff_pinned_pubkey = pinned_pubkey ? pinned_pubkey
+                                        : file_cfg.pinned_pubkey[0]
+                                            ? file_cfg.pinned_pubkey
+                                            : NULL;
+        if (eff_insecure && !eff_pinned_pubkey) {
             LOG_WRN("--insecure: accepting untrusted certificates");
         }
 
@@ -662,6 +673,7 @@ main(int argc, char *argv[])
             .tun_name = eff_tun_name,
             .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .insecure = eff_insecure,
+            .pinned_pubkey = eff_pinned_pubkey,
             .log_level = log_level,
             .n_paths = n_paths,
             .n_backup_paths = n_backup_paths,

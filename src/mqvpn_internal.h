@@ -13,6 +13,7 @@
 #include "libmqvpn.h"
 #include "reorder.h"           /* mqvpn_reorder_config_t embedded in the builder config */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t embedded in the builder config */
+#include "cert_pin.h"          /* MQVPN_MAX_PINNED_PUBKEYS / MQVPN_PIN_LEN */
 #include <stdbool.h>
 
 /* ─── Constants ─── */
@@ -92,6 +93,9 @@ struct mqvpn_config_s {
     char user_fixed_ips[MQVPN_MAX_USERS][20]; /* "" = dynamic, "x.x.x.x" = pinned */
     int n_users;
     int insecure;
+    /* Client: server SPKI SHA-256 pins (PinnedPubkey); n == 0 = no pinning. */
+    uint8_t pinned_pubkeys[MQVPN_MAX_PINNED_PUBKEYS][MQVPN_PIN_LEN];
+    int n_pinned_pubkeys;
 
     mqvpn_scheduler_t scheduler;
     mqvpn_cc_t        cc;

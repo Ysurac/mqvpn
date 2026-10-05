@@ -35,6 +35,7 @@ Scheduler = wlb
 [Server]
 Address = 203.0.113.1:443
 # ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# PinnedPubkey = sha256//<base64>  # accept only this server key (replaces CA checks, overrides Insecure)
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -90,6 +91,7 @@ JSON config is useful for structured management and automation tooling.
   "log_level": "info",
   "auth_key": "<YOUR_PSK_HERE>",
   "insecure": false,
+  "pinned_pubkey": "",
   "dns": ["1.1.1.1", "8.8.8.8"],
   "kill_switch": false,
   "reconnect": true,
@@ -127,7 +129,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
-| `Insecure` | Skip TLS certificate verification | `false` |
+| `Insecure` | Skip TLS certificate verification. Any server then receives the auth key; prefer `PinnedPubkey` for a self-signed server | `false` |
+| `PinnedPubkey` | Accept only a server holding this public key: base64 SHA-256 of the certificate's SubjectPublicKeyInfo (`openssl x509 -pubkey -noout \| openssl pkey -pubin -outform der \| openssl dgst -sha256 -binary \| openssl enc -base64`), `sha256//` prefix optional, up to 4 separated by `;`. Replaces CA, hostname and expiry validation and overrides `Insecure`; checked before the auth key is sent | (none) |
 
 ### `[Interface]`
 

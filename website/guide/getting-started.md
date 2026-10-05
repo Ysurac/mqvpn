@@ -29,7 +29,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 To uninstall, re-run the script with `--uninstall` (add `--purge` to also remove config files).
 
 ::: warning
-The install script generates a self-signed certificate. Clients must use `--insecure` to connect. For production, replace the certificate with a trusted one (e.g., Let's Encrypt) and omit `--insecure`.
+The install script generates a self-signed certificate. Clients must use `--insecure` to connect, or pin the server key with `--pinned-pubkey` (see `PinnedPubkey` in the configuration guide). `--insecure` lets any on-path server receive the auth key, so for production replace the certificate with a trusted one (e.g., Let's Encrypt) or pin its key, and omit `--insecure`.
 :::
 
 ### Client (deb package)
@@ -108,6 +108,7 @@ mqvpn --mode client|server [options]
   --dns ADDR             DNS server (repeatable)
   --tls-server-name NAME TLS SNI / cert verify name (client)
   --insecure             Accept untrusted certs (testing only)
+  --pinned-pubkey PINS   Accept only a server with this public key (client)
   --tun-name NAME        TUN device name (default: mqvpn0)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)

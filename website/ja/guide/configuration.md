@@ -35,6 +35,7 @@ Scheduler = wlb
 [Server]
 Address = 203.0.113.1:443
 # ServerName = vpn.example.com  # TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# PinnedPubkey = sha256//<base64>  # このサーバー公開鍵のみ受け入れる（CA 検証を置き換え、Insecure より優先）
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -90,6 +91,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   "log_level": "info",
   "auth_key": "<YOUR_PSK_HERE>",
   "insecure": false,
+  "pinned_pubkey": "",
   "dns": ["1.1.1.1", "8.8.8.8"],
   "kill_switch": false,
   "reconnect": true,
@@ -127,7 +129,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
-| `Insecure` | TLS 証明書検証をスキップ | `false` |
+| `Insecure` | TLS 証明書検証をスキップ。任意のサーバーが認証鍵を受け取れるため、自己署名サーバーには `PinnedPubkey` を推奨 | `false` |
+| `PinnedPubkey` | この公開鍵を持つサーバーのみ受け入れる: 証明書の SubjectPublicKeyInfo の SHA-256 を base64 で（`openssl x509 -pubkey -noout \| openssl pkey -pubin -outform der \| openssl dgst -sha256 -binary \| openssl enc -base64`）、`sha256//` 接頭辞は任意、`;` 区切りで最大 4 個。CA・ホスト名・有効期限の検証を置き換え、`Insecure` より優先。認証鍵の送信前に検証 | （なし） |
 
 ### `[Interface]`
 

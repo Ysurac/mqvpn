@@ -41,6 +41,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 - [Configuration](#configuration)
   - [INI config](#ini-config)
   - [JSON config](#json-config)
+  - [Pinning the server key](#pinning-the-server-key)
 - [Schedulers](#schedulers)
 - [Reorder buffer (datagram lane)](#reorder-buffer-datagram-lane)
 - [Reinjection (speculative duplication)](#reinjection-speculative-duplication)
@@ -142,7 +143,9 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --start
 ```
 
-> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`.
+> **Note:** The self-signed certificate requires `--insecure` on the client, or better, pinning its key with `--pinned-pubkey`. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`.
+
+> **Security:** `--insecure` verifies nothing: any server that completes the handshake receives the client's auth key, which an on-path attacker can then replay to the real server. To keep a self-signed certificate safely, pin the server's public key instead (see [Pinning the server key](#pinning-the-server-key)).
 
 Options can be combined:
 
@@ -258,6 +261,7 @@ Scheduler = wlb
 [Server]
 Address = 203.0.113.1:443
 # ServerName = vpn.example.com  # TLS SNI / cert verify name (default: use Address host)
+# PinnedPubkey = sha256//<base64>  # accept only this server key (replaces CA checks, overrides Insecure)
 
 [TLS]
 # Cipher = TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256
@@ -341,6 +345,7 @@ Client example:
     "auth_username": "alice",
     "cipher": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
     "insecure": false,
+    "pinned_pubkey": "",
     "dns": ["1.1.1.1", "8.8.8.8"],
     "paths": ["eth0", "wlan0"],
     "backup_paths": ["lte0"],
@@ -384,6 +389,42 @@ Notes:
 sudo mqvpn --config /etc/mqvpn/server.conf
 sudo mqvpn --config /etc/mqvpn/client.conf
 ```
+
+### Pinning the server key
+
+A server with a self-signed certificate can be authenticated by pinning its
+public key on the client, instead of turning verification off with
+`Insecure`. The pin is the base64 SHA-256 of the certificate's
+SubjectPublicKeyInfo, the same value as curl `--pinnedpubkey`. Compute it on
+the server:
+
+```bash
+openssl x509 -in /etc/mqvpn/server.crt -pubkey -noout \
+    | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64
+```
+
+and set it on the client (INI `PinnedPubkey`, JSON `pinned_pubkey`, CLI
+`--pinned-pubkey`, library `mqvpn_config_set_pinned_pubkey()`):
+
+```ini
+[Server]
+Address = 203.0.113.1:443
+PinnedPubkey = sha256//R30mnbVpbENfQLjUKknDadhUtoKu+CFS/tGIsnHxsDU=
+```
+
+- The `sha256//` prefix is optional. Up to 4 pins separated by `;` are
+  accepted, so a key rotation can list the old and the new key.
+- A pin replaces CA, hostname and expiry validation: the client accepts
+  exactly the servers that prove they hold a pinned key, whatever their
+  certificate says. A certificate renewed with the same key keeps working;
+  a new key needs a new pin.
+- A pin overrides `Insecure`: with both set, the pin is still enforced.
+- The check runs right after the TLS handshake, before the CONNECT-IP
+  request, so a server that fails it never sees the auth key. The client
+  logs `server public key does not match PinnedPubkey (server sha256//...)`
+  with the key it was offered, closes the connection and retries like after
+  any other TLS failure.
+- A malformed pin is a startup error.
 
 ## Schedulers
 
@@ -1095,6 +1136,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
+  --pinned-pubkey PINS   Accept only a server with this public key (see "Pinning the server key")
     --cipher LIST          TLS cipher suites list (colon-separated)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)
   --subnet CIDR          Client IPv4 pool (server)

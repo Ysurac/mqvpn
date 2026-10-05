@@ -592,6 +592,14 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     if (cfg->tls_ciphers && cfg->tls_ciphers[0])
         mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
     mqvpn_config_set_insecure(lib_cfg, cfg->insecure);
+    if (cfg->pinned_pubkey &&
+        mqvpn_config_set_pinned_pubkey(lib_cfg, cfg->pinned_pubkey) != MQVPN_OK) {
+        LOG_ERR("invalid PinnedPubkey \"%s\": expected base64 SHA-256 pins "
+                "(\"sha256//\" optional), at most 4, ';'-separated",
+                cfg->pinned_pubkey);
+        mqvpn_config_free(lib_cfg);
+        return 1;
+    }
     mqvpn_config_set_multipath(lib_cfg, cfg->n_paths > 1 ? 1 : 0);
     mqvpn_config_set_reconnect(lib_cfg, cfg->reconnect,
                                cfg->reconnect_interval > 0 ? cfg->reconnect_interval : 5);

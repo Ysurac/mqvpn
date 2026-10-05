@@ -29,7 +29,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 アンインストールするには `--uninstall` を付けて再実行します（`--purge` で設定ファイルも削除）。
 
 ::: warning
-install.sh は自己署名証明書を生成します。クライアント接続時には `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。
+install.sh は自己署名証明書を生成します。クライアント接続時には `--insecure`、または `--pinned-pubkey` によるサーバー公開鍵のピン留め（設定ガイドの `PinnedPubkey` を参照）が必要です。`--insecure` では経路上の任意のサーバーが認証鍵を受け取れるため、本番環境では Let's Encrypt などの信頼された証明書に置き換えるか鍵をピン留めし、`--insecure` を省略してください。
 :::
 
 ### クライアント（deb パッケージ）
@@ -108,6 +108,7 @@ mqvpn --mode client|server [options]
   --dns ADDR             DNS サーバー（複数指定可）
   --tls-server-name NAME TLS SNI / 証明書検証名（クライアント）
   --insecure             信頼されていない証明書を受け入れる（テスト用）
+  --pinned-pubkey PINS   この公開鍵を持つサーバーのみ受け入れる（クライアント）
   --tun-name NAME        TUN デバイス名（デフォルト: mqvpn0）
   --listen BIND:PORT     リッスンアドレス（サーバー、デフォルト: 0.0.0.0:443）
   --subnet CIDR          クライアント IPv4 プール（サーバー）

@@ -15,6 +15,7 @@
 #include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
 #include "mqvpn_xquic_err_names.h" /* annotate |err:NNN| in cb_xqc_log_write */
 #include "auth.h" /* mqvpn_auth_debug_fingerprint for the startup log */
+#include "cert_pin.h"
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
 #include <stdlib.h>
@@ -1390,10 +1391,40 @@ cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     return 0;
 }
 
+/* PinnedPubkey gate, run before anything is sent on the connection: the
+ * CONNECT-IP request carries the auth key, so a server that does not hold a
+ * pinned key must never see it. xquic's own verification is off when a pin
+ * is set (see the cert_verify_flag choice in cli_start_connection); the leaf
+ * key was already proven by the TLS 1.3 CertificateVerify, so matching it
+ * here is the whole server authentication. Returns 1 to proceed. */
+static int
+cli_check_pinned_pubkey(cli_conn_t *conn, xqc_h3_conn_t *h3_conn)
+{
+    mqvpn_client_t *c = conn->client;
+    if (c->config.n_pinned_pubkeys == 0) return 1;
+
+    char got[MQVPN_PIN_B64_LEN + 1];
+    if (mqvpn_cert_pin_check_ssl(xqc_h3_conn_get_ssl(h3_conn), c->config.pinned_pubkeys,
+                                 c->config.n_pinned_pubkeys, got, sizeof(got)))
+        return 1;
+
+    LOG_E(c,
+          "TLS: server public key does not match PinnedPubkey (server sha256//%s); "
+          "closing before authentication",
+          got[0] ? got : "(no certificate)");
+    if (!conn->tunnel_notified) {
+        conn->tunnel_notified = 1; /* cb_h3_conn_close then reports nothing more */
+        if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(MQVPN_ERR_TLS, c->user_ctx);
+    }
+    xqc_h3_conn_close(c->engine, &conn->cid);
+    return 0;
+}
+
 static void
 cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)user_data;
+    if (!cli_check_pinned_pubkey(conn, h3_conn)) return;
     conn->dgram_mss = xqc_h3_ext_datagram_get_mss(h3_conn);
     LOG_I(conn->client, "handshake finished (dgram_mss=%zu)", conn->dgram_mss);
     client_set_state(conn->client, MQVPN_STATE_AUTHENTICATING);
@@ -3223,8 +3254,16 @@ cli_start_connection(mqvpn_client_t *c)
 
     xqc_conn_ssl_config_t ssl_cfg;
     memset(&ssl_cfg, 0, sizeof(ssl_cfg));
-    ssl_cfg.cert_verify_flag = c->config.insecure ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
-                                                  : XQC_TLS_CERT_FLAG_NEED_VERIFY;
+    /* A pin replaces xquic's CA/hostname/expiry checks and overrides
+     * insecure: cli_check_pinned_pubkey authenticates the server once the
+     * handshake is done, before the auth key is sent. Without NEED_VERIFY
+     * xquic verifies nothing, so insecure accepts any server. */
+    if (c->config.n_pinned_pubkeys > 0)
+        ssl_cfg.cert_verify_flag = 0;
+    else
+        ssl_cfg.cert_verify_flag = c->config.insecure
+                                       ? XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED
+                                       : XQC_TLS_CERT_FLAG_NEED_VERIFY;
 
     const char *sni =
         c->config.tls_server_name[0] ? c->config.tls_server_name : c->config.server_host;
@@ -3449,6 +3488,14 @@ mqvpn_client_new(const mqvpn_config_t *cfg, const mqvpn_client_callbacks_t *cbs,
     } else {
         LOG_W(c, "auth: no psk configured — CONNECT-IP requests will carry no "
                  "Authorization header (server will log \"missing PSK\")");
+    }
+    if (c->config.n_pinned_pubkeys > 0) {
+        LOG_I(c,
+              "tls: server public key pinned (%d pin%s), replacing CA/hostname/expiry "
+              "validation",
+              c->config.n_pinned_pubkeys, c->config.n_pinned_pubkeys > 1 ? "s" : "");
+        if (c->config.insecure)
+            LOG_W(c, "tls: Insecure ignored, PinnedPubkey is enforced");
     }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED

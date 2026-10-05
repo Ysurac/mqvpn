@@ -593,6 +593,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_SERVER, "Address", "server_addr", server_addr),
     CFG_STR(SEC_SERVER, "ServerName", "tls_server_name", tls_server_name),
     CFG_BOOL(SEC_SERVER, "Insecure", "insecure", insecure),
+    CFG_STR(SEC_SERVER, "PinnedPubkey", "pinned_pubkey", pinned_pubkey),
     /* [TLS] */
     CFG_STR(SEC_TLS, "Cert", "cert_file", cert_file),
     CFG_STR(SEC_TLS, "Key", "key_file", key_file),

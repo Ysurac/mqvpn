@@ -237,6 +237,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_test.sh
 
+      - name: E2E PinnedPubkey test (netns) [GHSA-qq6x-5r9f-2w3m]
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_pinned_pubkey_test.sh
+
       - name: E2E multi-client test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
@@ -512,6 +518,9 @@ jobs:
 
       - name: Smoke test (netns)
         run: sudo scripts/ci_e2e/run_test.sh
+
+      - name: PinnedPubkey test (netns)
+        run: sudo scripts/ci_e2e/run_pinned_pubkey_test.sh
 
       - name: Multi-client test (netns)
         run: sudo scripts/ci_e2e/test_multiclient.sh

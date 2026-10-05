@@ -589,6 +589,14 @@ MQVPN_API int mqvpn_config_add_path_policy(mqvpn_config_t *cfg, const char *user
                                            uint64_t dscp_mask);
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
+/* Pin the server's public key (client). pins is the base64 SHA-256 of the
+ * server certificate's SubjectPublicKeyInfo, optionally prefixed "sha256//"
+ * (curl --pinnedpubkey format); up to 4 pins separated by ';' allow a key
+ * rotation. Once set, the pin replaces CA, hostname and expiry validation and
+ * overrides insecure: only a server holding a pinned key is accepted, and
+ * the auth key is never sent to any other. NULL or "" clears. Returns
+ * MQVPN_ERR_INVALID_ARG, leaving the config unchanged, on a malformed list. */
+MQVPN_API int mqvpn_config_set_pinned_pubkey(mqvpn_config_t *cfg, const char *pins);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 MQVPN_API int mqvpn_config_set_fec(mqvpn_config_t *cfg, int enable);
