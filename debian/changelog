@@ -13,6 +13,18 @@ mqvpn (0.16.3-1) UNRELEASED; urgency=medium
     needs no Insecure, and it overrides Insecure when both are set. A
     malformed pin is a startup error. New e2e run_pinned_pubkey_test.sh
     reproduces the leak with Insecure and checks the pin blocks it.
+  * fix(client): reconnect over a live path when the initial path is
+    removed -- removing the path that carries path_id 0 closes the
+    connection, and tick_reconnect() counts the detached path as a backup,
+    so with two WANs only one primary was left and
+    mqvpn_rotate_primary_path() returned the removed path: every reconnect
+    retried it and the tunnel stayed down until that WAN came back
+    (omr-tracker's 005-mqvpn-path removes a failed WAN's path this way).
+    The rotation now moves off a current path that is a backup, and the
+    new mqvpn_reconnect_path_idx() falls back to the first attached
+    BackupPath when no attached primary is left, so Path + BackupPath
+    also reconnects over the backup. New e2e run_primary_removal_test.sh
+    (Pierre-Yves Le Borgne, PR #1).
 
  -- mqvpn maintainers <maintainers@example.com>  Mon, 05 Oct 2026 18:00:00 +0200
 
