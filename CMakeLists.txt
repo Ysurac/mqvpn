@@ -13,10 +13,12 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Bump whenever mqvpn_stats_t (or any struct the public API fills in place)
 # grows: the getters write sizeof(*out) without consulting the caller's
 # struct_size, so a binary built against an older header must not resolve to
-# the newer library.
+# the newer library. Bump too when an exported function is removed or changes
+# signature, so a binary that calls it fails to install rather than to load.
 #   1 -> 2  hybrid lane/flow counters
 #   2 -> 3  udp_tx_sends / udp_tx_datagrams
-set(MQVPN_SOVERSION 3)
+#   3 -> 4  ABI 3 transport contract (fd-based path API removed)
+set(MQVPN_SOVERSION 4)
 
 # ---------- Options ----------
 option(XQUIC_BUILD_DIR "Path to pre-built xquic build directory" "")

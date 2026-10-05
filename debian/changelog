@@ -94,6 +94,14 @@ mqvpn (0.16.3-1) UNRELEASED; urgency=medium
     bridge on every platform; removing the initial path still sends the
     closing frames over a live sibling; `ip` is searched in PATH before
     the absolute-path fallbacks.
+  * build: bump the libmqvpn SOVERSION to 4 (libmqvpn.so.4). The ABI 3
+    transport contract removed mqvpn_client_add_path_fd(),
+    mqvpn_client_add_path_fd_with_outcome(),
+    mqvpn_client_on_platform_fd_closed() and mqvpn_server_set_socket_fd()
+    from the library, which still carried soname 3: programs linked
+    against 0.16.0 to 0.16.2 must be rebuilt against the new header.
+    Refresh libmqvpn0.symbols for libmqvpn.so.4 and ship
+    mqvpn_bind_posix.h in libmqvpn-dev.
 
  -- mqvpn maintainers <maintainers@example.com>  Mon, 05 Oct 2026 18:00:00 +0200
 
