@@ -1330,14 +1330,18 @@ ip_assigned:;
         if (old && old != conn) {
             /* A fixed IP can map two live connections to one offset when a
              * client reconnects before its old tunnel times out. Supersede
-             * the old one: drop its registration (so n_sessions stays right
-             * and its slot never dangles), neutralise its own later release,
-             * and close it. */
-            s->sessions[ip_off] = NULL;
-            s->n_sessions--;
-            if (s->cbs.on_client_disconnected)
-                s->cbs.on_client_disconnected(ip_off, MQVPN_ERR_CLOSED, s->user_ctx);
-            old->assigned_ip.s_addr = 0;
+             * the old one through the shared release path: it drops the
+             * registration (so n_sessions stays right and the slot never
+             * dangles), zeroes the old conn's tunnel state so its own later
+             * release is a no-op, and keeps the pinned offset reserved
+             * (only a pinned offset can collide: set_user_fixed_ip reserves
+             * with alloc_at, which fails while the address is live). Then
+             * close the old conn. */
+            LOG_W(s,
+                  "fixed IP reused by a new connection, superseding the old one "
+                  "(user=%s old_user=%s)",
+                  conn->username, old->username);
+            svr_session_release(s, old);
             if (s->engine) xqc_h3_conn_close(s->engine, &old->cid);
         }
         s->sessions[ip_off] = conn;
