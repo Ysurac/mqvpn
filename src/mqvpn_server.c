@@ -1707,12 +1707,24 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
         stream->conn->connected_at_us = now_us();
         /* A shared-key ("(global)") client may name itself with x-user, but
          * not as a configured user (impersonation) or with an unsafe name. */
-        if (strcmp(username, "(global)") == 0 && hdrs->x_user[0] != '\0' &&
-            svr_x_user_name_acceptable(s, hdrs->x_user))
+        int wants_x_user = strcmp(username, "(global)") == 0 && hdrs->x_user[0] != '\0';
+        if (wants_x_user && svr_x_user_name_acceptable(s, hdrs->x_user)) {
             snprintf(stream->conn->username, sizeof(stream->conn->username), "%s",
                      hdrs->x_user);
-        else
-            snprintf(stream->conn->username, sizeof(stream->conn->username), "%s", username);
+        } else {
+            if (wants_x_user) {
+                /* The rejected name is not logged: it may carry control
+                 * bytes. */
+                char peer_str[INET6_ADDRSTRLEN + 8];
+                svr_format_peer_addr(stream->conn, peer_str, sizeof(peer_str));
+                LOG_W(s,
+                      "x-user rejected: names a configured user or has forbidden "
+                      "characters (peer=%s)",
+                      peer_str);
+            }
+            snprintf(stream->conn->username, sizeof(stream->conn->username), "%s",
+                     username);
+        }
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
     }

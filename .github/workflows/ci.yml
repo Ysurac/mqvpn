@@ -256,6 +256,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_pinned_ip_double_test.sh
 
+      - name: E2E x-user spoof test (netns) [GHSA-vv9v-hp7m-mmhc]
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_xuser_spoof_test.sh
+
       - name: E2E multi-client test (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
