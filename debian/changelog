@@ -1,3 +1,35 @@
+mqvpn (0.16.3+20261007-1) UNRELEASED; urgency=high
+
+  * fix(server): a fixed-IP user reconnecting before its old tunnel timed
+    out (router reboot, lost close on a dead WAN) mapped two live
+    connections to one pool slot: n_sessions leaked one client slot per
+    overlap until max_clients was reached and every new tunnel got 403
+    "max clients reached" until the server restarted (GHSA-vv9v-hp7m-mmhc).
+    The newest connection now supersedes the old one through
+    svr_session_release and the old connection is closed; the server logs
+    "fixed IP reused by a new connection, superseding the old one". Two
+    routers sharing one fixed-IP user now take turns instead of silently
+    corrupting the session table. Multipath clients are unaffected: all
+    WANs of one client are paths of a single connection. New e2e
+    run_pinned_ip_double_test.sh.
+  * fix(server): a client authenticated with the shared [Auth] Key could
+    name itself after a configured user through the x-user header and take
+    that user's fixed IP; the name was also not checked for the characters
+    add_user rejects, so it could break the control-API JSON
+    (GHSA-vv9v-hp7m-mmhc). Such an x-user now falls back to "(global)" and
+    the server logs "x-user rejected". Per-user-key setups (the OMR
+    default) were not affected. New e2e run_xuser_spoof_test.sh.
+  * fix(client): use-after-free when the CONNECT-IP tunnel stream closed
+    while the connection stayed up (server RESET_STREAM or an invalid
+    ROUTE_ADVERTISEMENT): the next path activation or a set_path_weight /
+    set_path_dscp_mask control call sent a path label through the freed
+    request (GHSA-jgf6-pf7m-gr65). The pointer is now cleared on close.
+  * All three were reported by Pierre-Yves Le Borgne and are fork-only:
+    upstream mqvpn has no fixed IPs, no x-user and no path-label sync. No
+    wire or ABI change; old and new clients and servers interoperate.
+
+ -- mqvpn maintainers <maintainers@example.com>  Wed, 07 Oct 2026 17:06:06 +0200
+
 mqvpn (0.16.3-1) UNRELEASED; urgency=medium
 
   * feat(client): PinnedPubkey (INI [Server] PinnedPubkey, JSON
