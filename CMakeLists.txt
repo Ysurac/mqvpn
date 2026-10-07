@@ -881,7 +881,11 @@ target_link_libraries(mqvpn
 # it compiles into the TU); library-side validation of extracted strings
 # short-circuits at the server=NULL guard and is out of scope (see the TU).
 if(MQVPN_ENABLE_FUZZING)
-    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c)
+    # fuzz_control_dispatch_platform.c: link-only definitions of the
+    # platform_linux.c path functions the client-mode commands call (never
+    # reached: the harness runs dispatch() in server mode).
+    add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c
+                   fuzz/fuzz_control_dispatch_platform.c)
     target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
     target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
     target_link_libraries(fuzz_control_dispatch PRIVATE
