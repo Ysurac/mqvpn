@@ -1,4 +1,4 @@
-mqvpn (0.16.3+20261007-1) UNRELEASED; urgency=high
+mqvpn (0.16.3+20261007-1) UNRELEASED; urgency=medium
 
   * fix(server): a fixed-IP user reconnecting before its old tunnel timed
     out (router reboot, lost close on a dead WAN) mapped two live
