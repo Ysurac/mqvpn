@@ -1370,10 +1370,12 @@ ip_assigned:;
                   s->tun_mtu, conn->username);
             client_mtu = s->tun_mtu;
         }
-        /* §9: when the reorder shim is locally enabled, each stamped inner packet
+        /* §9: when the reorder shim is in use, each stamped inner packet
          * carries an 8-byte header, so the usable inner MTU shrinks by 8. Apply
-         * ONCE to the resolved inner MTU (after auto-MSS and TUN-MTU cap). */
-        if (s->config.reorder.mode != MQVPN_REORDER_OFF) {
+         * ONCE to the resolved inner MTU (after auto-MSS and TUN-MTU cap), and
+         * only when this client negotiated the shim (the echo above). */
+        if (mqvpn_reorder_should_advertise(s->config.reorder.mode, conn->reorder_rx) &&
+            conn->peer_reorder_supported) {
             client_mtu -= MQVPN_REORDER_HDR_LEN;
             if (conn->has_v6 && client_mtu < IPV6_MIN_MTU) client_mtu = IPV6_MIN_MTU;
         }
