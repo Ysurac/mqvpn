@@ -1,12 +1,12 @@
 #!/bin/bash
-# run_primary_removal_test.sh — E2E: the tunnel comes back over the other WAN
-# when the initial path is removed through the control API.
+# run_primary_removal_test.sh — E2E: the tunnel keeps running over the other
+# WAN when the initial path is removed through the control API.
 #
-# Removing the path that carries path_id 0 closes the whole connection
-# (mqvpn_client_remove_path), and tick_reconnect() must then pick a path that
-# is still attached. OpenMPTCProuter's omr-tracker removes the path of a WAN
-# that went down this way (005-mqvpn-path), so with two WANs this is the
-# ordinary failover.
+# Removing the path that carries path_id 0 abandons that path like any other
+# (mqvpn_client_remove_path); the connection, its tunnel address and the other
+# path stay up, with no reconnect. OpenMPTCProuter's omr-tracker removes the
+# path of a WAN that went down this way (005-mqvpn-path), so with two WANs
+# this is the ordinary failover.
 #
 # Topology (two-path, single-server), as in run_path_bounce_test.sh:
 #   vpn-client                    vpn-server
@@ -14,8 +14,8 @@
 #     veth-rb0 ─────────────────── veth-rb1   Path B  10.200.0.0/24
 #
 # Cases:
-#   1. --path A --path B:        remove A, take A down → tunnel back over B.
-#   2. --path A --backup-path B: remove A, take A down → tunnel back over B.
+#   1. --path A --path B:        remove A, take A down → tunnel stays up over B.
+#   2. --path A --backup-path B: remove A, take A down → tunnel stays up over B.
 #
 # Usage: sudo ./scripts/ci_e2e/run_primary_removal_test.sh [path-to-mqvpn-binary]
 # Requires: root, iproute2, openssl, netcat (nc)
@@ -47,7 +47,7 @@ SERVER_ADDR="10.100.0.1"
 TUNNEL_IP="10.0.0.1"
 
 CTRL_PORT="9183"
-RECOVER_TIMEOUT=45
+RECOVER_TIMEOUT=10
 
 SERVER_PID=""
 CLIENT_PID=""
@@ -193,16 +193,17 @@ run_case() {
     echo "OK: path A removed and down"
 
     if ! wait_tunnel "$RECOVER_TIMEOUT"; then
-        echo "FAIL: $name: tunnel not back over path B within ${RECOVER_TIMEOUT}s"
+        echo "FAIL: $name: tunnel not up over path B within ${RECOVER_TIMEOUT}s"
         dump_logs
         exit 1
     fi
-    if ! grep -qE "reconnect: using path\[[0-9]+\] iface=${VETH_B0}" "${WORK_DIR}/client.log"; then
-        echo "FAIL: $name: no reconnect over ${VETH_B0} in the client log"
+    # The initial path is abandoned like any other: no reconnect.
+    if grep -qE "removing initial path|→ RECONNECTING|reconnect: using" "${WORK_DIR}/client.log"; then
+        echo "FAIL: $name: removing the initial path tore the connection down"
         dump_logs
         exit 1
     fi
-    echo "OK: $name: tunnel back over ${VETH_B0}"
+    echo "OK: $name: tunnel kept over ${VETH_B0} without a reconnect"
 
     stop_and_check_sanitizer "$CLIENT_PID" "client" || SANITIZER_FAIL=1
     CLIENT_PID=""
