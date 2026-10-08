@@ -26,6 +26,12 @@ User = bob:<BOB_PSK>
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
 
 CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) にはサーバー証明書と中間証明書を連結した fullchain を指定します。Let's Encrypt では `cert.pem` ではなく `fullchain.pem` です。クライアントはサーバーが送った chain をそのまま検証し、足りない中間証明書を取りに行かないため、leaf だけのファイルでは、その中間証明書を元から信頼していないクライアントで検証に失敗します。
@@ -52,6 +58,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
+
+# [Hybrid]                      # 内側 TCP を QUIC の stream で運ぶ。詳細は [Hybrid] の節
+# Enabled = true
+
+# [Reorder]                     # 内側 QUIC などの大きな転送向け。詳細は [Reorder] の節
+# Enabled = on
 ```
 
 ## JSON 形式
@@ -77,7 +89,9 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
-  "cc": "bbr2"
+  "cc": "bbr2",
+  "hybrid": { "enabled": true },
+  "reorder": { "enabled": "on" }
 }
 ```
 
@@ -196,7 +210,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 ### `[Reorder]`
 
-内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。
+内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。サーバーとクライアントの両方で `Enabled = on` のときだけ有効になり、そのときクライアントのログに `peer advertised mqvpn-reorder` が出ます。
 
 > **対象範囲:** reorder バッファは **内側 UDP フローのみ** に適用されます。**内側 TCP は reorder バッファでは扱いません。** 内側 TCP は代わりに、後述する hybrid mode（[`[Hybrid]`](#hybrid)）を有効化してください。QUIC stream によって reordering されます。
 
