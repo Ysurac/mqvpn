@@ -273,6 +273,7 @@ set(MQVPN_LIB_SOURCES
     src/icmp.c
     src/reorder_tx.c
     src/reorder_rx.c
+    src/dgram_dedup.c
     src/hybrid/classifier.c
 )
 
@@ -967,7 +968,8 @@ if(BUILD_TESTING)
     add_executable(test_reorder_gate tests/test_reorder_gate.c src/reorder_tx.c src/icmp.c src/log.c)
     # Re-add decision shared by the desktop path monitors (header only).
     add_executable(test_path_readd tests/test_path_readd.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_path_label test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd)
+    add_executable(test_dgram_dedup tests/test_dgram_dedup.c src/dgram_dedup.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_path_label test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy test_path_state_machine test_path_slot_oracle test_control_response_bound test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_dgram_dedup)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of
