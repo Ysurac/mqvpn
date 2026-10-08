@@ -173,6 +173,15 @@ handle_tun_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     int want = p->tun.mtu;
     if (mtu <= 0 || want <= 0 || mtu == want) return;
 
+    /* The event is a snapshot, possibly an old one: the RTM_NEWLINKs the
+     * kernel queued while the TUN was being created (MTU 1500) and then
+     * configured are read only after p->tun.mtu holds the negotiated value,
+     * so the creation event alone looked like an external change on every
+     * tunnel setup. Act on the device as it is now. */
+    int cur = mqvpn_tun_get_mtu(&p->tun);
+    if (cur == want) return;
+    if (cur > 0) mtu = cur;
+
     time_t now = time(NULL);
     if (now - p->tun_mtu_restore_window >= TUN_MTU_RESTORE_WINDOW_SEC) {
         p->tun_mtu_restore_window = now;
