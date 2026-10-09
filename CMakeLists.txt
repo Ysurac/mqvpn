@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.16.3.20261007 LANGUAGES C)
+project(mqvpn VERSION 0.17.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -13,11 +13,12 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Bump whenever mqvpn_stats_t (or any struct the public API fills in place)
 # grows: the getters write sizeof(*out) without consulting the caller's
 # struct_size, so a binary built against an older header must not resolve to
-# the newer library. Bump too when an exported function is removed or changes
-# signature, so a binary that calls it fails to install rather than to load.
+# the newer library. Bump as well whenever an exported function is removed: a
+# binary linked against it would otherwise resolve to this library and fail
+# with an undefined symbol at run time.
 #   1 -> 2  hybrid lane/flow counters
 #   2 -> 3  udp_tx_sends / udp_tx_datagrams
-#   3 -> 4  ABI 3 transport contract (fd-based path API removed)
+#   3 -> 4  callback ABI 3: the fd-based path and server socket calls are gone
 set(MQVPN_SOVERSION 4)
 
 # ---------- Options ----------

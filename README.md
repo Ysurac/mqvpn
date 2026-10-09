@@ -99,7 +99,7 @@ https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
 | [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
 | [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
 | iOS | iOS 15 | — | 🚧 | App Store planned |
-| [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store planned |
+| [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store |
 
 > ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
 
@@ -268,6 +268,12 @@ Scheduler = wlb
                                # independently (see wrtt/dscp scheduler docs above); the
                                # client has its own SyncPathLabels for the other half.
 
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
+
 [Control]
 # Port = 9090          # enable JSON control API on this TCP port
 # Addr = 127.0.0.1    # bind address (default: 127.0.0.1, loopback only)
@@ -310,6 +316,12 @@ Path = eth0
 Path = wlan0
 # BackupPath = lte0   # failover-only: used only when all primary paths are down
 
+# [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
+# Enabled = true
+
+# [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
+# Enabled = on
+
 [Control]
 # Port = 9091          # enable JSON control API on this TCP port
 # Addr = 127.0.0.1    # bind address (default: 127.0.0.1, loopback only)
@@ -347,7 +359,9 @@ Server example:
     ],
     "mtu": 1280,
     "control_port": 9090,
-    "control_addr": "127.0.0.1"
+    "control_addr": "127.0.0.1",
+    "hybrid": { "enabled": true },
+    "reorder": { "enabled": "on" }
 }
 ```
 
