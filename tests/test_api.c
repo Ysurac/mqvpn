@@ -2327,14 +2327,14 @@ TEST(get_send_handle_falls_back_to_first_active_when_primary_dropped)
     mqvpn_client_destroy(c);
 }
 
-/* Bug 2 regression: removing the initial path (xqc_path_id=0) must not leave
- * a stale CLOSED_DROPPED slot visible to find_path_by_xqc_id.  Before the
- * fix, xqc_conn_close_path was skipped for path_id=0 (intentional — it would
- * close the whole connection), so cb_path_removed(0) never fired, leaving
- * xquic_path_live=1 in the dropped slot.  The send resolver for path_id 0
- * then returned the dropped slot, whose transport is being torn down
- * (formerly: the now-closed fd → EBADF → XQC_SOCKET_ERROR → teardown). */
-TEST(get_send_handle_skips_removed_primary_with_xqc_path_id_zero)
+/* Removing the initial path (xqc_path_id=0) through the API abandons it like
+ * any other path (xqc_conn_close_path), as the platform drop of path 0
+ * already did; it no longer closes the whole connection. Until xquic reports
+ * the path removed, a send xquic resolves for path_id 0 maps to the dropped
+ * slot itself, whose detached transport the send callback turns into EAGAIN
+ * while a sibling is active (path_send_dead_retcode) -- the same drop-window
+ * semantics as a secondary path, which this test pins side by side. */
+TEST(remove_initial_path_keeps_drop_window_semantics)
 {
     mqvpn_client_t *c = make_test_client();
 
@@ -2354,13 +2354,22 @@ TEST(get_send_handle_skips_removed_primary_with_xqc_path_id_zero)
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_EQ(mqvpn_client_test_force_validating(c, h1, 2), 0);
 
-    /* Remove the initial path.  xqc_conn_close_path is skipped for path_id=0
-     * so xquic_path_live stays 1 in the dropped slot — the bug. */
-    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
+    /* Slot 2: another secondary (xqc_path_id=4), removed for comparison. */
+    mqvpn_path_desc_t d2 = {0};
+    d2.struct_size = sizeof(d2);
+    snprintf(d2.iface, sizeof(d2.iface), "usb0");
+    mqvpn_path_handle_t h2 = add_fake_path(c, &d2, NULL);
+    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(mqvpn_client_test_force_validating(c, h2, 4), 0);
 
-    /* Resolving path_id 0 must NOT return the dropped slot; it must fall
-     * through to the first active sibling (slot 1). */
-    ASSERT_EQ(mqvpn_client_test_get_send_handle_for_path(c, 0), h1);
+    ASSERT_EQ(mqvpn_client_remove_path(c, h2), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_test_get_send_handle_for_path(c, 4), h2);
+
+    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_test_get_send_handle_for_path(c, 0), h0);
+
+    /* The surviving secondary still resolves to itself. */
+    ASSERT_EQ(mqvpn_client_test_get_send_handle_for_path(c, 2), h1);
 
     mqvpn_client_destroy(c);
 }
@@ -4220,7 +4229,7 @@ main(void)
     /* Primary-path rotation (issue #46) + OMR fallback composite */
     run_get_send_handle_prefers_rotated_primary_when_active();
     run_get_send_handle_falls_back_to_first_active_when_primary_dropped();
-    run_get_send_handle_skips_removed_primary_with_xqc_path_id_zero();
+    run_remove_initial_path_keeps_drop_window_semantics();
     run_client_next_primary_idx_skips_closed_and_inactive();
 
     /* Permanent path-create failure (XQC_EMP_CREATE_PATH) */

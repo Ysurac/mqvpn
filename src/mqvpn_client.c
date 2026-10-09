@@ -663,16 +663,17 @@ mqvpn_client_first_active_handle(const mqvpn_client_t *c)
  * path_send_dead_retcode during the drop window — it must NOT fall through to
  * a sibling (that would put this path's CIDs on another path's 4-tuple and
  * change the documented drop-window semantics). The one exception is the
- * initial path removed through the API (c->initial_path_removed): the
+ * initial path whose removal through the API had to close the connection
+ * because xquic refused the abandon (c->initial_path_removed): the
  * connection is closing then, and only its closing frames are left to send. */
 static path_entry_t *
 get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
 {
     path_entry_t *p = find_path_by_xqc_id(c, xqc_path_id);
-    /* Exception: the initial path removed through the API. remove_path
-     * closes the whole connection then (no PATH_ABANDON for path_id 0, so
-     * the slot stays xquic-live), and the closing frames must still reach
-     * the server — fall through to a live sibling. */
+    /* Exception: the initial path whose removal through the API closed the
+     * whole connection (xquic refused the PATH_ABANDON, so the slot stays
+     * xquic-live), and the closing frames must still reach the server —
+     * fall through to a live sibling. */
     int closing_removed_initial = p && xqc_path_id == 0 && !p->transport_attached &&
                                   c->initial_path_removed;
     if (p && !closing_removed_initial)
@@ -4039,31 +4040,21 @@ mqvpn_client_remove_path(mqvpn_client_t *c, mqvpn_path_handle_t path)
     /* Spec §5.0: REMOVE_API allows orderly xquic close. Issue before
      * dispatch so the FSM stays xquic-API-free (avoids layer leak).
      *
-     * path_id=0 is the initial QUIC path (used for the TLS handshake).
-     * xqc_conn_close_path(path_id=0) may return XQC_OK but leaves xquic's
-     * multipath scheduler in a state where it stops forwarding DATA datagrams
-     * on the remaining paths until the next 15-second PING keepalive fires.
-     * This causes a ~15-second black-hole that is worse than a full reconnect.
-     * Always use xqc_h3_conn_close() for path_id=0 so tick_reconnect()
-     * rebuilds the connection on a secondary path (~5-7 s) with fresh
-     * congestion state and immediate data flow.
-     *
-     * For secondary paths (path_id>0) xqc_conn_close_path() works correctly:
-     * the primary path (path_id=0) keeps forwarding data without interruption.
-     * Only fall back to xqc_h3_conn_close() if the secondary close fails. */
-    if (path_xquic_abandon_due(p) && p->xqc_path_id == 0) c->initial_path_removed = 1;
+     * The initial path (path_id 0) is abandoned like any other: the
+     * connection lives on over the remaining paths, as it does when the
+     * platform drops path 0 (mqvpn_client_on_platform_path_dropped). Only
+     * when xquic refuses the abandon (e.g. it is the last active path) is
+     * the whole connection closed, so tick_reconnect() rebuilds it over a
+     * path that is still attached. */
     if (path_xquic_abandon_due(p) && c->engine && c->conn) {
-        if (p->xqc_path_id == 0) {
-            LOG_I(c, "removing initial path (path_id=0 iface=%s): "
-                  "closing connection for clean failover to secondary", p->name);
+        xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+        if (rc != XQC_OK) {
+            if (p->xqc_path_id == 0) c->initial_path_removed = 1;
+            LOG_W(c,
+                  "xqc_conn_close_path(path_id=%" PRIu64 ") rc=%d; "
+                  "closing connection to force clean failover",
+                  p->xqc_path_id, (int)rc);
             xqc_h3_conn_close(c->engine, &c->conn->cid);
-        } else {
-            xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
-            if (rc != XQC_OK) {
-                LOG_W(c, "xqc_conn_close_path(path_id=%" PRIu64 ") rc=%d; "
-                      "closing connection to force clean failover", p->xqc_path_id, (int)rc);
-                xqc_h3_conn_close(c->engine, &c->conn->cid);
-            }
         }
     }
 
