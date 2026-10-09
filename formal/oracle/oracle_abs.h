@@ -454,10 +454,16 @@ oracle_canonical_add_ops(void)
  * 312 is the LP64 size. The pin catches a new field that grows the struct,
  * not one of 4 bytes or less placed in one of its two 4-byte padding holes
  * (LP64: after local_addr_len and after recreate_retries): such a field keeps
- * the size and must be classified here by hand. */
+ * the size and must be classified here by hand.
+ *
+ * Checked on LP64 builds only: a 32-bit size depends on the ABI (284 bytes on
+ * i386, where 64-bit fields are 4-byte aligned, 288 on ARM EABI), and the
+ * 64-bit builds catch a new field anyway. */
+#if UINTPTR_MAX > 0xFFFFFFFFu
 _Static_assert(sizeof(path_entry_t) == 312,
                "path_entry_t is no longer 312 bytes (its LP64 size) - classify the new "
                "field in formal/oracle/oracle_abs.h");
+#endif
 
 static inline int
 oracle_frame_eq(const path_entry_t *x, const path_entry_t *y)
