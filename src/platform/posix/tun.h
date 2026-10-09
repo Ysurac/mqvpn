@@ -32,6 +32,9 @@ int mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr
 /* Set MTU on the TUN device. */
 int mqvpn_tun_set_mtu(mqvpn_tun_t *tun, int mtu);
 
+/* Current MTU of the TUN device as the kernel reports it now, or -1. */
+int mqvpn_tun_get_mtu(const mqvpn_tun_t *tun);
+
 /* Bring the TUN interface up. */
 int mqvpn_tun_up(mqvpn_tun_t *tun);
 

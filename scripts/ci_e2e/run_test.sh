@@ -171,6 +171,26 @@ else
     exit 1
 fi
 
+echo ""
+echo "=== Test 1b: TUN MTU guard (no alarm at setup, external change restored) ==="
+CLI_MTU=$(ip netns exec vpn-client cat /sys/class/net/mqvpn0/mtu 2>/dev/null || echo 0)
+if grep -q "MTU changed externally" "${WORK_DIR}/client.log"; then
+    echo "=== FAIL: 'MTU changed externally' logged while setting the tunnel up ==="
+    grep "MTU changed externally" "${WORK_DIR}/client.log"
+    exit 1
+fi
+ip netns exec vpn-client ip link set mqvpn0 mtu 1500
+for _ in $(seq 1 20); do
+    [ "$(ip netns exec vpn-client cat /sys/class/net/mqvpn0/mtu)" = "$CLI_MTU" ] && break
+    sleep 0.25
+done
+if [ "$(ip netns exec vpn-client cat /sys/class/net/mqvpn0/mtu)" != "$CLI_MTU" ] ||
+    ! grep -q "MTU changed externally to 1500" "${WORK_DIR}/client.log"; then
+    echo "=== FAIL: external MTU change to 1500 not restored to ${CLI_MTU} ==="
+    exit 1
+fi
+echo "OK: no alarm at setup; external change restored to ${CLI_MTU}"
+
 # Stop client for next test
 kill "$CLIENT_PID" 2>/dev/null || true
 wait "$CLIENT_PID" 2>/dev/null || true

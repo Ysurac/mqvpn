@@ -147,6 +147,21 @@ mqvpn_tun_set_mtu(mqvpn_tun_t *tun, int mtu)
 }
 
 int
+mqvpn_tun_get_mtu(const mqvpn_tun_t *tun)
+{
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return -1;
+
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, tun->name, IFNAMSIZ - 1);
+
+    int rc = ioctl(sock, SIOCGIFMTU, &ifr);
+    close(sock);
+    return rc < 0 ? -1 : ifr.ifr_mtu;
+}
+
+int
 mqvpn_tun_up(mqvpn_tun_t *tun)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
