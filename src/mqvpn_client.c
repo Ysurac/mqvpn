@@ -2203,6 +2203,9 @@ cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     if (headers) cli_connect_ip_scan_headers(stream->conn, headers);
 }
 
+static void client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p,
+                                          activate_result_t r, uint64_t new_id);
+
 /* CONNECT-IP tunnel stream: capsule body + ADDRESS_ASSIGN → tunnel_config_ready.
  * Returns -1 on capsule buffer failure. */
 static int
@@ -2369,6 +2372,16 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
             };
             path_on_event(c, pp, PATH_EVENT_VALIDATION_OK, &v_ctx);
         }
+
+        /* The primary path is created with the connection and never goes
+         * through client_activate_path(), so the weight, DSCP mask and label
+         * saved in its slot were not applied to xquic's path 0 nor announced:
+         * after any reconnect, the path that becomes path 0 fell back to
+         * weight 1 and no mask although its slot still held the configured
+         * values. Apply them here, as activation does for every other path. */
+        if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].xquic_path_live)
+            client_apply_path_assignments(c, &c->paths[pidx], ACTIVATE_OK,
+                                          c->paths[pidx].xqc_path_id);
 
         client_set_state(c, MQVPN_STATE_TUNNEL_READY);
         LOG_D(c, "firing tunnel_config_ready callback");
