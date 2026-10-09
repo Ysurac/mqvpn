@@ -2128,6 +2128,32 @@ apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
     return negotiated;
 }
 
+/* Inner (TUN) MTU for the connection's current datagram MSS. Shared by the
+ * ADDRESS_ASSIGN path and cb_dgram_mss_updated so both agree.
+ *
+ * §9: when the reorder shim is in use, each stamped inner packet carries an
+ * 8-byte header, so the usable inner MTU shrinks by 8. Only when the server
+ * echoed mqvpn-reorder (the response headers precede ADDRESS_ASSIGN), with
+ * the same gate as the server's echo: without it nothing is ever stamped,
+ * and the 8 bytes would be lost for nothing. The header comes off the
+ * datagram budget BEFORE the config cap, so a cap that fits under the
+ * budget is kept as is. Floor at IPV6_MIN_MTU when v6 is in play. */
+static int
+cli_effective_tun_mtu(mqvpn_client_t *c, cli_conn_t *conn)
+{
+    int tun_mtu = IPV6_MIN_MTU;
+    if (conn->dgram_mss > 0) {
+        size_t udp_mss =
+            xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+        if (udp_mss >= 68) tun_mtu = (int)udp_mss;
+    }
+    if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx) &&
+        conn->peer_reorder_supported)
+        tun_mtu -= MQVPN_REORDER_HDR_LEN;
+    if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
+    return apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
+}
+
 /* Scan one CONNECT-IP response header section (:status 200 → tunnel_ok,
  * mqvpn-reorder echo → peer_reorder_supported). Split from
  * cli_connect_ip_on_headers so tests can drive it with a fabricated
@@ -2227,27 +2253,11 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     /* Notify platform on ADDRESS_ASSIGN */
     if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
         c->state != MQVPN_STATE_TUNNEL_READY) {
-        /* Compute MTU */
-        int tun_mtu = IPV6_MIN_MTU;
-        if (conn->dgram_mss > 0) {
-            size_t udp_mss =
-                xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
-            if (udp_mss >= 68) tun_mtu = (int)udp_mss;
-        }
-        if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
-        tun_mtu = apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
-        /* §9: when the reorder shim is in use, each stamped inner packet
-         * carries an 8-byte header, so the usable inner MTU shrinks by 8.
-         * Apply ONCE to the resolved inner MTU (after auto-MSS / cap).
-         * Floor at IPV6_MIN_MTU when v6 is in play. Only when the server
-         * echoed mqvpn-reorder (the response headers precede this capsule):
-         * without that echo nothing is ever stamped, and the 8 bytes would
-         * be lost for nothing. */
-        if (c->config.reorder.mode != MQVPN_REORDER_OFF && conn->peer_reorder_supported) {
-            tun_mtu -= MQVPN_REORDER_HDR_LEN;
-            if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
-        }
+        int tun_mtu = cli_effective_tun_mtu(c, conn);
         c->mtu = tun_mtu;
+        /* The platform applies this MTU from tunnel_config_ready; a later
+         * cb_dgram_mss_updated only notifies a change from it. */
+        c->last_notified_mtu = tun_mtu;
 
         /* Hybrid: learn the tunnel subnet for the classifier's TCP-lane
          * exclusion. The full rationale (server ACL denies the tunnel
@@ -2676,16 +2686,15 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 {
     (void)h;
     cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) conn->dgram_mss = mss;
+    if (!conn) return;
+    conn->dgram_mss = mss;
     mqvpn_client_t *c = conn->client;
     LOG_I(c, "datagram MSS updated: %zu", mss);
 
-    if (conn && c->tun_active) {
+    if (c->tun_active) {
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(mss, conn->masque_stream_id);
         if (udp_mss >= 68) {
-            int new_mtu = (int)udp_mss;
-            if (conn->addr6_assigned && new_mtu < IPV6_MIN_MTU) new_mtu = IPV6_MIN_MTU;
-            new_mtu = apply_mtu_cap(c->config.tun_mtu, new_mtu, c);
+            int new_mtu = cli_effective_tun_mtu(c, conn);
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
                 c->last_notified_mtu = new_mtu;

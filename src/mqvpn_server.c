@@ -1365,19 +1365,20 @@ ip_assigned:;
                 xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
             if (udp_mss >= 68) client_mtu = (int)udp_mss;
         }
-        if (s->tun_mtu > 0 && client_mtu > s->tun_mtu) {
-            LOG_D(s, "capping client MTU %d to TUN MTU %d (user=%s)", client_mtu,
-                  s->tun_mtu, conn->username);
-            client_mtu = s->tun_mtu;
-        }
         /* §9: when the reorder shim is in use, each stamped inner packet
-         * carries an 8-byte header, so the usable inner MTU shrinks by 8. Apply
-         * ONCE to the resolved inner MTU (after auto-MSS and TUN-MTU cap), and
-         * only when this client negotiated the shim (the echo above). */
+         * carries an 8-byte header, so the usable inner MTU shrinks by 8, and
+         * only when this client negotiated the shim (the echo above). Taken
+         * off the datagram budget before the TUN-MTU cap, as on the client, so
+         * a TUN MTU that fits under the budget is kept as is. */
         if (mqvpn_reorder_should_advertise(s->config.reorder.mode, conn->reorder_rx) &&
             conn->peer_reorder_supported) {
             client_mtu -= MQVPN_REORDER_HDR_LEN;
             if (conn->has_v6 && client_mtu < IPV6_MIN_MTU) client_mtu = IPV6_MIN_MTU;
+        }
+        if (s->tun_mtu > 0 && client_mtu > s->tun_mtu) {
+            LOG_D(s, "capping client MTU %d to TUN MTU %d (user=%s)", client_mtu,
+                  s->tun_mtu, conn->username);
+            client_mtu = s->tun_mtu;
         }
         client_info.mtu = client_mtu;
         if (conn->has_v6) {
