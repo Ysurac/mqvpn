@@ -55,6 +55,7 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#include "dgram_dedup.h"
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
 #  include "hybrid/tcp_egress.h"
 #endif
@@ -167,6 +168,11 @@ struct svr_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+    /* Redundant scheduler only: drops the extra copies of a datagram that
+     * arrive over the other paths. Created on the first datagram, freed
+     * with the session. */
+    mqvpn_dgram_dedup_t *dgram_dedup;
 
     /* Per-iface downlink weight/dscp_mask persistence — see
      * svr_path_label_t above / mqvpn_path_label.h. */
@@ -887,6 +893,8 @@ svr_conn_free(svr_conn_t *conn)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+    mqvpn_dgram_dedup_free(conn->dgram_dedup);
+    conn->dgram_dedup = NULL;
     /* Release the transport scope exactly once. Clear before calling out
      * (re-entrancy guard, same rule as the client); scope 0 is transient and
      * is never released. */
@@ -1011,6 +1019,8 @@ svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+    mqvpn_dgram_dedup_free(conn->dgram_dedup);
+    conn->dgram_dedup = NULL;
 
     svr_check_session_invariants(s);
 }
@@ -2482,6 +2492,19 @@ svr_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx)
     forward_inner_ip((svr_conn_t *)ctx, pkt, len);
 }
 
+/* The redundant scheduler sends every packet on every usable path, and a
+ * DATAGRAM frame carries no identifier (RFC 9221 §4), so each copy arrives
+ * here: let the first one through. */
+static int
+svr_dgram_is_copy(svr_conn_t *conn, const uint8_t *pkt, size_t len)
+{
+    if (!conn->dgram_dedup) {
+        conn->dgram_dedup = mqvpn_dgram_dedup_new(now_us() ^ (uint64_t)(uintptr_t)conn);
+        if (!conn->dgram_dedup) return 0;
+    }
+    return mqvpn_dgram_dedup_seen(conn->dgram_dedup, pkt, len, now_us());
+}
+
 static void
 cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *user_data,
               uint64_t ts)
@@ -2511,6 +2534,9 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         return;
     }
     if (payload_len < 1) return;
+    if (s->config.scheduler == MQVPN_SCHED_REDUNDANT &&
+        svr_dgram_is_copy(conn, payload, payload_len))
+        return;
 
     /* §5/§8.1 self-describing dispatch on payload[0]. */
     switch (mqvpn_reorder_classify_byte(payload[0])) {

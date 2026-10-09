@@ -513,7 +513,9 @@ them, trading bandwidth for maximum loss resilience — as long as one copy
 arrives, the data is delivered. There is no aggregation benefit and effective
 throughput is capped at the slowest usable path's share of bandwidth. Intended
 for low-bitrate, loss/latency-critical traffic (control channels, keepalives,
-VoIP) rather than bulk transfer.
+VoIP) rather than bulk transfer. The receiving end lets the first copy of each
+packet through and drops the copies that arrive within 200 ms of it, so set
+`redundant` on both ends.
 
 **`dscp` — DSCP policy-routing scheduler:** each path is assigned one or more
 DSCP classes via `set_path_dscp_mask` (see [Client commands](#client-commands)
