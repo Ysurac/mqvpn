@@ -247,7 +247,7 @@ setup_counters
 echo "=== Starting VPN server ==="
 start_server ""
 
-# ── Phase 1: weights 3:2 ─────────────────────────────────────────────────────
+# ── Phase 1: weights A:B ─────────────────────────────────────────────────────
 
 echo ""
 echo "=== Phase 1: client on paths A and B, weights A=${WEIGHT_A} B=${WEIGHT_B} ==="
@@ -300,8 +300,7 @@ echo "=== Phase 1: PASS ==="
 
 echo ""
 echo "=== Phase 2: restart the server, wait for the client to reconnect ==="
-kill "$SERVER_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
+stop_and_check_sanitizer "$SERVER_PID" "server" "${WORK_DIR}/server.log" || SANITIZER_FAIL=1
 SERVER_PID=""
 sleep 3
 start_server "-2"
@@ -332,15 +331,16 @@ echo ""
 echo "=== Phase 3: weights after the reconnect ==="
 # The client re-announces each path's weight to the server (PATH_LABEL); the
 # path that became xquic path 0 used to be left out, along with its weight.
-for dev in "$VETH_A0" "$VETH_B0"; do
-    if ! grep -qE "path_label: user=[^ ]+ iface=${dev} path_id=[0-9]+ client_weight=${WEIGHT_A} " \
+for pair in "$VETH_A0:$WEIGHT_A" "$VETH_B0:$WEIGHT_B"; do
+    dev="${pair%%:*}" want="${pair#*:}"
+    if ! grep -qE "path_label: user=[^ ]+ iface=${dev} path_id=[0-9]+ client_weight=${want} " \
             "${WORK_DIR}/server-2.log"; then
-        echo "FAIL: after the reconnect the server got no weight ${WEIGHT_A} for ${dev}"
+        echo "FAIL: after the reconnect the server got no weight ${want} for ${dev}"
         grep -E "path_label: user=" "${WORK_DIR}/server-2.log" | tail -5 || true
         dump_logs; exit 1
     fi
 done
-echo "OK: both paths re-announced with weight ${WEIGHT_A}"
+echo "OK: both paths re-announced with weights ${WEIGHT_A}:${WEIGHT_B}"
 SHARE2=$(measure_share)
 echo "Path A share of full-size packets: $SHARE2 (expected ${SHARE_MIN}..${SHARE_MAX})"
 if ! share_ok "$SHARE2"; then
