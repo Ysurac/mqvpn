@@ -83,7 +83,7 @@ echo "OK: cert generated"
 
 cat > /etc/mqvpn/server.conf <<EOF
 [Interface]
-Listen = 192.168.100.2:4433
+Listen = 192.168.100.2:443
 Subnet = 10.0.0.0/24
 TunName = mqvpn0
 LogLevel = debug
@@ -98,7 +98,7 @@ EOF
 
 cat > /etc/mqvpn/client-test1.conf <<EOF
 [Server]
-Address  = 192.168.100.2:4433
+Address  = 192.168.100.2:443
 Insecure = true
 
 [Auth]
@@ -194,12 +194,13 @@ cat > /run/systemd/system/mqvpn-server.service.d/override.conf <<'DROPIN'
 StartLimitBurst=10
 
 [Service]
+NetworkNamespacePath=/run/netns/sd-server
 ExecStartPre=
-ExecStartPre=/usr/bin/ip netns exec sd-server /usr/local/lib/mqvpn/mqvpn-server-nat.sh setup /etc/mqvpn/server.conf
+ExecStartPre=+/usr/bin/ip netns exec sd-server /usr/local/lib/mqvpn/mqvpn-server-nat.sh setup /etc/mqvpn/server.conf
 ExecStart=
-ExecStart=/usr/bin/ip netns exec sd-server /usr/local/bin/mqvpn --config /etc/mqvpn/server.conf
+ExecStart=/usr/local/bin/mqvpn --config /etc/mqvpn/server.conf
 ExecStopPost=
-ExecStopPost=/usr/bin/ip netns exec sd-server /usr/local/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
+ExecStopPost=+/usr/bin/ip netns exec sd-server /usr/local/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
 ReadWritePaths=/run/netns /proc/sys/net
 DROPIN
 
@@ -232,6 +233,16 @@ if ! systemctl is-active --quiet mqvpn-server; then
     fail "Phase 3 (server start)"
 fi
 echo "OK: mqvpn-server is active"
+
+# Verify the unit's capability bounding set reached the server process:
+# CAP_NET_ADMIN (12) + CAP_NET_BIND_SERVICE (10) = 0x1400.
+SRV_PID=$(systemctl show -p MainPID --value mqvpn-server)
+SRV_CAPBND=$(awk '/^CapBnd:/ {print $2}' "/proc/${SRV_PID}/status" 2>/dev/null || true)
+if [ "$SRV_CAPBND" != "0000000000001400" ]; then
+    echo "FAIL: mqvpn-server CapBnd is '${SRV_CAPBND}', expected 0000000000001400"
+    fail "Phase 3 (server capabilities)"
+fi
+echo "OK: mqvpn-server bounded to CAP_NET_ADMIN + CAP_NET_BIND_SERVICE"
 
 # Verify TUN device in server namespace
 if ! ip netns exec sd-server ip link show mqvpn0 >/dev/null 2>&1; then

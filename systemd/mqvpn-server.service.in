@@ -8,13 +8,20 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStartPre=@CMAKE_INSTALL_PREFIX@/lib/mqvpn/mqvpn-server-nat.sh setup /etc/mqvpn/server.conf
+# "+": the NAT script (iptables, sysctl) runs outside the capability bounding
+# set below; iptables-legacy needs CAP_NET_RAW, which the server does not.
+ExecStartPre=+@CMAKE_INSTALL_PREFIX@/lib/mqvpn/mqvpn-server-nat.sh setup /etc/mqvpn/server.conf
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/mqvpn --config /etc/mqvpn/server.conf
-ExecStopPost=@CMAKE_INSTALL_PREFIX@/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
+ExecStopPost=+@CMAKE_INSTALL_PREFIX@/lib/mqvpn/mqvpn-server-nat.sh teardown /etc/mqvpn/server.conf
 Restart=on-failure
 RestartSec=5
 
 # Security hardening
+# The server needs CAP_NET_ADMIN for its TUN device and SO_SNDBUFFORCE/
+# SO_RCVBUFFORCE, and CAP_NET_BIND_SERVICE when Listen or the control API
+# uses a port below 1024 (the example listens on 443).
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
