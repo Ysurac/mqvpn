@@ -1,3 +1,73 @@
+mqvpn (0.17.0-1) UNRELEASED; urgency=medium
+
+  * fix: removing the initial path (path_id 0) through the control API
+    abandons it like any other path instead of closing the connection and
+    reconnecting after ReconnectInterval. omr-tracker removes a failed
+    WAN's path this way, so the tunnel went down even though another WAN
+    was up. The connection is closed only when xquic refuses the abandon
+    (last active path). Netns testbed, 2 paths: longest ping gap 6.5 s and
+    one reconnect before, 0.3 to 0.4 s and no reconnect after.
+    run_primary_removal_test.sh now expects the tunnel to stay up without
+    a reconnect, and waits for the second path to be active first
+    (Pierre-Yves Le Borgne, PR #7).
+  * fix(client): apply a path's weight, DSCP mask and label to the primary
+    path after a reconnect (server restart, idle timeout, initial path
+    removal) and to a path reactivated by netmon or created as standby.
+    These paths ran with weight 1 and no DSCP mask, and the server kept no
+    label (or the old path_id's), while OpenMPTCProuter pushes a weight
+    only when it changes. With wrr 3:2 the first path carried 60% of the
+    upload before a server restart and 75% after. New e2e
+    run_weight_reconnect_test.sh (Pierre-Yves Le Borgne, PR #8).
+  * fix(reorder): take the 8-byte reorder header out of the tunnel MTU only
+    when the shim was negotiated. A client with reorder on and a server
+    without it (OpenMPTCProuter's default) ran with an MTU 8 bytes smaller
+    for nothing (1374 instead of 1382). The client now computes the TUN
+    MTU in one place: the header comes off the datagram budget before the
+    MTU cap (MTU = 1300 with reorder gives 1300, not 1292), and a datagram
+    size raised by path MTU discovery no longer sets the TUN MTU 8 bytes
+    above what a stamped packet can carry (Pierre-Yves Le Borgne, PR #6).
+  * fix(linux): the RTM_NEWLINK events queued while the TUN is created were
+    taken for an external MTU change, so every tunnel setup logged
+    "[ERR] TUN mqvpn0: MTU changed externally to 1500, restoring" and used
+    up one of the restores of the window. The current device MTU is now
+    read before acting (Pierre-Yves Le Borgne, PR #3).
+  * build: configure xquic with every feature build.sh enables (New Reno,
+    Copa, unlimited, FEC with its XOR, Reed-Solomon and packet-mask
+    schemes), not BBR2 only. A server given scheduler backup_fec or cc
+    none refused to start ("requires rebuild with ... in xquic"), new_reno,
+    copa and unlimited silently ran BBR2, and FEC was ignored
+    (Pierre-Yves Le Borgne, PR #2).
+  * fix(systemd): mqvpn-server.service keeps only CAP_NET_ADMIN and
+    CAP_NET_BIND_SERVICE (CapabilityBoundingSet, AmbientCapabilities):
+    the server ran with every root capability. CAP_NET_BIND_SERVICE keeps
+    a Listen or control API port below 1024 working (the example listens
+    on 443). The NAT setup and teardown scripts run outside the bound
+    ("+" prefix), since iptables-legacy needs CAP_NET_RAW.
+    run_systemd_test.sh now listens on 443, runs the server through
+    NetworkNamespacePath so the bound applies to it, and checks the
+    server's CapBnd.
+  * test: pin the path_entry_t size on LP64 builds only, so the unit tests
+    build on i386 and armhf; make the fuzz_control_dispatch target link
+    again, which had stopped the CI sanitizer job before its netns e2e
+    tests (Pierre-Yves Le Borgne, PRs #4 and #5); run the primary-removal
+    and weight-reconnect e2e tests in CI.
+  * xquic: bump to mqvpn-omr-main 39b4cd16:
+    - detect a path that silently stops delivering while the scheduler
+      keeps sending on it (its PTO timer never fired, so minrtt, WLB and
+      DSCP kept choosing it): a 15 s outage of one of two WANs gave a 17 to
+      18 s ping gap, now below 1 s;
+    - skip the perf-class work for closing and closed paths, which made
+      scheduling quadratic in the number of paths ever removed and re-added
+      (188 instead of 2172 Mbit/s after 120 cycles, now 927);
+    - decode each transport parameter within its declared length (backport
+      of alibaba/xquic#973) and reject max_ack_delay >= 2^14 (backport of
+      alibaba/xquic#884), per RFC 9000.
+  * Merge upstream mqvpn main (0.17.0): shared-library SOVERSION bumped to
+    4 (callback ABI 3 removed mqvpn_client_add_path_fd and friends);
+    Windows arm64 release built with the VS 2026 generator; docs fixes.
+
+ -- mqvpn maintainers <maintainers@example.com>  Fri, 09 Oct 2026 11:32:04 +0200
+
 mqvpn (0.16.3+20261007-1) UNRELEASED; urgency=medium
 
   * fix(server): a fixed-IP user reconnecting before its old tunnel timed
