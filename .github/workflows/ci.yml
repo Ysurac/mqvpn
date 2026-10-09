@@ -298,6 +298,18 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: sudo -E scripts/ci_e2e/run_path_api_test.sh
 
+      - name: E2E remove the initial path, tunnel stays up (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_primary_removal_test.sh
+
+      - name: E2E path weights survive a reconnect (netns)
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: sudo -E scripts/ci_e2e/run_weight_reconnect_test.sh
+
       - name: E2E 8-path dellink at MQVPN_MAX_PATHS cap (netns)
         env:
           ASAN_OPTIONS: detect_leaks=1
