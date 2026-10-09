@@ -281,8 +281,9 @@ struct mqvpn_client_s {
     /* Path index used for the QUIC handshake. Rotated on each reconnect so a
      * dead first path doesn't trap the client forever. */
     int primary_path_idx;
-    /* Set when remove_path() takes out the live initial path (xqc path_id 0):
-     * the connection is being closed for a clean failover (see
+    /* Set when remove_path() takes out the live initial path (xqc path_id 0)
+     * and xquic refuses the abandon (e.g. it is the last active path): the
+     * connection is then closed for a clean failover (see
      * mqvpn_client_remove_path), and its remaining sends — CONNECTION_CLOSE
      * included — go out on a live sibling instead of stalling on the removed
      * slot (get_path_entry_for_send). Cleared when a connection starts. */

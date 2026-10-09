@@ -18,7 +18,7 @@
 #   2. --path A --backup-path B: remove A, take A down → tunnel stays up over B.
 #
 # Usage: sudo ./scripts/ci_e2e/run_primary_removal_test.sh [path-to-mqvpn-binary]
-# Requires: root, iproute2, openssl, netcat (nc)
+# Requires: root, iproute2, openssl, netcat (nc), python3
 
 set -euo pipefail
 
@@ -98,9 +98,31 @@ wait_tunnel() {
     return 1
 }
 
+# Number of ACTIVE xquic paths in the client's status (a standby backup path
+# is active at this level too), 0 when unavailable.
+active_paths() {
+    ctrl_send '{"cmd":"get_status"}' | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print(sum(1 for p in d["clients"][0]["paths"] if p.get("state_label") == "active"))
+except Exception:
+    print(0)'
+}
+
+wait_active_paths() {
+    local want="$1" timeout="$2" elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+        if [ "$(active_paths)" -ge "$want" ]; then return 0; fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
 dump_logs() {
     echo "--- client log (reconnect lines) ---"
-    grep -E "reconnect|primary path|removing initial path" "${WORK_DIR}/client.log" \
+    grep -E "reconnect|primary path|xqc_conn_close_path" "${WORK_DIR}/client.log" \
         2>/dev/null | tail -20 || true
     echo "--- client log (last 30 lines) ---"
     tail -30 "${WORK_DIR}/client.log" 2>/dev/null || true
@@ -181,8 +203,9 @@ run_case() {
 
     wait_tunnel 30 || { echo "FAIL: tunnel not up after 30s"; dump_logs; exit 1; }
     echo "OK: tunnel up"
-    # Let path B validate before the initial path goes away.
-    sleep 5
+    # Let path B validate before the initial path goes away: xquic refuses to
+    # abandon the last active path, which would turn this into a reconnect.
+    wait_active_paths 2 30 || { echo "FAIL: path B not active after 30s"; dump_logs; exit 1; }
 
     ctrl_ok "{\"cmd\":\"remove_path\",\"iface\":\"${VETH_A0}\"}" || {
         echo "FAIL: remove_path ${VETH_A0} rejected"
