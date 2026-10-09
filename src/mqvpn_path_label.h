@@ -23,8 +23,9 @@
  * and it already knows its own weight/dscp_mask for that path. It
  * announces {iface, weight, dscp_mask} for path_id N to the server as a
  * PATH_LABEL capsule (RFC 9297 Capsule Protocol) on the existing
- * CONNECT-IP request stream, every time it (re)activates a secondary
- * path. No xquic changes: the Capsule Protocol already carries an
+ * CONNECT-IP request stream, every time it (re)activates a path, and for
+ * the primary path (path_id 0) once each connection's tunnel is up. No
+ * xquic changes: the Capsule Protocol already carries an
  * app-defined uint64_t type field, and mqvpn's server already tolerates
  * unrecognized capsule types on that stream by skipping them (see
  * mqvpn_server.c's capsule dispatch loop) — an older peer on either end

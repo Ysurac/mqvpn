@@ -2738,10 +2738,10 @@ activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
  * pinned a different value for this iface (see mqvpn_server.c's dispatch
  * handler). Best-effort: an encode/send failure just means the server
  * falls back to the existing non-persistent, path_id-only, uplink-only
- * behavior for this path; never worth failing path activation over. Not
- * called for the primary path (path_id 0), which is bootstrapped by the
- * handshake itself and never gets a new path_id — see mqvpn_path_label.h,
- * only secondary paths can churn path_id at all.
+ * behavior for this path; never worth failing path activation over. Also
+ * sent for the primary path (path_id 0) once the tunnel is up: after a
+ * reconnect, path 0 may be a different slot than on the previous
+ * connection, and the new server has none of the labels.
  *
  * c->config.sync_path_labels (mqvpn_config_set_sync_path_labels(), default
  * on) is a client-side kill switch for this announcement: off means the
@@ -2783,13 +2783,15 @@ client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *ifac
 }
 
 /* Apply this slot's saved weight/dscp_mask to a newly-(re)activated
- * path_id and announce its label, once activation succeeds. Shared
- * between client_activate_path() (first activation attempt) and
- * tick_drive_retry_timer() (retry after a failed/timed-out validation) —
- * a retry gets its OWN new path_id from xquic, just like the first
- * attempt, so it needs the exact same treatment. Missing this on the
- * retry path was a real bug: a path that fails validation once and
- * succeeds on retry would silently lose its weight/dscp_mask/label
+ * path_id and announce its label, once activation succeeds. Every place a
+ * slot gets an xquic path_id calls it: client_activate_path() (first
+ * activation attempt), tick_drive_retry_timer() (retry after a
+ * failed/timed-out validation), mqvpn_client_reactivate_path() (platform
+ * reactivation), client_create_standby_path() (backup path) and
+ * cli_connect_ip_on_body() for the primary path, path_id 0, which is
+ * created with the connection. Each of these gets its OWN path_id, so it
+ * needs the exact same treatment. Missing it on one of them was a real bug
+ * every time: the path silently lost its weight/dscp_mask/label
  * announcement for the id it actually ends up live on. */
 static void
 client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p, activate_result_t r,
@@ -2894,6 +2896,8 @@ client_create_standby_path(mqvpn_client_t *c, path_entry_t *p, int idx)
     xqc_conn_mark_path_standby(c->engine, &c->conn->cid, new_id);
     LOG_I(c, "backup path[%d] standby: path_id=%" PRIu64 " iface=%s", idx, new_id,
           p->name);
+    /* After the slot owns new_id (sends resolve it through find_path_by_xqc_id). */
+    client_apply_path_assignments(c, p, ACTIVATE_OK, new_id);
     if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
 }
 
@@ -4203,6 +4207,10 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
     /* path_on_event(MANUAL_REACTIVATE) lands the slot in VALIDATING on OK,
      * or leaves state unchanged on TRANSIENT/PERMANENT. */
     if (p->state != PATH_LC_VALIDATING) return MQVPN_ERR_ENGINE;
+
+    /* The reactivated path runs on a new xquic path_id: give it the slot's
+     * weight, DSCP mask and label, as client_activate_path() does. */
+    client_apply_path_assignments(c, p, r, new_id);
     return MQVPN_OK;
 }
 
