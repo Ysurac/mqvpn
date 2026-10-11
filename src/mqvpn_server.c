@@ -149,6 +149,10 @@ struct svr_conn_s {
     struct in6_addr assigned_ip6;
     int has_v6;
     int tunnel_established;
+    /* The last datagram send for this session returned EAGAIN and no
+     * dgram_write notify has come since: counted in s->n_dgram_blocked.
+     * Cleared by cb_dgram_write, a successful send, or svr_session_release. */
+    int dgram_blocked;
     size_t dgram_mss;
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
@@ -280,8 +284,13 @@ struct mqvpn_server_s {
     } pinned_ips[MQVPN_MAX_USERS];
     int n_pinned_ips;
 
-    /* Backpressure */
-    int tun_paused;
+    /* Backpressure. A session whose datagram send returned EAGAIN is marked
+     * dgram_blocked (per conn) until its own dgram_write notify; packets for
+     * it are dropped meanwhile, as a router drops for a congested next hop.
+     * TUN reading pauses only while EVERY session is blocked (svr_tun_paused),
+     * so one slow or stalled client never stalls the others' downlink, and
+     * a blocked session's release (close, re-establishment) unblocks it. */
+    int n_dgram_blocked;
     uint64_t tun_drop_cnt;
 
     /* Timer: next wake (from xquic set_event_timer) */
@@ -490,6 +499,26 @@ svr_log_conn_stats(mqvpn_server_t *s, const char *tag, const char *username,
           st.total_app_bytes, st.standby_path_app_bytes, st.mp_state, st.enable_fec,
           st.send_fec_cnt, st.fec_recover_pkt_cnt);
     free(st.paths_info);
+}
+
+/* ─── Downlink backpressure (see n_dgram_blocked) ─── */
+
+/* TUN reading pauses only while every registered session is blocked: with a
+ * single client this is the historical pause-on-EAGAIN, and with several it
+ * keeps the others flowing. */
+static int
+svr_tun_paused(const mqvpn_server_t *s)
+{
+    return s->n_sessions > 0 && s->n_dgram_blocked >= s->n_sessions;
+}
+
+static void
+svr_conn_set_dgram_blocked(mqvpn_server_t *s, svr_conn_t *conn, int blocked)
+{
+    blocked = blocked ? 1 : 0;
+    if (conn->dgram_blocked == blocked) return;
+    conn->dgram_blocked = blocked;
+    s->n_dgram_blocked += blocked ? 1 : -1;
 }
 
 /* ─── ICMP PTB rate limiter ───
@@ -913,11 +942,12 @@ static void
 svr_check_session_invariants(const mqvpn_server_t *s)
 {
     uint32_t base_h = ntohl(s->pool.base.s_addr);
-    int counted = 0;
+    int counted = 0, blocked = 0;
     for (int off = 1; off <= MQVPN_ADDR_POOL_MAX; off++) {
         const svr_conn_t *c = s->sessions[off];
         if (!c) continue;
         counted++;
+        if (c->dgram_blocked) blocked++;
         /* A registered slot must hold a live address... */
         assert(c->assigned_ip.s_addr != 0 &&
                "session slot points at a conn with no assigned address");
@@ -932,6 +962,10 @@ svr_check_session_invariants(const mqvpn_server_t *s)
     }
     assert(counted == s->n_sessions &&
            "n_sessions disagrees with the non-NULL sessions[] count");
+    /* Only registered sessions are ever marked blocked, and a release clears
+     * the mark, so a closed conn can never keep TUN reading paused. */
+    assert(blocked == s->n_dgram_blocked &&
+           "n_dgram_blocked disagrees with the blocked sessions[] count");
     assert(s->n_sessions >= 0 && s->n_sessions <= s->max_clients &&
            "n_sessions outside [0, max_clients]");
 }
@@ -950,6 +984,10 @@ static void
 svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
 {
     if (!conn->assigned_ip.s_addr) return;
+
+    /* A session that closes while blocked must not keep counting toward the
+     * all-blocked TUN pause. */
+    svr_conn_set_dgram_blocked(s, conn, 0);
 
     uint32_t offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
     if (offset > 0 && offset <= MQVPN_ADDR_POOL_MAX && s->sessions[offset] == conn) {
@@ -2566,10 +2604,10 @@ cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
     svr_conn_t *conn = (svr_conn_t *)user_data;
     if (!conn) return;
     mqvpn_server_t *s = conn->server;
-    if (s->tun_paused) {
-        s->tun_paused = 0;
+    int was_paused = svr_tun_paused(s);
+    svr_conn_set_dgram_blocked(s, conn, 0);
+    if (was_paused && !svr_tun_paused(s))
         LOG_D(s, "TUN read resumed (QUIC queue has space)");
-    }
 }
 
 static void
@@ -3172,7 +3210,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     ASSERT_TICK_THREAD(s);
 
     if (s->n_sessions == 0) return MQVPN_OK;
-    if (s->tun_paused) return MQVPN_ERR_AGAIN;
+    if (svr_tun_paused(s)) return MQVPN_ERR_AGAIN;
     uint8_t ip_ver = pkt[0] >> 4;
     svr_conn_t *target = NULL;
 
@@ -3331,11 +3369,19 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
                                     mqvpn_dgram_qos_level(s->config.scheduler));
 
     if (xret == -XQC_EAGAIN) {
-        s->tun_paused = 1;
-        LOG_D(s, "TUN read paused (QUIC backpressure) (user=%s)", target->username);
-        return MQVPN_ERR_AGAIN;
+        /* This packet is dropped either way (the platform does not retry
+         * it). Block only this session; pause TUN reading only once every
+         * session is blocked, so other clients keep receiving. */
+        s->tun_drop_cnt++;
+        svr_conn_set_dgram_blocked(s, target, 1);
+        if (svr_tun_paused(s)) {
+            LOG_D(s, "TUN read paused (QUIC backpressure) (user=%s)", target->username);
+            return MQVPN_ERR_AGAIN;
+        }
+        return MQVPN_OK;
     }
     if (xret == XQC_OK) {
+        svr_conn_set_dgram_blocked(s, target, 0);
         s->dgram_sent++;
         /* §10.3: advance the send_flow sequence only on a successful datagram. */
         if (do_stamp) mqvpn_reorder_tx_commit(target->reorder_tx, &peek, now_us());
@@ -4077,7 +4123,7 @@ mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
     if (s->tcp_egress_flow_list_head != NULL && out->next_timer_ms > 1000)
         out->next_timer_ms = 1000;
 #endif
-    out->tun_readable = s->tun_paused ? 0 : 1;
+    out->tun_readable = svr_tun_paused(s) ? 0 : 1;
     out->is_idle = (s->n_sessions == 0) ? 1 : 0;
     return MQVPN_OK;
 }
