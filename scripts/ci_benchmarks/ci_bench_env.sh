@@ -9,7 +9,7 @@
 # CI-specific additions over manual benchmarks:
 #   - Commit SHA in all JSON output
 #   - Stale process/netns cleanup at start
-#   - iperf3 killed inside netns only (safe for shared runners)
+#   - processes killed by netns membership only (safe for shared runners)
 #   - Sanity check helper
 #   - python3/tc dependency checks
 
@@ -67,12 +67,49 @@ ci_bench_check_deps() {
     mkdir -p "$CI_BENCH_RESULTS"
 }
 
+# ── Process cleanup helpers ──
+
+# SIGTERM every given PID at once, poll them together for a shared grace
+# period of up to 3 s, then SIGKILL the survivors. mqvpn and OpenVPN both
+# install a graceful SIGTERM handler that can hang under load (waiting on a
+# close handshake with a peer that is already gone), and a lone SIGTERM
+# would then leak the process and keep its namespace alive.
+ci_bench_kill_pids() {
+    local pid alive
+    for pid in "$@"; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
+    for _ in 1 2 3; do
+        alive=0
+        for pid in "$@"; do
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
+        done
+        [ "$alive" -eq 0 ] && return 0
+        sleep 1
+    done
+    for pid in "$@"; do
+        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+    done
+}
+
+# Kill every process inside the given network namespaces (TERM, then KILL).
+# Scoped with `ip netns pids`, never `ip netns exec NS pkill`: a network
+# namespace does not isolate PIDs, so that pkill matches processes on the
+# whole host, the calling script included. Only for namespaces we own.
+ci_bench_netns_kill() {
+    local ns pids=()
+    for ns in "$@"; do
+        # shellcheck disable=SC2207  # PIDs are plain integers
+        pids+=($(ip netns pids "$ns" 2>/dev/null))
+    done
+    ci_bench_kill_pids ${pids[@]+"${pids[@]}"}
+}
+
 # ── Stale state cleanup (run before setup) ──
 
 ci_bench_cleanup_stale() {
     pkill -f "mqvpn.*ci-bench" 2>/dev/null || true
-    ip netns exec "$NS_SERVER" pkill -f "iperf3" 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" pkill -f "iperf3" 2>/dev/null || true
+    ci_bench_netns_kill "$NS_SERVER" "$NS_CLIENT"
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     ip link del "$VETH_A0" 2>/dev/null || true
@@ -391,14 +428,11 @@ ci_bench_cleanup() {
     echo ""
     echo "Cleaning up..."
 
-    [ -n "$_CB_CLIENT_PID" ] && kill "$_CB_CLIENT_PID" 2>/dev/null || true
-    [ -n "$_CB_SERVER_PID" ] && kill "$_CB_SERVER_PID" 2>/dev/null || true
+    ci_bench_kill_pids "$_CB_CLIENT_PID" "$_CB_SERVER_PID"
     _CB_CLIENT_PID=""
     _CB_SERVER_PID=""
 
-    ip netns exec "$NS_SERVER" pkill -f "iperf3" 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" pkill -f "iperf3" 2>/dev/null || true
-    sleep 1
+    ci_bench_netns_kill "$NS_SERVER" "$NS_CLIENT"
 
     ip netns exec "$NS_CLIENT" tc qdisc del dev "$VETH_A0" root 2>/dev/null || true
     ip netns exec "$NS_SERVER" tc qdisc del dev "$VETH_A1" root 2>/dev/null || true

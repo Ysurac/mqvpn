@@ -110,8 +110,11 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     stop_all
-    ip netns exec "$NS_SERVER" pkill -f iperf3 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" pkill -f iperf3 2>/dev/null || true
+    # By netns membership: `ip netns exec NS pkill` is host-wide (a network
+    # namespace does not isolate PIDs).
+    for ns in "$NS_SERVER" "$NS_CLIENT"; do
+        ip netns pids "$ns" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+    done
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     for i in $(seq 0 $((N_LINKS - 1))); do

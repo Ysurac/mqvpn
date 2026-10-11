@@ -38,32 +38,6 @@ _OVPN_CLIENT_PID=""
 
 # ── Cleanup ──
 
-# Both OpenVPN and mqvpn install their own SIGTERM handler for graceful
-# shutdown, and under this nested-tunnel workload that handler can hang
-# indefinitely (e.g. waiting on a QUIC/OpenVPN close handshake with a peer
-# that's already gone) rather than ever actually exiting. Killing the PIDs
-# one at a time with a per-process grace period stacks up badly — 4
-# processes x a few seconds of grace each can add up to well over any
-# reasonable cleanup budget. Instead: SIGTERM everything at once, poll
-# them together for a short shared window, then SIGKILL any survivors.
-_kill_all() {
-    local pid alive
-    for pid in "$@"; do
-        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
-    done
-    for _ in 1 2 3; do
-        alive=0
-        for pid in "$@"; do
-            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
-        done
-        [ "$alive" -eq 0 ] && return 0
-        sleep 1
-    done
-    for pid in "$@"; do
-        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
-    done
-}
-
 _ovpn_cleanup() {
     # Preserve the script's real exit status — otherwise the last command
     # run inside this trap silently becomes the process's exit code.
@@ -72,11 +46,13 @@ _ovpn_cleanup() {
     echo ""
     echo "Cleaning up..."
 
-    _kill_all "$_OVPN_CLIENT_PID" "$_OVPN_SERVER_PID" "$_CB_CLIENT_PID" "$_CB_SERVER_PID"
+    # SIGTERM all four at once with one shared grace period (killing them
+    # one at a time, each with its own grace, stacks up past any cleanup
+    # budget), then sweep anything else left in the namespaces.
+    ci_bench_kill_pids "$_OVPN_CLIENT_PID" "$_OVPN_SERVER_PID" "$_CB_CLIENT_PID" "$_CB_SERVER_PID"
     _CB_CLIENT_PID=""
     _CB_SERVER_PID=""
-    ip netns exec "$NS_CLIENT" pkill -9 -f "openvpn|mqvpn" 2>/dev/null || true
-    ip netns exec "$NS_SERVER" pkill -9 -f "openvpn|mqvpn" 2>/dev/null || true
+    ci_bench_netns_kill "$NS_CLIENT" "$NS_SERVER"
 
     [ -n "$_OVPN_WORK_DIR" ] && rm -rf "$_OVPN_WORK_DIR" || true
 
