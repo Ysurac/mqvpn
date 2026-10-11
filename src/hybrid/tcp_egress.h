@@ -109,7 +109,11 @@ void svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us);
  * torn down exactly once regardless of which site gets there first. Safe
  * to call from a stream-close path: this function never touches
  * h3_request. `flow` is a svr_tcp_egress_flow_t*, opaque outside this
- * file. */
+ * file. When called while tcp_egress.c is still inside one of its own
+ * entry points for this flow (an xquic send there ran the engine, which
+ * delivered this close), the bookkeeping above happens immediately but the
+ * memory is freed when that entry point returns; a second call in the
+ * meantime is a no-op. */
 void svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow);
 
 /* Defensive sweep for mqvpn_server_destroy's teardown contingency: normal
