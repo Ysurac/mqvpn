@@ -951,14 +951,23 @@ tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f)
  * (peer sees RESET_STREAM, truncation is visible), and inner-TCP RST
  * semantics never promised delivery of buffered data. A systemic fix
  * belongs in the fork (keep queued STREAM data ahead of RESET instead of
- * dropping it), not here. */
+ * dropping it), not here.
+ *
+ * The pointers are cleared BEFORE the close call, not after: xquic can
+ * destroy the request synchronously inside xqc_h3_request_close (the
+ * transport stream already closed, xqc_h3_stream_close), which fires
+ * cb_request_close -> mqvpn_tcp_lane_on_h3_closing for this same stream.
+ * With f->stream still set that lookup would find f and free it, and the
+ * caller would then keep using (and free again) the freed flow. Same order
+ * as the server's svr_tcp_egress_abort (destroy first, close second). */
 static void
 tcp_lane_close_h3(mqvpn_tcp_flow_t *f)
 {
-    if (f->h3_request) {
-        cli_tcp_lane_h3_close(f->h3_request);
+    void *req = f->h3_request;
+    if (req) {
         f->h3_request = NULL;
         f->stream = NULL;
+        cli_tcp_lane_h3_close(req);
     }
 }
 

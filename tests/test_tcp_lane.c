@@ -250,11 +250,21 @@ test_tcp_close_hook(struct tcp_pcb *pcb)
 static int g_h3_close_calls;
 static void *g_h3_close_last_req;
 
+/* Synchronous-destroy simulation: when set, the close double re-enters
+ * mqvpn_tcp_lane_on_h3_closing for this lane/stream, the way
+ * xqc_h3_request_close can destroy the request inline and fire
+ * cb_request_close -> on_h3_closing before returning. */
+static struct mqvpn_tcp_lane *g_h3_close_reenter_lane;
+static void *g_h3_close_reenter_stream;
+
 void
 cli_tcp_lane_h3_close(void *h3_request)
 {
     g_h3_close_calls++;
     g_h3_close_last_req = h3_request;
+    if (g_h3_close_reenter_lane) {
+        mqvpn_tcp_lane_on_h3_closing(g_h3_close_reenter_lane, g_h3_close_reenter_stream);
+    }
 }
 
 /* ─── cli_tcp_lane_h3_recv test double (real impl: mqvpn_client.c) ───
@@ -481,6 +491,8 @@ relay_reset(void)
     g_tcp_close_last_pcb = NULL;
     g_h3_close_calls = 0;
     g_h3_close_last_req = NULL;
+    g_h3_close_reenter_lane = NULL;
+    g_h3_close_reenter_stream = NULL;
     g_open_stream_fail = 0;
 }
 
@@ -2834,6 +2846,52 @@ test_h3_closing_notify_teardown(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* Finding: tcp_lane_close_h3 used to call the H3 close BEFORE clearing
+ * f->h3_request/f->stream. A synchronous request destroy inside the close
+ * re-enters on_h3_closing for the same stream, which then found f and freed
+ * it — the outer teardown kept using it (heap-use-after-free + double free
+ * under ASan). The re-entrant lookup must now miss. */
+static void
+test_close_h3_sync_destroy_reentry(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe0a1ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8250, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    g_h3_close_reenter_lane = lane;
+    g_h3_close_reenter_stream = &fake_stream;
+    mqvpn_tcp_lane_on_stream_rejected(lane, &fake_stream);
+    g_h3_close_reenter_lane = NULL;
+
+    mqvpn_flow_key_t key = mk_std_key(8250);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0, "flow removed once");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "H3 request closed exactly once");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted exactly once");
+    mqvpn_tcp_lane_stats_t st;
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.flows_active, 0, "flow counter decremented once");
+
+    /* Same shape through the lwIP err path (pcb already freed by lwIP). */
+    f = setup_flow(lane, &pcb, 8251, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "second flow established");
+    g_h3_close_reenter_lane = lane;
+    g_h3_close_reenter_stream = &fake_stream;
+    mqvpn_tcp_lane_on_lwip_err(f, ERR_RST);
+    g_h3_close_reenter_lane = NULL;
+    key = mk_std_key(8251);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0,
+                  "lwip-err flow removed once");
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.flows_active, 0, "flow counter still balanced");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_abort_pending_real(void)
 {
@@ -3745,6 +3803,7 @@ main(void)
     test_connect_path_format_truncation();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
+    test_close_h3_sync_destroy_reentry();
     test_abort_pending_real();
     test_accept_open_stream_fail_returns_abrt();
     test_lwip_sent_teardown_returns_abrt();
