@@ -92,6 +92,7 @@ generate_cert() {
 
 # run_vpn <scheduler> <path-iface>...
 # Starts server+client, waits for the tunnel, pings through it.
+# VPN_SERVER_SCHED overrides the server's scheduler (default: <scheduler>).
 # SRT_BENCH_REORDER=on enables the tunnel reorder shim on both sides.
 # Default OFF: under sustained real loss the shim head-of-line blocks on
 # gaps that will never fill (measured 87-93% stream loss vs ~1% without);
@@ -137,7 +138,7 @@ run_vpn() {
         --cert "${WORK_DIR}/server.crt" \
         --key "${WORK_DIR}/server.key" \
         --auth-key "$PSK" \
-        --scheduler "$scheduler" \
+        --scheduler "${VPN_SERVER_SCHED:-$scheduler}" \
         "${server_args[@]}" \
         --log-level info >"${WORK_DIR}/server.log" 2>&1 &
     SERVER_PID=$!
@@ -184,25 +185,30 @@ rx_bytes() {
 }
 
 # set_path_a <rate> <netem> — replace path A's shaping in both directions.
+# Returns nonzero if either side fails: callers run where errexit is off.
 set_path_a() {
     local rate="$1" netem="$2"
     # shellcheck disable=SC2086  # netem args are intentionally word-split
-    ip netns exec "$NS_CLIENT" tc qdisc change dev bench-a0 root netem $netem rate "$rate"
+    ip netns exec "$NS_CLIENT" tc qdisc change dev bench-a0 root netem $netem rate "$rate" \
+        || return 1
     # shellcheck disable=SC2086
     ip netns exec "$NS_SERVER" tc qdisc change dev bench-a1 root netem $netem rate "$rate"
 }
 
-# flap_path_a <down-s> <period-s> <rate> <netem> — blackhole path A for
-# <down-s> out of every <period-s> (a carrier dropout / handover), first
-# outage <period-s minus down-s> in. Runs until killed; the caller restores
-# path A with set_path_a, since a kill can land inside an outage.
+# flap_path_a <down-s> <period-s> <duration-s> <rate> <netem> — blackhole
+# path A for <down-s> out of every <period-s> (a carrier dropout / handover),
+# first outage <period-s minus down-s> in, for as many whole periods as fit
+# in <duration-s>. Returns with path A restored, so the caller waits for it
+# instead of killing it: a kill would orphan an in-flight tc that could
+# re-apply the outage after the caller's restore. Nonzero on any tc failure,
+# possibly mid-outage.
 flap_path_a() {
-    local down="$1" period="$2" rate="$3" netem="$4"
-    while :; do
+    local down="$1" period="$2" duration="$3" rate="$4" netem="$5" t
+    for (( t = period; t <= duration; t += period )); do
         sleep $((period - down))
-        set_path_a "$rate" "loss 100%"
+        set_path_a "$rate" "loss 100%" || return 1
         sleep "$down"
-        set_path_a "$rate" "$netem"
+        set_path_a "$rate" "$netem" || return 1
     done
 }
 

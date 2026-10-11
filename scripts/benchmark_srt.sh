@@ -14,7 +14,8 @@
 # datagram on both paths) configurations at a rate that fits the slower
 # path: arms mq-<scheduler>-<reinjection>, default
 # "mq-wlb-off mq-wlb-dgram mq-minrtt-dgram" (override with SRT_BENCH_ARMS),
-# conditions R1-R4 (see the end of main).
+# conditions R1-R4 (see the end of main). The server scheduler stays wlb
+# (the default a shared server runs), so only the client's choice varies.
 # Metric: unique stream loss = (pktSentUnique - pktRecvUnique) / pktSentUnique
 #         Receiver-side drop alone is NOT arm-comparable: loss can migrate
 #         to sender-side TLPKTDROP (pktSndDrop), and a bufferbloated arm can
@@ -89,7 +90,9 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
     if [ -n "$FLAP_PID" ]; then
+        # An orphaned in-flight tc is harmless here: the netns goes below.
         kill "$FLAP_PID" 2>/dev/null || true
+        wait "$FLAP_PID" 2>/dev/null || true
     fi
     if [ -n "$RECEIVER_PID" ]; then
         kill "$RECEIVER_PID" 2>/dev/null || true
@@ -153,16 +156,18 @@ run_srt() {
         return 1
     fi
 
+    # Errexit is off in here (run_arm calls `if ! run_srt`), so every
+    # step below that can fail is checked explicitly.
     # FLAP="<down-s> <period-s>" (set per condition) blackholes path A
     # periodically while the sender runs.
     if [ -n "${FLAP:-}" ]; then
         # shellcheck disable=SC2086  # FLAP is two words by design
-        flap_path_a $FLAP "$COND_RATE_A" "$COND_NETEM_A" &
+        flap_path_a $FLAP "$DURATION" "$COND_RATE_A" "$COND_NETEM_A" &
         FLAP_PID=$!
     fi
-    local rxa0 rxb0
-    rxa0=$(rx_bytes bench-a1)
-    rxb0=$(rx_bytes bench-b1)
+    local rxa0 rxb0 rxa1 rxb1
+    rxa0=$(rx_bytes bench-a1) || rxa0=""
+    rxb0=$(rx_bytes bench-b1) || rxb0=""
 
     # Bounded sender: a hung SRT connection must not stall the whole matrix.
     # --kill-after covers a child that ignores TERM. srt-xtransmit exits 0 on
@@ -175,14 +180,13 @@ run_srt() {
         --statsfile "${raw}/${run_id}.snd.csv" --statsfreq 100ms \
         > "${WORK_DIR}/${run_id}.snd.log" 2>&1 || true
 
+    local flap_rc=0
     if [ -n "$FLAP_PID" ]; then
-        kill "$FLAP_PID" 2>/dev/null || true
-        wait "$FLAP_PID" 2>/dev/null || true
+        wait "$FLAP_PID" || flap_rc=$?
         FLAP_PID=""
-        set_path_a "$COND_RATE_A" "$COND_NETEM_A"
     fi
-    RUN_RXA_MB=$(( ($(rx_bytes bench-a1) - rxa0) / 1000000 ))
-    RUN_RXB_MB=$(( ($(rx_bytes bench-b1) - rxb0) / 1000000 ))
+    rxa1=$(rx_bytes bench-a1) || rxa1=""
+    rxb1=$(rx_bytes bench-b1) || rxb1=""
 
     sleep 2   # let late packets land and final stats flush
     # INT → poll → KILL, same as kill_vpn/video_run: a wedged receiver with
@@ -195,6 +199,25 @@ run_srt() {
     kill -9 "$RECEIVER_PID" 2>/dev/null || true
     wait "$RECEIVER_PID" 2>/dev/null || true
     RECEIVER_PID=""
+
+    if [ "$flap_rc" -ne 0 ]; then
+        echo "    ERROR: path A outage loop failed (rc=${flap_rc}) for ${run_id}"
+        # It can fail mid-outage; later arms must not inherit a dead path A.
+        if ! set_path_a "$COND_RATE_A" "$COND_NETEM_A"; then
+            echo "    FATAL: cannot restore path A shaping"
+            exit 1
+        fi
+        rm -f "${raw}/${run_id}.rcv.csv" "${raw}/${run_id}.snd.csv"
+        return 1
+    fi
+    if ! [[ "$rxa0" =~ ^[0-9]+$ && "$rxb0" =~ ^[0-9]+$ && \
+            "$rxa1" =~ ^[0-9]+$ && "$rxb1" =~ ^[0-9]+$ ]]; then
+        echo "    ERROR: rx_bytes read failed for ${run_id} (a0='${rxa0}' b0='${rxb0}' a1='${rxa1}' b1='${rxb1}')"
+        rm -f "${raw}/${run_id}.rcv.csv" "${raw}/${run_id}.snd.csv"
+        return 1
+    fi
+    RUN_RXA_MB=$(( (rxa1 - rxa0) / 1000000 ))
+    RUN_RXB_MB=$(( (rxb1 - rxb0) / 1000000 ))
 
     if [ ! -s "${raw}/${run_id}.snd.csv" ] || [ ! -s "${raw}/${run_id}.rcv.csv" ]; then
         echo "    ERROR: missing/empty stats CSV for ${run_id} (logs in ${WORK_DIR})"
@@ -238,7 +261,8 @@ arm_setup() {
         mq-*)
             # mq-<scheduler>-<reinjection>; scheduler names contain no '-'
             local spec="${1#mq-}"
-            VPN_REINJ="${spec#*-}" run_vpn "${spec%%-*}" bench-a0 bench-b0
+            VPN_SERVER_SCHED=wlb VPN_REINJ="${spec#*-}" \
+                run_vpn "${spec%%-*}" bench-a0 bench-b0
             ;;
     esac
 }
@@ -466,7 +490,7 @@ SUMMARY="${OUT_DIR}/summary.md"
         echo "- send rates: P1/C3/C4 = 25 Mbps, P2 = 120 Mbps (sender maxbw=0, inputbw=rate, oheadbw=25)"
         echo "- C3 gemodel: ${GEMODEL}"
     else
-        echo "- suite redundant: send rate ${RED_RATE} Mbps (sender maxbw=0, inputbw=rate, oheadbw=25), reinjection on the client only"
+        echo "- suite redundant: send rate ${RED_RATE} Mbps (sender maxbw=0, inputbw=rate, oheadbw=25), reinjection on the client only, server scheduler wlb"
         echo "- rxA/rxB: MB the server received per path during the send (uplink wire bytes, all traffic)"
     fi
     for c in "${!COND_LOSS_NOTE[@]}"; do
