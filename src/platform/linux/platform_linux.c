@@ -131,7 +131,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Set up routes, killswitch, DNS.
      *
-     * no_routes=true skips setup_routes() entirely. TUN is still
+     * manage_routes=false (ManageRoutes=false, or no_routes: --no-routes /
+     * NoRoutes) skips setup_routes() entirely. TUN is still
      * created + addressed + UP and the kernel auto-adds the connected
      * route for the tunnel subnet (e.g. 10.0.0.0/24 dev mqvpn0).
      *
@@ -141,14 +142,18 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
      * the existing default route — the integrator must add `ip route`
      * / `ip rule` externally (router/embedded use case). killswitch
      * and DNS overrides remain independently controllable.
+     *
+     * Cleanup is not gated on the knobs: cleanup_routes() removes exactly
+     * what a successful setup_routes() installed (routing_configured).
      */
-    if (!p->no_routes) {
+    if (p->manage_routes) {
         if (setup_routes(p) < 0) {
             LOG_ERR("route setup failed, aborting tunnel");
             goto fail;
         }
     } else {
-        LOG_INF("no_routes=true: host routing table left untouched");
+        LOG_INF("%s: host routing table left untouched",
+                p->no_routes ? "no_routes=true" : "manage_routes=off");
     }
     /* The kill switch block itself has been up since startup; only the
      * ACCEPT for this TUN follows the tunnel. */
@@ -198,7 +203,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
 fail:
     killswitch_tun_down(p); /* the block stays until the process exits */
-    if (p->manage_routes) cleanup_routes(p);
+    cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
@@ -272,7 +277,7 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
         /* Kill switch: only the TUN ACCEPT goes; the block stays through
          * the reconnect and is removed at final shutdown. */
         killswitch_tun_down(p);
-        if (p->manage_routes) cleanup_routes(p);
+        cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
             if (p->ev_tun) {
@@ -474,7 +479,7 @@ tun_fatal_error(platform_ctx_t *p)
         p->ev_tun = NULL;
     }
     killswitch_tun_down(p);
-    if (p->manage_routes) cleanup_routes(p);
+    cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
@@ -796,9 +801,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.route_via_server = cfg->route_via_server;
     ctx.no_routes = cfg->no_routes;
-    /* Either knob can suppress route management: dev's no_routes (CLI
-     * --no-routes / INI NoRoutes) and main's manage_routes (currently
-     * always 1 — no config surface of its own yet, see mqvpn_config_defaults). */
+    /* Either knob suppresses route management: no_routes (CLI --no-routes /
+     * INI NoRoutes) and manage_routes (ManageRoutes / --no-manage-routes). */
     ctx.manage_routes = cfg->manage_routes && !cfg->no_routes;
     ctx.udp_gro = cfg->udp_gro;
     ctx.udp_gso = cfg->udp_gso;
@@ -1036,7 +1040,7 @@ cleanup:
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
     if (ctx.killswitch_enabled) killswitch_flush_stale();
-    if (ctx.manage_routes) cleanup_routes(&ctx);
+    cleanup_routes(&ctx);
     mqvpn_dns_restore(&ctx.dns);
 
     if (ctx.tun_up) {

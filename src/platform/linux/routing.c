@@ -6,8 +6,12 @@
  *
  * Manages ip route commands for VPN split tunneling:
  *   - Pin server route via original gateway
- *   - Catch-all 0.0.0.0/1 + 128.0.0.0/1 via TUN
+ *   - Catch-all 0.0.0.0/1 + 128.0.0.0/1 via TUN (RouteViaServer: with the
+ *     server's tunnel address as gateway)
  *   - IPv6 catch-all ::/1 + 8000::/1 via TUN
+ *
+ * The catch-alls are more specific than any default route, so the host's
+ * own default routes are never replaced and need no restore.
  */
 
 #include "platform_internal.h"
@@ -23,6 +27,10 @@
 
 #define ROUTE_DISCOVER_MAX_ATTEMPTS 6
 #define ROUTE_DISCOVER_RETRY_DELAY_SEC 1
+/* Once routes were set up once, the policy routes the startup retries wait
+ * for exist: a reconnect retries discovery once, blocking the event loop
+ * for at most one retry delay instead of five. */
+#define ROUTE_DISCOVER_MAX_ATTEMPTS_RECONNECT 2
 
 /* Search PATH for the 'ip' binary first, then fall back to known absolute
  * paths: on some distributions /usr/sbin is not in root's PATH under sudo.
@@ -54,9 +62,12 @@ run_ip_cmd(const char *const argv[])
     return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
 }
 
+/* `ip route get <server_ip> [oif <oif>]`: the kernel's own route lookup
+ * (policy rules included), so it also resolves through less specific routes
+ * such as a multipath default. */
 static int
-discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_len,
-               char *iface, size_t if_len)
+discover_route(const char *server_ip, sa_family_t af, const char *oif, char *gateway,
+               size_t gw_len, char *iface, size_t if_len)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
@@ -69,12 +80,14 @@ discover_route(const char *server_ip, sa_family_t af, char *gateway, size_t gw_l
     }
 
     if (pid == 0) {
-        const char *const a4[] = {"ip", "-4", "route", "get", server_ip, NULL};
-        const char *const a6[] = {"ip", "-6", "route", "get", server_ip, NULL};
+        const char *argv[] = {"ip",      (af == AF_INET6) ? "-6" : "-4",
+                              "route",   "get",
+                              server_ip, oif ? "oif" : NULL,
+                              oif,       NULL};
         close(fds[0]);
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
-        exec_ip((char *const *)((af == AF_INET6) ? a6 : a4));
+        exec_ip((char *const *)argv);
         _exit(127);
     }
 
@@ -282,11 +295,13 @@ setup_routes(platform_ctx_t *p)
         const char *first_iface =
             (p->n_paths > 0 && p->paths[0].iface[0]) ? p->paths[0].iface : NULL;
         int route_ok = 0;
+        int max_attempts = p->routing_set_up_once ? ROUTE_DISCOVER_MAX_ATTEMPTS_RECONNECT
+                                                  : ROUTE_DISCOVER_MAX_ATTEMPTS;
 
-        for (int attempt = 1; attempt <= ROUTE_DISCOVER_MAX_ATTEMPTS; attempt++) {
-            if (discover_route(p->server_ip_str, af,
-                               p->orig_gateway, sizeof(p->orig_gateway),
-                               p->orig_iface,   sizeof(p->orig_iface)) == 0) {
+        for (int attempt = 1; attempt <= max_attempts; attempt++) {
+            if (discover_route(p->server_ip_str, af, NULL, p->orig_gateway,
+                               sizeof(p->orig_gateway), p->orig_iface,
+                               sizeof(p->orig_iface)) == 0) {
                 route_ok = 1;
                 break;
             }
@@ -305,10 +320,24 @@ setup_routes(platform_ctx_t *p)
                 break;
             }
 
-            if (attempt < ROUTE_DISCOVER_MAX_ATTEMPTS) {
+            /* `show` only matches a route whose prefix is exactly the
+             * server address. Without one (e.g. the server is reached
+             * through a multipath default), ask the kernel for the route
+             * out of the first path's interface. */
+            if (first_iface &&
+                discover_route(p->server_ip_str, af, first_iface, p->orig_gateway,
+                               sizeof(p->orig_gateway), p->orig_iface,
+                               sizeof(p->orig_iface)) == 0) {
+                LOG_INF("route lookup fallback via first path %s: gw=%s", p->orig_iface,
+                        p->orig_gateway[0] ? p->orig_gateway : "on-link");
+                route_ok = 1;
+                break;
+            }
+
+            if (attempt < max_attempts) {
                 LOG_WRN("route discovery attempt %d/%d failed for %s, retrying in %ds",
-                        attempt, ROUTE_DISCOVER_MAX_ATTEMPTS,
-                        p->server_ip_str, ROUTE_DISCOVER_RETRY_DELAY_SEC);
+                        attempt, max_attempts, p->server_ip_str,
+                        ROUTE_DISCOVER_RETRY_DELAY_SEC);
                 sleep(ROUTE_DISCOVER_RETRY_DELAY_SEC);
             }
         }
@@ -351,35 +380,24 @@ setup_routes(platform_ctx_t *p)
                 p->orig_iface);
     }
 
-    if (p->route_via_server) {
-        /* Remove any stale /1 catch-all routes left by a previous session that
-         * ran without route_via_server (e.g. crash or config change). */
-        const char *const del_low[]  = {"ip", "route", "del", "0.0.0.0/1",
-                                        "dev", p->tun.name, NULL};
-        const char *const del_high[] = {"ip", "route", "del", "128.0.0.0/1",
-                                        "dev", p->tun.name, NULL};
-        (void)run_ip_cmd(del_low);
-        (void)run_ip_cmd(del_high);
-
-        const char *const dflt[] = {"ip",  "route",           "replace", "default",
-                                    "via", p->server_tunnel_ip, "dev", p->tun.name, NULL};
-        if (run_ip_cmd(dflt) < 0) {
-            LOG_WRN("failed to set default route via %s on %s", p->server_tunnel_ip,
-                    p->tun.name);
-            if (p->orig_gateway[0]) {
-                const char *u[] = {"ip",  ip_flag,         "route", "del",         host_cidr,
-                                   "via", p->orig_gateway, "dev",   p->orig_iface, NULL};
-                (void)run_ip_cmd(u);
-            }
-            return -1;
-        }
-    } else {
-        const char *const low[] = {"ip",  "route",     "replace", "0.0.0.0/1",
-                                   "dev", p->tun.name, NULL};
-        const char *const high[] = {"ip",  "route",     "replace", "128.0.0.0/1",
-                                    "dev", p->tun.name, NULL};
+    {
+        /* RouteViaServer: the same catch-alls, with the server's tunnel
+         * address as gateway. They used to be a `default` route replaced in
+         * the main table, which destroyed the host's own metric-0 default
+         * and was never restored. */
+        const char *gw =
+            (p->route_via_server && p->server_tunnel_ip[0]) ? p->server_tunnel_ip : NULL;
+        const char *const low[] = {"ip",  "route",     "replace",         "0.0.0.0/1",
+                                   "dev", p->tun.name, gw ? "via" : NULL, gw,
+                                   NULL};
+        const char *const high[] = {"ip",  "route",     "replace",         "128.0.0.0/1",
+                                    "dev", p->tun.name, gw ? "via" : NULL, gw,
+                                    NULL};
         if (run_ip_cmd(low) < 0 || run_ip_cmd(high) < 0) {
-            LOG_WRN("failed to set catch-all routes via %s", p->tun.name);
+            if (gw)
+                LOG_WRN("failed to set catch-all routes via %s on %s", gw, p->tun.name);
+            else
+                LOG_WRN("failed to set catch-all routes via %s", p->tun.name);
             const char *u1[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
             const char *u2[] = {"ip",  "route",     "del", "128.0.0.0/1",
                                 "dev", p->tun.name, NULL};
@@ -394,6 +412,7 @@ setup_routes(platform_ctx_t *p)
         }
     }
     p->routing_configured = 1;
+    p->routing_set_up_once = 1;
 
     /* IPv6 catch-all routes */
     if (p->has_v6) {
@@ -436,12 +455,8 @@ cleanup_routes(platform_ctx_t *p)
         p->routing6_configured = 0;
     }
 
-    /* Always attempt to remove all possible route types so that stale routes
-     * from a previous session (crash or config change) are fully cleaned up. */
-    const char *dd[]  = {"ip", "route", "del", "default",    "dev", p->tun.name, NULL};
     const char *d3[]  = {"ip", "route", "del", "0.0.0.0/1",  "dev", p->tun.name, NULL};
-    const char *d4[]  = {"ip", "route", "del", "128.0.0.0/1","dev", p->tun.name, NULL};
-    (void)run_ip_cmd(dd);
+    const char *d4[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
     (void)run_ip_cmd(d3);
     (void)run_ip_cmd(d4);
 

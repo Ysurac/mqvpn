@@ -13,7 +13,9 @@
  * $MQVPN_FAKE_IP_ROUTE_GET_FILE ("via <gw> dev <if>" for the gatewayed
  * case, "dev <if>" only for on-link). With $MQVPN_FAKE_IP_SPLIT_DELAY set,
  * the fake writes that output one line per write(), pausing that many
- * seconds between lines (see test_discovery_two_writes).
+ * seconds between lines (see test_discovery_two_writes). A lookup with
+ * `oif <if>` prints $MQVPN_FAKE_IP_ROUTE_GET_OIF_FILE instead when that is
+ * set (see test_discovery_oif_fallback).
  */
 #include "platform_internal.h"
 #include "fake_cmd.h"
@@ -73,15 +75,20 @@ setup_fixture(fake_cmd_env_t *e)
     fake_cmd_install(e, "ip",
                      "case \"$*\" in\n"
                      "  *\"route get\"*)\n"
+                     "    f=\"$MQVPN_FAKE_IP_ROUTE_GET_FILE\"\n"
+                     "    case \"$*\" in *\" oif \"*)\n"
+                     "      [ -n \"$MQVPN_FAKE_IP_ROUTE_GET_OIF_FILE\" ] && "
+                     "f=\"$MQVPN_FAKE_IP_ROUTE_GET_OIF_FILE\" ;;\n"
+                     "    esac\n"
                      "    if [ -n \"$MQVPN_FAKE_IP_SPLIT_DELAY\" ]; then\n"
                      "      first=1\n"
                      "      while IFS= read -r l; do\n"
                      "        [ -n \"$first\" ] || sleep \"$MQVPN_FAKE_IP_SPLIT_DELAY\"\n"
                      "        first=\n"
                      "        printf '%s\\n' \"$l\"\n"
-                     "      done < \"$MQVPN_FAKE_IP_ROUTE_GET_FILE\"\n"
+                     "      done < \"$f\"\n"
                      "    else\n"
-                     "      cat \"$MQVPN_FAKE_IP_ROUTE_GET_FILE\"\n"
+                     "      cat \"$f\"\n"
                      "    fi\n"
                      "    ;;\n"
                      "esac");
@@ -515,6 +522,91 @@ test_discovery_two_writes(fake_cmd_env_t *e)
     cleanup_routes(&p);
 }
 
+/* ================================================================
+ * 6. RouteViaServer: catch-alls with the server's tunnel address as
+ *    gateway; the host's default route is never touched
+ * ================================================================ */
+static void
+test_route_via_server(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    set_route_get_output(e, "203.0.113.9 via 203.0.113.1 dev eth0 src 192.0.2.5 uid 0\n");
+
+    platform_ctx_t p;
+    init_ctx(&p);
+    p.route_via_server = 1;
+    snprintf(p.server_tunnel_ip, sizeof(p.server_tunnel_ip), "10.0.0.1");
+
+    int rc = setup_routes(&p);
+    ASSERT_EQ_INT(rc, 0, "via-server setup rc");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    const char *seq[] = {
+        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|route|replace|0.0.0.0/1|dev|mqvpn0|via|10.0.0.1",
+        "ip|route|replace|128.0.0.0/1|dev|mqvpn0|via|10.0.0.1",
+    };
+    assert_log_order(log, seq, 3, "via-server setup sequence");
+    ASSERT_TRUE(strstr(log, "default") == NULL,
+                "via-server: default route never touched");
+
+    fake_cmd_reset(e);
+    cleanup_routes(&p);
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "ip|route|del|0.0.0.0/1|dev|mqvpn0") != NULL,
+                "via-server cleanup deletes low catch-all");
+    ASSERT_TRUE(strstr(log, "ip|route|del|128.0.0.0/1|dev|mqvpn0") != NULL,
+                "via-server cleanup deletes high catch-all");
+    ASSERT_TRUE(strstr(log, "default") == NULL, "via-server cleanup: no default delete");
+}
+
+/* ================================================================
+ * 7. discovery through a less specific (multipath) route: plain `get`
+ *    answers with nexthops, `show <ip>` has no exact host route, so the
+ *    route out of the first path's interface is asked for
+ * ================================================================ */
+static void
+test_discovery_oif_fallback(fake_cmd_env_t *e)
+{
+    static char oif_file[FAKE_CMD_PATH_MAX];
+    fake_cmd_reset(e);
+    set_route_get_output(e, "203.0.113.9 proto static\n"
+                            "    nexthop via 192.0.2.1 dev eth0 weight 1\n"
+                            "    nexthop via 198.51.100.1 dev eth1 weight 1\n");
+    fake_cmd_write_content_file(
+        e, "ip_route_get_oif.txt",
+        "203.0.113.9 via 198.51.100.1 dev eth1 src 198.51.100.5\n", oif_file,
+        sizeof(oif_file));
+    setenv("MQVPN_FAKE_IP_ROUTE_GET_OIF_FILE", oif_file, 1);
+
+    platform_ctx_t p;
+    init_ctx(&p);
+    p.n_paths = 1;
+    snprintf(p.paths[0].iface, sizeof(p.paths[0].iface), "eth1");
+
+    int rc = setup_routes(&p);
+    ASSERT_EQ_INT(rc, 0, "oif-fallback rc");
+    ASSERT_TRUE(strcmp(p.orig_iface, "eth1") == 0,
+                "oif-fallback: orig_iface from oif lookup");
+    ASSERT_TRUE(strcmp(p.orig_gateway, "198.51.100.1") == 0,
+                "oif-fallback: orig_gateway from oif lookup");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    const char *seq[] = {
+        "ip|-4|route|get|203.0.113.9\n",
+        "ip|-4|route|show|203.0.113.9\n",
+        "ip|-4|route|get|203.0.113.9|oif|eth1",
+        "ip|-4|route|replace|203.0.113.9/32|via|198.51.100.1|dev|eth1",
+    };
+    assert_log_order(log, seq, 4, "oif-fallback discovery sequence");
+
+    unsetenv("MQVPN_FAKE_IP_ROUTE_GET_OIF_FILE");
+    fake_cmd_reset(e);
+    cleanup_routes(&p);
+}
+
 int
 main(void)
 {
@@ -536,6 +628,8 @@ main(void)
     test_discovery_failure(&e);
     test_discovery_no_dev_token(&e);
     test_discovery_two_writes(&e);
+    test_route_via_server(&e);
+    test_discovery_oif_fallback(&e);
 
     fake_cmd_env_cleanup(&e);
 

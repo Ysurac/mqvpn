@@ -105,8 +105,10 @@ struct platform_ctx {
     char server_host[256]; /* original hostname/IP string, re-resolved on reconnect */
 
     /* Split tunneling state */
-    int routing_configured;
+    int routing_configured; /* setup_routes() installed routes; cleanup_routes()
+                             * removes them (the only gate it needs) */
     int routing6_configured;
+    int routing_set_up_once; /* Linux: setup_routes() succeeded at least once */
     int manage_routes; /* 1=run setup_routes/cleanup_routes (default 1) */
 #if defined(__linux__)
     /* [Advanced] UdpGro — effective RX GRO mode. Config-derived state kept
