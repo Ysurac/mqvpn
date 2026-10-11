@@ -182,8 +182,10 @@ run_one(run_t *r, int ev, int ctx, int prefix)
     r->new_id = nondet_u64();
     __CPROVER_assume(r->new_id != 0 && r->new_id != r->pre.xqc_path_id);
     if (ev == OEV_STABLE_TICK) {
-        int reached =
-            (uint64_t)(r->now - r->pre.path_stable_since_us) >= PATH_STABLE_THRESHOLD_US;
+        /* A now before the anchor (a clock that stepped back) is BELOW, as
+         * in path_fsm_tick_confirm_stable: no unsigned wrap. */
+        int reached = r->now >= r->pre.path_stable_since_us &&
+                      r->now - r->pre.path_stable_since_us >= PATH_STABLE_THRESHOLD_US;
         __CPROVER_assume(reached == (ctx == OCTX_REACHED));
     }
 
