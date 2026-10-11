@@ -314,24 +314,23 @@ path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
  * after retry exhausted) would be silently suppressed as self-loops:
  * the state field would update but no transition log fires and
  * path_mark_state_entry never re-anchors the residence timer. */
-/* G-P15 (draft-21 §3.3 ¶6): when local lifecycle demotes ACTIVE↔STANDBY
- * or ACTIVE/STANDBY→DEGRADED, hand the new path class to the client
+/* G-P15 (draft-21 §3.3 ¶6): when local lifecycle moves a path between
+ * ACTIVE and STANDBY, hand the new path class to the client
  * (client_notify_xqc_path_state), which mirrors it onto the xquic conn for
- * a live path. Closing transitions (→ CLOSED_*) use xquic's path-abandon
- * path, not mark; we only fire on operational class changes.
+ * a live path.
  *   1 = XQC_APP_PATH_STATUS_STANDBY
  *   2 = XQC_APP_PATH_STATUS_AVAILABLE
- *   3 = XQC_APP_PATH_STATUS_FROZEN
- * Only 3 is reachable, on XQUIC_REMOVED, after apply_failure_with_retry_check
- * has cleared the slot: the client treats it as a no-op (see there). The
- * call itself is part of the FSM contract checked by the formal oracle. */
+ * No other transition notifies: closing transitions (→ CLOSED_*) go through
+ * xquic's path abandon, and →DEGRADED only happens for a path xquic already
+ * removed (XQUIC_REMOVED, with the slot cleared), so there is nothing to
+ * mark and draft-21 has no frame for it. No FSM event moves ACTIVE <->
+ * STANDBY today (a standby path is created standby), so the formal oracle
+ * pins that no event notifies at all. */
 static int
 g_p15_xqc_app_status_for(path_lifecycle_t from, path_lifecycle_t to)
 {
     if (from == PATH_LC_ACTIVE && to == PATH_LC_STANDBY) return 1;
     if (from == PATH_LC_STANDBY && to == PATH_LC_ACTIVE) return 2;
-    if ((from == PATH_LC_ACTIVE || from == PATH_LC_STANDBY) && to == PATH_LC_DEGRADED)
-        return 3;
     return 0; /* no xquic call for other transitions */
 }
 

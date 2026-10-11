@@ -530,18 +530,14 @@ path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
 
 /* G-P15 (draft-21 §3.3 ¶6): emit PATH_STATUS to peer when local lifecycle
  * moves a live path between classes. app_status is an internal relay code
- * from g_p15_xqc_app_status_for (1=standby, 2=available, 3=frozen) that this
- * switch decodes to the named xqc_conn_mark_path_* calls — the raw value is
- * never handed to xquic, so it is NOT an xquic-ABI value dependency.
+ * from g_p15_xqc_app_status_for (1=standby, 2=available) that this switch
+ * decodes to the named xqc_conn_mark_path_* calls — the raw value is never
+ * handed to xquic, so it is NOT an xquic-ABI value dependency.
  *
- * What actually reaches here today: only 3, from ACTIVE/STANDBY -> DEGRADED
- * on XQUIC_REMOVED, i.e. for a path xquic has already removed, with the slot
- * already cleared (not live, xqc_path_id 0). It must stay a no-op: acting on
- * it would target path 0, and FROZEN has no draft-21 PATH_STATUS frame
- * anyway (xquic refuses to encode it). No FSM event moves ACTIVE <-> STANDBY
- * (a standby path is created standby, see client_path_starts_standby), so 1
- * and 2 are kept only for the day one does. No-op as well without an engine
- * or connection. */
+ * Nothing reaches here today: no FSM event moves ACTIVE <-> STANDBY (a
+ * standby path is created standby, see client_path_starts_standby), so the
+ * two codes are kept for the day one does. No-op without an engine or
+ * connection, or for a path that is not live. */
 MQVPN_INTERNAL
 void
 client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_status)
@@ -553,7 +549,7 @@ client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_s
     switch (app_status) {
     case 1: xqc_conn_mark_path_standby(c->engine, cid, pid); break;
     case 2: xqc_conn_mark_path_available(c->engine, cid, pid); break;
-    default: break; /* 3 (FROZEN): see above */
+    default: break;
     }
 }
 

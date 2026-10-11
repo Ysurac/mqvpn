@@ -44,23 +44,19 @@ path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p)
 
 /* G-P15 (draft-21 §3.3 ¶6): mqvpn-side spy for xquic path-status glue.
  * client_notify_xqc_path_state is the new accessor that path_state_machine.c
- * calls from set_path_state_with_log to mirror local lifecycle demotions
- * onto the xquic conn via xqc_conn_mark_path_{standby,available,frozen}.
+ * calls from set_path_state_with_log to mirror local ACTIVE <-> STANDBY
+ * moves onto the xquic conn via xqc_conn_mark_path_{standby,available}.
  * The accessor is implemented in mqvpn_client.c (translates app_status to
- * the right xqc_conn_mark_path_* call); here we record invocations. */
+ * the right xqc_conn_mark_path_* call); here we count invocations. */
 static int g_p15_call_count;
-static int g_p15_last_app_status;
-static uint64_t g_p15_last_path_id;
-static int g_p15_last_live;
 void
 client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
                              int app_status)
 {
     (void)c;
+    (void)p;
+    (void)app_status;
     g_p15_call_count++;
-    g_p15_last_app_status = app_status;
-    g_p15_last_path_id = p->xqc_path_id;
-    g_p15_last_live = p->xquic_path_live;
 }
 
 /* A slot that still owes an ops.release(). Callers that need it to look
@@ -1043,13 +1039,12 @@ test_stable_clock_step_back_does_not_reset(void)
     assert(p.path_stable_since_us == 100ULL * 1000000);
 }
 
-/* G-P15: the one notification any FSM event really produces. A path xquic
- * removed (XQUIC_REMOVED) leaves ACTIVE or STANDBY for DEGRADED, and the FSM
- * hands app_status 3 (FROZEN) to client_notify_xqc_path_state — with the
- * slot already cleared (not live, id 0), which is why the client's
- * accessor must ignore it: acting would target path 0. */
+/* G-P15: a path xquic removed (XQUIC_REMOVED) leaves ACTIVE or STANDBY for
+ * DEGRADED with the slot already cleared (not live, id 0). There is nothing
+ * to mark on the xquic side (and no draft-21 frame for it), so the FSM must
+ * not call client_notify_xqc_path_state: acting would target path 0. */
 static void
-test_g_p15_xquic_removed_notifies_cleared_slot(void)
+test_g_p15_xquic_removed_does_not_notify(void)
 {
     for (int from_standby = 0; from_standby <= 1; from_standby++) {
         path_entry_t p = {0};
@@ -1062,14 +1057,11 @@ test_g_p15_xquic_removed_notifies_cleared_slot(void)
         p.state_entered_at_us = 100;
 
         g_p15_call_count = 0;
-        g_p15_last_path_id = 99;
         path_event_ctx_t ctx = {.now_us = 1000};
         path_on_event(NULL, &p, PATH_EVENT_XQUIC_REMOVED, &ctx);
         assert(p.state == PATH_LC_DEGRADED);
-        assert(g_p15_call_count == 1);
-        assert(g_p15_last_app_status == 3); /* FROZEN */
-        assert(g_p15_last_path_id == 0);    /* cleared before the notify */
-        assert(g_p15_last_live == 0);
+        assert(p.xqc_path_id == 0 && p.xquic_path_live == 0);
+        assert(g_p15_call_count == 0);
     }
 }
 
@@ -1126,8 +1118,8 @@ main(void)
     test_stable_reset_rearms_timer();
     test_stable_clock_step_back_does_not_reset();
     printf("  test_stable_reset_rearms_timer: OK\n");
-    test_g_p15_xquic_removed_notifies_cleared_slot();
-    printf("  test_g_p15_lifecycle_notifies_xquic: OK\n");
+    test_g_p15_xquic_removed_does_not_notify();
+    printf("  test_g_p15_xquic_removed_does_not_notify: OK\n");
     printf("PASS\n");
     return 0;
 }
