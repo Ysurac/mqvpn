@@ -345,7 +345,12 @@ if(NOT MSVC)
 endif()
 # mqvpn_shared (a SHARED target) links this static lib below — its objects
 # must be position-independent, same reason xquic-static is unusable there.
-set_target_properties(lwip_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Hidden visibility: lwIP is an implementation detail of the lane and must
+# not become part of libmqvpn's exported ABI (executables linking the
+# archive directly are unaffected).
+set_target_properties(lwip_core PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden)
 
 # Registered into the SAME shared list classifier.c (H1) already lives in.
 # Must happen here, before MQVPN_LIB_SOURCES is consumed by add_library()
@@ -827,6 +832,11 @@ target_include_directories(mqvpn_shared
 )
 # Shared lib needs shared xquic (static .a lacks -fPIC)
 target_link_libraries(mqvpn_shared xquic ${SSL_LIB} ${CRYPTO_LIB} pthread)
+# Export only the API: symbols pulled in from static archives (BoringSSL's
+# libssl/libcrypto, including the libstdc++ inline instantiations libssl
+# carries, and lwip_core) stay local. The debian/*.symbols file lists the
+# expected set.
+target_link_options(mqvpn_shared PRIVATE -Wl,--exclude-libs,ALL)
 if(MQVPN_HYBRID_TCP_LANE_BUILD)
     target_link_libraries(mqvpn_shared lwip_core)
     target_compile_definitions(mqvpn_shared PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
