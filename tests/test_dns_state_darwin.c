@@ -600,7 +600,12 @@ test_invalid_server_refused(fake_cmd_env_t *e)
     dns.backup_path = backup_path;
     dns.lock_path = lock_path;
     mqvpn_dns_add_server(&dns, "10.0.0.1");
-    mqvpn_dns_add_server(&dns, "Empty");
+    /* The shared add path already refuses a non-literal... */
+    ASSERT_EQ_INT(mqvpn_dns_add_server(&dns, "Empty"), -1, "invalid-server add refused");
+    ASSERT_EQ_INT(dns.n_servers, 1, "invalid-server not added");
+    /* ...and apply still refuses one placed in servers[] directly. */
+    snprintf(dns.servers[dns.n_servers], sizeof(dns.servers[0]), "%s", "Empty");
+    dns.n_servers++;
 
     ASSERT_EQ_INT(mqvpn_dns_apply(&dns), -1, "invalid-server rc");
     ASSERT_EQ_INT(dns.active, 0, "invalid-server not active");
