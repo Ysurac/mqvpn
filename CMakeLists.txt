@@ -40,6 +40,43 @@ elseif(ENABLE_MSAN)
     add_link_options(-fsanitize=memory)
 endif()
 
+# ---------- Binary hardening (Linux, GCC/Clang) ----------
+# Directory scope, so lwip_core and the tests get it too. Each flag is probed
+# first. PIE is not forced: current toolchains default to it, and forcing it
+# where they do not would break linking the non-PIC libxquic-static.a.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    include(CheckCCompilerFlag)
+    include(CheckCSourceCompiles)
+    check_c_compiler_flag(-fstack-protector-strong MQVPN_HAVE_STACK_PROTECTOR_STRONG)
+    if(MQVPN_HAVE_STACK_PROTECTOR_STRONG)
+        add_compile_options(-fstack-protector-strong)
+    endif()
+    # Probed as a link: CMAKE_REQUIRED_FLAGS reaches the link line.
+    set(CMAKE_REQUIRED_FLAGS "-Wl,-z,relro,-z,now")
+    check_c_source_compiles("int main(void) { return 0; }" MQVPN_HAVE_RELRO_NOW)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(MQVPN_HAVE_RELRO_NOW)
+        add_link_options(-Wl,-z,relro,-z,now)
+    endif()
+    # _FORTIFY_SOURCE needs optimization (glibc warns at -O0) and fights the
+    # sanitizers' interceptors, so optimized non-sanitizer builds only, and
+    # only when neither the compiler (Ubuntu/Gentoo GCC predefine it at -O)
+    # nor CMAKE_C_FLAGS (dpkg-buildflags) already sets a level: redefining it
+    # warns, and the distro's level may be higher.
+    set(CMAKE_REQUIRED_FLAGS "-O2")
+    check_c_source_compiles("
+#ifndef _FORTIFY_SOURCE
+#error not predefined
+#endif
+int main(void) { return 0; }" MQVPN_FORTIFY_ALREADY_SET)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(NOT MQVPN_FORTIFY_ALREADY_SET AND NOT ENABLE_SANITIZERS AND NOT ENABLE_MSAN
+       AND NOT MQVPN_ENABLE_FUZZING)
+        add_compile_definitions(
+            $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>:_FORTIFY_SOURCE=2>)
+    endif()
+endif()
+
 # ---------- xquic ----------
 # xquic has its own complex build system (SSL dependency, etc).
 # Two modes:
