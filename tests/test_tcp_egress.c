@@ -737,6 +737,7 @@ typedef struct {
                             * probe engine, so nothing the server sends is
                             * ever answered (keeps an H3 stream from ever
                             * finishing its close). */
+    int egress_registers;  /* egress_fd_register callback invocations */
     int freeze_egress;     /* 1: harness_pump dispatches no egress fd events,
                             * so a connect-tcp flow stays CONNECTING even
                             * once its loopback connect() has completed. */
@@ -753,6 +754,7 @@ harness_egress_fd_register(int fd, int want_read, int want_write, void *fd_ctx,
                            void *user_ctx)
 {
     harness_t *h = (harness_t *)user_ctx;
+    h->egress_registers++;
     for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
         if (h->egress_fds[i].active && h->egress_fds[i].fd == fd) {
             h->egress_fds[i].fd_ctx = fd_ctx;
@@ -3008,6 +3010,48 @@ TEST(mqvpn_tcp_reentrant_teardown_during_uplink_send)
     free(h.probe.raw_recv_buf);
 }
 
+/* svr_tcp_egress_update_fd_interest runs on every relay event; it must only
+ * call the platform's egress_fd_register when the interest changes. Steady
+ * echo traffic (readable events, want_read stays 1) re-registers nothing. */
+TEST(mqvpn_tcp_fd_interest_registered_only_on_change)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    int regs_before = h.egress_registers;
+    int dispatches_before = h.egress_dispatches;
+    size_t expect = 0;
+    for (int round = 0; round < 5; round++) {
+        ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)"ping", 4, 500),
+                  0);
+        expect += 4;
+        for (int i = 0; i < 250 && h.probe.raw_recv_len < expect; i++) {
+            int never = 0;
+            harness_pump_with_sink(&h, &sink, &never, 20);
+        }
+        ASSERT_EQ(h.probe.raw_recv_len, expect);
+    }
+    ASSERT_EQ(h.egress_dispatches > dispatches_before, 1); /* relay events ran */
+    ASSERT_EQ(h.egress_registers, regs_before);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
 TEST(errno_to_status_maps_known_codes)
 {
     ASSERT_EQ(svr_tcp_egress_errno_to_status(ECONNREFUSED), 502);
@@ -3718,6 +3762,7 @@ main(void)
     run_mqvpn_tcp_connecting_body_over_cap_resets();
     run_mqvpn_tcp_reentrant_teardown_during_200();
     run_mqvpn_tcp_reentrant_teardown_during_uplink_send();
+    run_mqvpn_tcp_fd_interest_registered_only_on_change();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();

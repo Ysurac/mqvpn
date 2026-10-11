@@ -653,6 +653,11 @@ typedef struct svr_tcp_egress_flow_s {
     unsigned depth;
     int doomed;
 
+    /* Interest last handed to svr_egress_fd_register (-1 = none yet), so
+     * svr_tcp_egress_update_fd_interest only calls into the platform when
+     * it actually changes — it runs on every relay event. */
+    int reg_want_read, reg_want_write;
+
     struct svr_tcp_egress_flow_s *prev, *next;
 } svr_tcp_egress_flow_t;
 
@@ -945,19 +950,24 @@ svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
 /* The ONE place fd interest is computed from flow state (per this task's
  * design note: hand-written (want_read, want_write) pairs at every call
  * site WILL drift). Safe to call liberally/redundantly — every caller here
- * only reaches it with `ef` still alive, and re-registering the same
- * interest twice is a harmless no-op reconfigure (platform_linux.c replaces
- * the libevent event in place). No-ops for a CONNECTING flow: that stage
- * manages its own single want_write=1 "connect signal" registration
- * directly (svr_tcp_egress_start_connect) and this helper must not
- * clobber it before the flow reaches ACTIVE. */
+ * only reaches it with `ef` still alive, and an unchanged interest is not
+ * re-registered (reg_want_read/reg_want_write cache the last one). No-ops for a
+ * CONNECTING flow: that stage manages its own single want_write=1 "connect signal"
+ * registration directly (svr_tcp_egress_start_connect) and this helper must not clobber
+ * it before the flow reaches ACTIVE. */
 static void
 svr_tcp_egress_update_fd_interest(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     if (ef->state != EGRESS_FLOW_ACTIVE) return;
     int want_write = ef->downlink_paused ? 1 : 0;
     int want_read = (!ef->uplink_withheld && !ef->egress_eof_seen) ? 1 : 0;
-    (void)svr_egress_fd_register(server, ef->fd, want_read, want_write, ef);
+    if (want_read == ef->reg_want_read && want_write == ef->reg_want_write) return;
+    if (svr_egress_fd_register(server, ef->fd, want_read, want_write, ef) == 0) {
+        ef->reg_want_read = want_read;
+        ef->reg_want_write = want_write;
+    } else {
+        ef->reg_want_read = ef->reg_want_write = -1; /* retry on the next call */
+    }
 }
 
 /* Issue the deferred TX half-close once it's actually safe to: the client's
@@ -1457,6 +1467,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     ef->h3_request = h3_request;
     ef->stream = stream;
     ef->state = EGRESS_FLOW_CONNECTING;
+    ef->reg_want_read = ef->reg_want_write = -1;
     ef->connect_deadline_us =
         svr_now_us() + (uint64_t)ctx.tcp_connect_timeout_sec * 1000000ULL;
     /* Meaningless until ACTIVE (svr_tcp_egress_on_connected re-latches it to
@@ -1498,8 +1509,11 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
         return 0;
     }
 
-    if (svr_egress_fd_register(server, fd, 0, 1 /* want_write = connect signal */, ef) !=
+    if (svr_egress_fd_register(server, fd, 0, 1 /* want_write = connect signal */, ef) ==
         0) {
+        ef->reg_want_read = 0;
+        ef->reg_want_write = 1;
+    } else {
         TLOG_W(server,
                "egress_fd_register callback unset — connect-tcp flow will stall "
                "until the connect timeout fires (user=%s)",
