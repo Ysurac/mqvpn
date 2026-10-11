@@ -163,8 +163,8 @@ int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
  * guaranteed non-match), not a NULL pointer. Returns 1 = allowed, 0 =
  * denied. Family-aware: family == 4 walks DEFAULT_DENY_V4, family == 6
  * walks DEFAULT_DENY_V6 (loopback/link-local/ULA/multicast/unspecified/
- * v4-mapped) — the array AND its element count are selected together from
- * the same branch (see the comment at the selection site), so a v6 call
+ * v4-mapped/Teredo/NAT64 local-use) — the array AND its element count are selected
+ * together from the same branch (see the comment at the selection site), so a v6 call
  * never partially reuses the v4 table.
  *
  * Evaluation order (do not reorder without updating the docstring AND the
@@ -175,9 +175,17 @@ int svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
  *      link-local/CGNAT/multicast/broadcast for v4; loopback/link-local/
  *      ULA/multicast/unspecified/v4-mapped for v6)
  *   4. egress_deny     -> extra blocks past the built-in set
- *   5. default allow — this is a general-purpose egress proxy, not a
+ *   5. IPv6 forms carrying an IPv4 destination at a fixed position (NAT64
+ *      64:ff9b::/96, 6to4 2002::/16) -> the embedded IPv4 address goes
+ *      through steps 2-4 as family 4 (Teredo 2001::/32 and NAT64 local-use
+ *      64:ff9b:1::/48 are in the step-3 table outright)
+ *   6. default allow — this is a general-purpose egress proxy, not a
  *      walled garden; only enumerated private/special ranges are blocked
- *      by default. */
+ *      by default.
+ * The server-bound wrapper (svr_tcp_egress_acl_allowed) additionally
+ * denies the v4 tunnel subnet for an embedded IPv4 address, and any of the
+ * server's own interface addresses (direct or embedded) that no
+ * egress_allow entry covers. */
 int svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
                               const mqvpn_cidr_entry_t *allow, int n_allow,
                               const mqvpn_cidr_entry_t *deny, int n_deny,

@@ -3486,6 +3486,104 @@ TEST(get_egress_policy_v6_tunnel_set_when_subnet6_configured)
 
 /* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
 
+/* Translated / tunnelled IPv6 forms that reach an IPv4 destination are
+ * judged by that IPv4 address (NAT64 well-known prefix, 6to4), or blocked
+ * outright where it cannot be recovered (Teredo, NAT64 local-use). */
+static int
+acl_v6_literal(const char *literal, const mqvpn_cidr_entry_t *allow, int n_allow)
+{
+    uint8_t addr[16];
+    ipv6_addr(literal, addr);
+    return svr_tcp_egress_acl_decide(6, addr, allow, n_allow, NULL, 0,
+                                     &NEUTRAL_TUNNEL_V6);
+}
+
+TEST(acl_v6_embedded_v4_forms)
+{
+    ASSERT_EQ(acl_v6_literal("64:ff9b::7f00:1", NULL, 0), 0);    /* NAT64 -> 127.0.0.1 */
+    ASSERT_EQ(acl_v6_literal("64:ff9b::a00:5", NULL, 0), 0);     /* NAT64 -> 10.0.0.5 */
+    ASSERT_EQ(acl_v6_literal("64:ff9b::a9fe:a9fe", NULL, 0), 0); /* -> 169.254.169.254 */
+    ASSERT_EQ(acl_v6_literal("64:ff9b::808:808", NULL, 0), 1);   /* -> 8.8.8.8 */
+    ASSERT_EQ(acl_v6_literal("2002:7f00:1::1", NULL, 0), 0);     /* 6to4 -> 127.0.0.1 */
+    ASSERT_EQ(acl_v6_literal("2002:c0a8:101::1", NULL, 0), 0);   /* 6to4 -> 192.168.1.1 */
+    ASSERT_EQ(acl_v6_literal("2002:808:808::1", NULL, 0), 1);    /* 6to4 -> 8.8.8.8 */
+    ASSERT_EQ(acl_v6_literal("2001:0:4136:e378:8000:63bf:3fff:fdd2", NULL, 0),
+              0);                                                /* Teredo */
+    ASSERT_EQ(acl_v6_literal("64:ff9b:1::808:808", NULL, 0), 0); /* NAT64 local-use */
+
+    /* An EgressAllow entry for the embedded IPv4 range (or the v6 form
+     * itself) punches the hole, like for the direct form. */
+    mqvpn_cidr_entry_t allow4 = {4, 8, {10}};
+    ASSERT_EQ(acl_v6_literal("64:ff9b::a00:5", &allow4, 1), 1);
+    mqvpn_cidr_entry_t allow6 = {6, 32, {0x20, 0x01, 0x00, 0x00}};
+    ASSERT_EQ(acl_v6_literal("2001:0:4136:e378:8000:63bf:3fff:fdd2", &allow6, 1), 1);
+}
+
+/* The server's own interface addresses are denied unless EgressAllow
+ * covers them. The process-wide cache is seeded with a TEST-NET address
+ * standing in for a public interface address, so the default table alone
+ * would allow it. */
+static void
+harness_cfg_allow_198_51_100_7_short_timeout(mqvpn_config_t *cfg)
+{
+    const char *allow[] = {"198.51.100.7/32"};
+    if (mqvpn_config_set_hybrid_egress_acl(cfg, allow, 1, NULL, 0) != MQVPN_OK ||
+        mqvpn_config_set_hybrid_connect_timeout(cfg, 1) != MQVPN_OK) {
+        printf("FAIL\n    hybrid egress config rejected valid input\n");
+        exit(1);
+    }
+}
+
+static void
+seed_local_addr_198_51_100_7(void)
+{
+    memset(s_local_addrs, 0, sizeof(s_local_addrs));
+    s_local_addrs[0].family = 4;
+    s_local_addrs[0].addr[0] = 198;
+    s_local_addrs[0].addr[1] = 51;
+    s_local_addrs[0].addr[2] = 100;
+    s_local_addrs[0].addr[3] = 7;
+    s_n_local_addrs = 1;
+    s_local_addrs_loaded = 1;
+    s_local_addrs_at_us = svr_now_us(); /* fresh: no refresh during the test */
+}
+
+TEST(mqvpn_tcp_own_interface_address_denied)
+{
+    seed_local_addr_198_51_100_7();
+    char status[16] = {0};
+    ASSERT_EQ(run_dispatch_probe_with_path("mqvpn-tcp", 9,
+                                           "/.well-known/mqvpn/tcp/198.51.100.7/80/",
+                                           NULL, status, sizeof(status)),
+              0);
+    ASSERT_STREQ(status, "403");
+    /* The NAT64 form of the same address. */
+    seed_local_addr_198_51_100_7();
+    status[0] = '\0';
+    ASSERT_EQ(run_dispatch_probe_with_path(
+                  "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/64:ff9b::c633:6407/80/", NULL,
+                  status, sizeof(status)),
+              0);
+    ASSERT_STREQ(status, "403");
+
+    /* Covered by EgressAllow: the ACL lets it through to a real connect
+     * (which then fails or times out — anything but the 403). */
+    seed_local_addr_198_51_100_7();
+    status[0] = '\0';
+    ASSERT_EQ(run_dispatch_probe_with_path(
+                  "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/198.51.100.7/80/",
+                  harness_cfg_allow_198_51_100_7_short_timeout, status, sizeof(status)),
+              0);
+    ASSERT_EQ(strcmp(status, "403") != 0, 1);
+
+    /* Back to the real interface list. */
+    s_local_addrs_loaded = 0;
+    uint8_t lo[16] = {127, 0, 0, 1};
+    ASSERT_EQ(svr_tcp_egress_is_local_addr(4, lo), 1);
+    uint8_t testnet[16] = {192, 0, 2, 1};
+    ASSERT_EQ(svr_tcp_egress_is_local_addr(4, testnet), 0);
+}
+
 TEST(parse_path_accepts_valid)
 {
     const char *path = "/.well-known/mqvpn/tcp/192.168.1.1/8080/";
@@ -3651,6 +3749,8 @@ main(void)
     run_acl_v6_ungated_prefix0_would_deny_all_regression();
     run_get_egress_policy_v6_tunnel_unset_without_subnet6();
     run_get_egress_policy_v6_tunnel_set_when_subnet6_configured();
+    run_acl_v6_embedded_v4_forms();
+    run_mqvpn_tcp_own_interface_address_denied();
     run_parse_path_accepts_valid();
     run_parse_path_rejects_oversized_host();
     run_parse_path_rejects_missing_port();

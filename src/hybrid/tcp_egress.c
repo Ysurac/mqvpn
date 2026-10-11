@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -222,7 +223,109 @@ static const mqvpn_cidr_entry_t DEFAULT_DENY_V6[] = {
      * defense-in-depth) in exactly that case, and fails closed — see its
      * comment. */
     {6, 96, {[10] = 0xff, [11] = 0xff}},
+    /* Teredo 2001::/32 (RFC 4380): tunnels to an IPv4 relay/peer whose
+     * address is only recoverable obfuscated from the suffix — no sane
+     * connect-tcp target, so blocked outright rather than decoded. */
+    {6, 32, {0x20, 0x01}},
+    /* NAT64 local-use 64:ff9b:1::/48 (RFC 8215): the embedded IPv4
+     * position depends on an operator-chosen prefix length, so it cannot
+     * be checked against DEFAULT_DENY_V4 — blocked outright. The
+     * well-known 64:ff9b::/96 and 6to4 2002::/16 carry the IPv4 address
+     * at a fixed position and are checked through it instead
+     * (svr_tcp_egress_embedded_v4). */
+    {6, 48, {0x00, 0x64, 0xff, 0x9b, 0x00, 0x01}},
 };
+
+/* IPv6 forms that carry an IPv4 destination at a fixed position and reach
+ * it through a translator or relay: the NAT64 well-known prefix
+ * 64:ff9b::/96 (RFC 6052, address in the last 32 bits) and 6to4
+ * 2002::/16 (RFC 3056, address in bits 16..47). Evaluating only the IPv6
+ * form would let e.g. 64:ff9b::7f00:1 or 2002:7f00:1:: reach 127.0.0.1 on a
+ * server with such a translator on its path. Returns 1 and fills `v4` (4
+ * bytes, network order) for those forms, 0 otherwise. */
+static int
+svr_tcp_egress_embedded_v4(const uint8_t addr[16], uint8_t v4[4])
+{
+    static const uint8_t nat64_wkp[12] = {0x00, 0x64, 0xff, 0x9b};
+    if (memcmp(addr, nat64_wkp, sizeof(nat64_wkp)) == 0) {
+        memcpy(v4, addr + 12, 4);
+        return 1;
+    }
+    if (addr[0] == 0x20 && addr[1] == 0x02) {
+        memcpy(v4, addr + 2, 4);
+        return 1;
+    }
+    return 0;
+}
+
+/* ── The server's own addresses ──
+ *
+ * A destination equal to one of the server's own interface addresses
+ * reaches services listening on the server itself (its control API bound
+ * to a public address, an admin panel, ...) — the classic SSRF target that
+ * the private-range table cannot catch for a public address. Such targets
+ * are denied unless an EgressAllow entry covers them. The list comes from
+ * getifaddrs(), cached process-wide and refreshed at most every
+ * TCP_EGRESS_LOCAL_ADDR_REFRESH_US on lookup, so an address added later
+ * (DHCP renew, a new IPv6 prefix) is picked up within that window. If
+ * getifaddrs() fails the previous list is kept. */
+#define TCP_EGRESS_LOCAL_ADDR_MAX        256
+#define TCP_EGRESS_LOCAL_ADDR_REFRESH_US (30ULL * 1000000ULL)
+
+typedef struct {
+    uint8_t family; /* 4 or 6 */
+    uint8_t addr[16];
+} svr_tcp_egress_local_addr_t;
+
+static svr_tcp_egress_local_addr_t s_local_addrs[TCP_EGRESS_LOCAL_ADDR_MAX];
+static int s_n_local_addrs;
+static int s_local_addrs_loaded;
+static uint64_t s_local_addrs_at_us;
+
+static void
+svr_tcp_egress_local_addrs_refresh(uint64_t now_us)
+{
+    struct ifaddrs *ifa_list = NULL;
+    s_local_addrs_at_us = now_us;
+    s_local_addrs_loaded = 1;
+    if (getifaddrs(&ifa_list) != 0) return; /* keep the previous list */
+    int n = 0;
+    for (struct ifaddrs *ifa = ifa_list; ifa && n < TCP_EGRESS_LOCAL_ADDR_MAX;
+         ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)ifa->ifa_addr;
+            memset(&s_local_addrs[n], 0, sizeof(s_local_addrs[n]));
+            s_local_addrs[n].family = 4;
+            memcpy(s_local_addrs[n].addr, &sin->sin_addr.s_addr, 4);
+            n++;
+        } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+            const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)ifa->ifa_addr;
+            s_local_addrs[n].family = 6;
+            memcpy(s_local_addrs[n].addr, sin6->sin6_addr.s6_addr, 16);
+            n++;
+        }
+    }
+    s_n_local_addrs = n;
+    freeifaddrs(ifa_list);
+}
+
+/* 1 if (family, addr) is one of the server's own interface addresses. */
+static int
+svr_tcp_egress_is_local_addr(uint8_t family, const uint8_t addr[16])
+{
+    uint64_t now = svr_now_us();
+    if (!s_local_addrs_loaded || now < s_local_addrs_at_us ||
+        now - s_local_addrs_at_us >= TCP_EGRESS_LOCAL_ADDR_REFRESH_US)
+        svr_tcp_egress_local_addrs_refresh(now);
+    size_t len = family == 6 ? 16 : 4;
+    for (int i = 0; i < s_n_local_addrs; i++) {
+        if (s_local_addrs[i].family == family &&
+            memcmp(s_local_addrs[i].addr, addr, len) == 0)
+            return 1;
+    }
+    return 0;
+}
 
 int
 svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
@@ -256,7 +359,28 @@ svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
         if (mqvpn_cidr_match(&deny[i], family, addr)) return 0;
     }
 
+    /* An IPv6 form that reaches an embedded IPv4 destination is also judged
+     * as that IPv4 address (allow/default-deny/deny), so a translated
+     * literal cannot reach space the v4 table blocks. The v4 tunnel subnet
+     * is not known here; svr_tcp_egress_acl_allowed checks it. */
+    uint8_t v4[16] = {0};
+    if (family == 6 && svr_tcp_egress_embedded_v4(addr, v4)) {
+        static const mqvpn_cidr_entry_t no_tunnel = {0};
+        return svr_tcp_egress_acl_decide(4, v4, allow, n_allow, deny, n_deny, &no_tunnel);
+    }
+
     return 1;
+}
+
+/* 1 if an EgressAllow entry covers (family, addr). */
+static int
+svr_tcp_egress_allow_covers(uint8_t family, const uint8_t addr[16],
+                            const mqvpn_cidr_entry_t *allow, int n_allow)
+{
+    for (int i = 0; i < n_allow; i++) {
+        if (mqvpn_cidr_match(&allow[i], family, addr)) return 1;
+    }
+    return 0;
 }
 
 /* server-bound wrapper: resolves the target string and the server's own
@@ -296,8 +420,24 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
     mqvpn_cidr_entry_t tunnels[2]; /* [0]=v4, [1]=v6 (family=0 unless has_v6) */
     svr_get_egress_policy(server, &allow, &n_allow, &deny, &n_deny, tunnels);
 
-    return svr_tcp_egress_acl_decide(family, addr_bytes, allow, n_allow, deny, n_deny,
-                                     &tunnels[family == 6 ? 1 : 0]);
+    if (!svr_tcp_egress_acl_decide(family, addr_bytes, allow, n_allow, deny, n_deny,
+                                   &tunnels[family == 6 ? 1 : 0]))
+        return 0;
+
+    /* Embedded IPv4 (NAT64 well-known prefix, 6to4): the v4 tunnel subnet
+     * is denied for it too, unconditionally like the direct form. */
+    uint8_t v4[16] = {0};
+    int has_v4 = family == 6 && svr_tcp_egress_embedded_v4(addr_bytes, v4);
+    if (has_v4 && mqvpn_cidr_match(&tunnels[0], 4, v4)) return 0;
+
+    /* The server's own addresses, unless EgressAllow covers them. */
+    if (!svr_tcp_egress_allow_covers(family, addr_bytes, allow, n_allow) &&
+        svr_tcp_egress_is_local_addr(family, addr_bytes))
+        return 0;
+    if (has_v4 && !svr_tcp_egress_allow_covers(4, v4, allow, n_allow) &&
+        svr_tcp_egress_is_local_addr(4, v4))
+        return 0;
+    return 1;
 }
 
 /* svr_log-routed log macros — the only logging path this file has (see
