@@ -24,13 +24,15 @@ protocol ReorderConfigStore: AnyObject {
 }
 
 /// The REAL atomic-save sequence used by production and exercised by tests:
-/// snapshot -> merge -> mutate -> commit (on throw, roll back the in-memory
-/// config and rethrow) -> best-effort refresh (a post-commit refresh failure is
-/// non-fatal; the value is already persisted).
-func performAtomicSave(_ store: ReorderConfigStore, merge: [String: Any]) async throws {
+/// snapshot -> merge (and drop the `remove` keys) -> mutate -> commit (on
+/// throw, roll back the in-memory config and rethrow) -> best-effort refresh
+/// (a post-commit refresh failure is non-fatal; the value is already persisted).
+func performAtomicSave(_ store: ReorderConfigStore, merge: [String: Any],
+                       remove: [String] = []) async throws {
     let backup = store.providerConfiguration
     var merged = backup ?? [:]
     for (k, v) in merge { merged[k] = v }
+    for k in remove { merged.removeValue(forKey: k) }
     store.providerConfiguration = merged
     do { try await store.commit() }
     catch { store.providerConfiguration = backup; throw error }   // pre-commit rollback

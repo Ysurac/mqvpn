@@ -79,12 +79,22 @@ final class TunnelController: ObservableObject {
                 statusText = "config error"; return
             }
             let pc = proto.providerConfiguration
+            let keychainKey = try AuthKeyStore.load(persistentRef: proto.passwordReference)
             if !ServerSettings.serverKeysPresent(in: pc) {                 // ABSENT → seed
                 let seed = try ServerSettings.fromBundle()
+                proto.passwordReference = try AuthKeyStore.save(seed.authKey)
                 try await performAtomicSave(NEConfigStore(manager: m, proto: proto),
                                             merge: seed.toProviderConfiguration())
                 serverSettings = seed
-            } else if let s = ServerSettings(providerConfiguration: pc) {  // VALID
+            } else if let s = ServerSettings(providerConfiguration: pc,
+                                             keychainAuthKey: keychainKey) {  // VALID
+                // Saved by a build that kept the auth key in providerConfiguration:
+                // move it to the keychain once, then drop the plain-text copy.
+                if ServerSettings.hasLegacyAuthKey(in: pc) {
+                    proto.passwordReference = try AuthKeyStore.save(s.authKey)
+                    try await performAtomicSave(NEConfigStore(manager: m, proto: proto), merge: [:],
+                                                remove: [ServerSettings.legacyAuthKeyName])
+                }
                 serverSettings = s
             } else {                                                       // CORRUPT → D4: no overwrite
                 serverSettings = nil
@@ -172,7 +182,18 @@ final class TunnelController: ObservableObject {
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
         for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
-        try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
+        // The key goes to the keychain first (one item, updated in place, so
+        // the reference does not change); a failed commit restores the old
+        // in-memory reference along with the rolled-back providerConfiguration.
+        let oldRef = proto.passwordReference
+        proto.passwordReference = try AuthKeyStore.save(server.authKey)
+        do {
+            try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged,
+                                        remove: [ServerSettings.legacyAuthKeyName])
+        } catch {
+            proto.passwordReference = oldRef
+            throw error
+        }
         serverSettings = server; reorderSettings = reorder; hybridSettings = hybrid; configError = nil   // only on success
     }
 

@@ -14,6 +14,7 @@ trap 'rm -rf "$TMPD"' EXIT
 swiftc -framework Security -o "$OUT" \
     "$SHARED/PoCConfig.swift" \
     "$SHARED/ServerSettings.swift" \
+    "$SHARED/AuthKeyStore.swift" \
     "$SHARED/ServerResolve.swift" \
     "$SHARED/ReorderSettings.swift" \
     "$SHARED/HybridSettings.swift" \

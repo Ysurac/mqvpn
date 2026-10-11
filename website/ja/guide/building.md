@@ -233,4 +233,6 @@ cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # DEVELOPMENT_TEAM 
 
 CI は同じプロジェクトを未署名（`CODE_SIGNING_ALLOWED=NO`）でビルドし、実機・シミュレータでの実行は手動ステップです。
 
+アプリはサーバーの認証キーをキーチェーンに保存し、キーチェーングループ `<チーム ID>.com.mp0rta.mqvpnpoc.shared` を通じて PacketTunnel 拡張と共有します。チーム ID のプレフィックスは `DEVELOPMENT_TEAM` から決まるため、両ターゲットを同じチームで署名する必要があります。バンドル ID を変更する場合は、`ios/poc/project.yml` のグループ（両ターゲットの `keychain-access-groups` エンタイトルメントと Info.plist キー `MqvpnKeychainGroup`）も合わせて変更してください。以前のビルドが VPN 設定に保存したキーは、アプリの初回起動時にキーチェーンへ移されます。
+
 ビルドのテストは[はじめに](./getting-started)を参照してください。

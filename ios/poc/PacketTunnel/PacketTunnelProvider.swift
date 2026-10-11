@@ -32,9 +32,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var resolvedIP = ""
 
     override func startTunnel(options: [String: NSObject]?) async throws {
-        let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
-            .providerConfiguration
-        guard let server = ServerSettings(providerConfiguration: providerConfig) else {
+        let proto = self.protocolConfiguration as? NETunnelProviderProtocol
+        let providerConfig = proto?.providerConfiguration
+        // The auth key is in the shared keychain item the app references
+        // (AuthKeyStore); a config the app has not migrated yet still carries
+        // it in providerConfiguration, which ServerSettings falls back to.
+        let keychainKey: String?
+        do {
+            keychainKey = try AuthKeyStore.load(persistentRef: proto?.passwordReference)
+        } catch {
+            throw NSError(domain: "mqvpn.poc", code: 13,
+                          userInfo: [NSLocalizedDescriptionKey: "auth key unavailable: \(error)"])
+        }
+        guard let server = ServerSettings(providerConfiguration: providerConfig,
+                                          keychainAuthKey: keychainKey) else {
             throw NSError(domain: "mqvpn.poc", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
         }

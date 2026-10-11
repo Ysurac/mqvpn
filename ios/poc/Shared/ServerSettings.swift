@@ -4,7 +4,9 @@
 import Foundation
 
 /// Runtime server config, persisted in providerConfiguration alongside reorder
-/// settings. Mirrors ReorderSettings' validation-on-read discipline.
+/// settings, except the auth key, which lives in the keychain (AuthKeyStore,
+/// referenced by the protocol's passwordReference). Mirrors ReorderSettings'
+/// validation-on-read discipline.
 struct ServerSettings: Equatable {
     let host: String        // hostname or IP literal
     let port: Int
@@ -44,27 +46,41 @@ struct ServerSettings: Equatable {
         return Key.all.contains { dict[$0] != nil }
     }
 
+    /// providerConfiguration key under which builds before the keychain move
+    /// stored the auth key; the app migrates it once and removes it.
+    static let legacyAuthKeyName = Key.authKey
+
+    static func hasLegacyAuthKey(in dict: [String: Any]?) -> Bool {
+        dict?[Key.authKey] != nil
+    }
+
     /// All-or-nothing validated read. Reuses ReorderSettings' NSNumber discipline.
     /// serverName only: an ABSENT key reads as "" (configs saved before the key
     /// existed stay valid); a present-but-wrong-type key is still corrupt.
-    init?(providerConfiguration dict: [String: Any]?) {
+    /// authKey: `keychainAuthKey` (the passwordReference item) when there is
+    /// one, else a legacy providerConfiguration entry (wrong type = corrupt),
+    /// else "".
+    init?(providerConfiguration dict: [String: Any]?, keychainAuthKey: String? = nil) {
         guard let dict,
               let host = dict[Key.host] as? String,
               !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let portN = dict[Key.port] as? NSNumber, let port = ReorderSettings.exactInt(portN),
               (1...65535).contains(port),
-              let authKey = dict[Key.authKey] as? String,
               let insecureN = dict[Key.insecure] as? NSNumber, ReorderSettings.isBool(insecureN)
         else { return nil }
         let rawName = dict[Key.serverName]
         guard rawName == nil || rawName is String else { return nil }
+        let rawKey = dict[Key.authKey]
+        guard rawKey == nil || rawKey is String else { return nil }
         self.init(host: host, port: port, serverName: (rawName as? String) ?? "",
-                  authKey: authKey, insecure: insecureN.boolValue)
+                  authKey: keychainAuthKey ?? (rawKey as? String) ?? "",
+                  insecure: insecureN.boolValue)
     }
 
+    /// Everything but the auth key, which goes to AuthKeyStore.
     func toProviderConfiguration() -> [String: Any] {
         [Key.host: host, Key.port: NSNumber(value: port), Key.serverName: serverName,
-         Key.authKey: authKey, Key.insecure: NSNumber(value: insecure)]
+         Key.insecure: NSNumber(value: insecure)]
     }
 
     var isValid: Bool {

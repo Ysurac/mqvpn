@@ -32,6 +32,8 @@ targets:
       path: App.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        # Shared with PacketTunnel for the auth key (Shared/AuthKeyStore.swift).
+        keychain-access-groups: ["$(AppIdentifierPrefix)com.mp0rta.mqvpnpoc.shared"]
     dependencies:
       - target: PacketTunnel
         embed: true
@@ -45,6 +47,7 @@ targets:
         MqvpnBulkURL: $(MQVPN_POC_BULK_URL)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
+        MqvpnKeychainGroup: $(AppIdentifierPrefix)com.mp0rta.mqvpnpoc.shared
   PacketTunnel:
     type: app-extension
     platform: iOS
@@ -62,6 +65,7 @@ targets:
       path: PacketTunnel.entitlements
       properties:
         com.apple.developer.networking.networkextension: [packet-tunnel-provider]
+        keychain-access-groups: ["$(AppIdentifierPrefix)com.mp0rta.mqvpnpoc.shared"]
     info:
       path: PacketTunnel/Info.plist
       properties:
@@ -70,6 +74,7 @@ targets:
         MqvpnServerName: $(MQVPN_POC_SERVER_NAME)
         MqvpnAuthKey: $(MQVPN_POC_AUTH_KEY)
         MqvpnTLSInsecure: $(MQVPN_POC_TLS_INSECURE)
+        MqvpnKeychainGroup: $(AppIdentifierPrefix)com.mp0rta.mqvpnpoc.shared
         NSExtension:
           NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
