@@ -70,6 +70,13 @@
 typedef struct svr_conn_s svr_conn_t;
 typedef struct svr_stream_s svr_stream_t;
 
+/* Fixed-window log limiter state (svr_log_rl_allow). */
+typedef struct {
+    int64_t window_start_ms;
+    uint32_t count;
+    uint32_t suppressed;
+} svr_log_rl_t;
+
 /* ─── Internal types ─── */
 
 /* Transport-level conn_user_data is mqvpn_server_t * until cb_h3_conn_create
@@ -168,6 +175,13 @@ struct svr_conn_s {
      * s->ptb_bucket now only covers errors no session can be charged with
      * (destination not assigned to anyone). */
     mqvpn_ptb_bucket_t icmp_bucket;
+
+    /* Peer-triggered log lines (svr_log_rl_allow): spoofed inner source,
+     * per-capsule INFO. And failed auth attempts on this connection, which is
+     * closed at SVR_MAX_AUTH_FAILURES. */
+    svr_log_rl_t rl_spoof;
+    svr_log_rl_t rl_capsule;
+    int auth_failures;
 
     /* Transport scope, issued in cb_accept, released exactly once in
      * svr_conn_free. Lets the transport keep per-destination sticky state
@@ -347,6 +361,11 @@ struct mqvpn_server_s {
     /* Set once any credential (global PSK or a user) has been configured, at
      * creation or by add_user, and never cleared: see svr_auth_required. */
     int auth_latched;
+
+    /* Server-wide limiters for peer-triggered lines not tied to a tunnel:
+     * auth failures (any connection) and the per-request reorder advert. */
+    svr_log_rl_t rl_auth;
+    svr_log_rl_t rl_reorder_hdr;
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
@@ -540,6 +559,38 @@ svr_log_conn_stats(mqvpn_server_t *s, const char *tag, const char *username,
           st.total_app_bytes, st.standby_path_app_bytes, st.mp_state, st.enable_fec,
           st.send_fec_cnt, st.fec_recover_pkt_cnt);
     free(st.paths_info);
+}
+
+/* ─── Log rate limiting ───
+ * Lines a peer can trigger at will (spoofed packets, auth failures over new
+ * streams, per-capsule INFO) go through a fixed-window limiter, so a hostile
+ * or broken client cannot flood the log. The first lines of each window keep
+ * their exact wording (e2e markers); the rest are counted and summarized by
+ * the first line allowed in a later window. */
+#define SVR_LOG_RL_WINDOW_MS 10000
+
+/* Failed CONNECT-IP auth attempts after which a connection is closed. */
+#define SVR_MAX_AUTH_FAILURES 3
+
+static int
+svr_log_rl_allow(mqvpn_server_t *s, svr_log_rl_t *rl, uint32_t burst,
+                 mqvpn_log_level_t level, const char *what)
+{
+    int64_t now = now_ms_mono();
+    if (rl->count == 0 || now - rl->window_start_ms >= SVR_LOG_RL_WINDOW_MS) {
+        if (rl->suppressed > 0)
+            server_log(s, level, "%s: %u similar log lines suppressed", what,
+                       rl->suppressed);
+        rl->window_start_ms = now;
+        rl->count = 0;
+        rl->suppressed = 0;
+    }
+    if (rl->count < burst) {
+        rl->count++;
+        return 1;
+    }
+    rl->suppressed++;
+    return 0;
 }
 
 /* ─── Downlink backpressure (see n_dgram_blocked) ─── */
@@ -1764,7 +1815,9 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
         if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
                                        h->value.iov_base, h->value.iov_len)) {
             out->has_reorder_hdr = 1;
-            LOG_I(s, "client advertised mqvpn-reorder");
+            if (svr_log_rl_allow(s, &s->rl_reorder_hdr, 10, MQVPN_LOG_INFO,
+                                 "reorder advert"))
+                LOG_I(s, "client advertised mqvpn-reorder");
         }
     }
 }
@@ -1920,16 +1973,28 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
                                              sizeof(fp));
             char peer_str[INET6_ADDRSTRLEN + 8];
             svr_format_peer_addr(stream->conn, peer_str, sizeof(peer_str));
-            LOG_W(s,
-                  "authentication failed: invalid or missing PSK (peer=%s received "
-                  "len=%zu fp=%s)",
-                  peer_str, hdrs->auth_token_len, fp);
+            if (svr_log_rl_allow(s, &s->rl_auth, 10, MQVPN_LOG_WARN,
+                                 "authentication failed"))
+                LOG_W(s,
+                      "authentication failed: invalid or missing PSK (peer=%s received "
+                      "len=%zu fp=%s)",
+                      peer_str, hdrs->auth_token_len, fp);
             svr_masque_send_403(h3_request);
             /* return 0, not -1: same H3_FRAME_ERROR escalation as the
              * max_clients rejection in svr_masque_send_response() above —
              * a failed auth is a routine, expected client-facing rejection
              * and must not tear down the whole H3 connection. */
             stream->role = SVR_STREAM_ROLE_REJECTED;
+            /* ...but a connection that keeps guessing over new streams is
+             * closed: a real client gives up or reconnects after a 403, so
+             * this only ends unlimited retries on one connection. Closing
+             * from inside the notify is safe: xqc_conn_close only marks the
+             * connection, which the engine tears down later. */
+            if (++stream->conn->auth_failures >= SVR_MAX_AUTH_FAILURES && s->engine) {
+                LOG_W(s, "closing connection after %d authentication failures (peer=%s)",
+                      stream->conn->auth_failures, peer_str);
+                xqc_h3_conn_close(s->engine, &stream->conn->cid);
+            }
             return 0;
         }
 
@@ -2295,8 +2360,9 @@ svr_answer_address_request(mqvpn_server_t *s, svr_stream_t *stream,
         paylen -= consumed;
         if (req_id == 0 || (ip_ver != 4 && ip_ver != 6)) continue;
 
-        LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d (user=%s)", req_id, ip_ver,
-              conn->username);
+        if (svr_log_rl_allow(s, &conn->rl_capsule, 20, MQVPN_LOG_INFO, "capsule"))
+            LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d (user=%s)", req_id,
+                  ip_ver, conn->username);
         uint8_t resp_ip[16] = {0};
         uint8_t resp_prefix;
         if (ip_ver == 4) {
@@ -2410,10 +2476,13 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                     if (label) {
                         label->path_id = path_id;
                         label->has_path_id = 1;
-                        LOG_I(s, "path_label: user=%s iface=%s path_id=%" PRIu64
-                                 " client_weight=%u client_dscp_mask=%" PRIu64,
-                              stream->conn->username, iface, path_id, client_weight,
-                              client_dscp_mask);
+                        if (svr_log_rl_allow(s, &stream->conn->rl_capsule, 20,
+                                             MQVPN_LOG_INFO, "capsule"))
+                            LOG_I(s,
+                                  "path_label: user=%s iface=%s path_id=%" PRIu64
+                                  " client_weight=%u client_dscp_mask=%" PRIu64,
+                                  stream->conn->username, iface, path_id, client_weight,
+                                  client_dscp_mask);
 
                         /* Apply a persisted server.json path_policy entry
                          * (config.h's "path_policy" JSON array) exactly
@@ -2719,7 +2788,9 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
     if (ip_ver == 4) {
         if (len < 20) return;
         if (memcmp(pkt + 12, &conn->assigned_ip.s_addr, 4) != 0) {
-            LOG_W(s, "dropping packet: src IP mismatch (user=%s)", conn->username);
+            if (svr_log_rl_allow(s, &conn->rl_spoof, 10, MQVPN_LOG_WARN,
+                                 "src IP mismatch"))
+                LOG_W(s, "dropping packet: src IP mismatch (user=%s)", conn->username);
             return;
         }
         memcpy(fwd_pkt, pkt, len);
@@ -2741,7 +2812,10 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
     } else if (ip_ver == 6) {
         if (len < 40) return;
         if (!conn->has_v6 || memcmp(pkt + 8, &conn->assigned_ip6, 16) != 0) {
-            LOG_W(s, "dropping IPv6 packet: src IP mismatch (user=%s)", conn->username);
+            if (svr_log_rl_allow(s, &conn->rl_spoof, 10, MQVPN_LOG_WARN,
+                                 "src IP mismatch"))
+                LOG_W(s, "dropping IPv6 packet: src IP mismatch (user=%s)",
+                      conn->username);
             return;
         }
         memcpy(fwd_pkt, pkt, len);
