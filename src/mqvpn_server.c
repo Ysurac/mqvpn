@@ -298,8 +298,10 @@ struct mqvpn_server_s {
      * they receive the same address on reconnect. */
     struct {
         char username[64];
-        uint32_t offset; /* 0 = unused slot */
+        uint32_t offset;   /* 0 = unused slot */
+        uint64_t last_use; /* lease_clock at last save/restore, for LRU eviction */
     } leases[MQVPN_MAX_USERS];
+    uint64_t lease_clock;
 
     /* Pinned IP table: fixed IPs configured per-user.  These offsets are
      * pre-reserved in the pool at startup and never returned to dynamic
@@ -1096,6 +1098,35 @@ svr_unpin_release(mqvpn_server_t *s, int idx)
     mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[idx].ip);
 }
 
+/* Lease slot for `username`: its existing entry, else a free one, else the
+ * least recently used entry of a name that is NOT a configured user. Names a
+ * shared-key client picks with x-user (or "(global)") are unbounded, so they
+ * may displace each other but never a configured user's lease, and never
+ * fill the table against configured users. -1 when every slot holds a
+ * configured user. */
+static int
+svr_lease_slot(const mqvpn_server_t *s, const char *username)
+{
+    int free_slot = -1, lru = -1;
+    for (int i = 0; i < MQVPN_MAX_USERS; i++) {
+        if (s->leases[i].offset == 0) {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (strcmp(s->leases[i].username, username) == 0) return i;
+        int configured = 0;
+        for (int u = 0; u < s->config.n_users; u++) {
+            if (strcmp(s->config.user_names[u], s->leases[i].username) == 0) {
+                configured = 1;
+                break;
+            }
+        }
+        if (!configured && (lru < 0 || s->leases[i].last_use < s->leases[lru].last_use))
+            lru = i;
+    }
+    return free_slot >= 0 ? free_slot : lru;
+}
+
 /* Deregister `conn`'s session and release its pool address(es), then zero the
  * conn-scoped tunnel fields so the conn can host a fresh CONNECT-IP
  * establishment. No-op when the conn never completed an ADDRESS_ASSIGN
@@ -1129,20 +1160,16 @@ svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
     if (!svr_offset_is_pinned(s, offset)) {
         /* Save lease so the user gets the same IP on reconnect */
         if (conn->username[0]) {
-            int saved = 0;
-            for (int i = 0; i < MQVPN_MAX_USERS; i++) {
-                if (s->leases[i].offset == 0 ||
-                    strcmp(s->leases[i].username, conn->username) == 0) {
-                    snprintf(s->leases[i].username, sizeof(s->leases[i].username),
-                             "%s", conn->username);
-                    s->leases[i].offset = offset;
-                    saved = 1;
-                    break;
-                }
-            }
-            if (!saved)
+            int slot = svr_lease_slot(s, conn->username);
+            if (slot >= 0) {
+                snprintf(s->leases[slot].username, sizeof(s->leases[slot].username), "%s",
+                         conn->username);
+                s->leases[slot].offset = offset;
+                s->leases[slot].last_use = ++s->lease_clock;
+            } else {
                 LOG_W(s, "lease table full, could not save lease for '%s'",
                       conn->username);
+            }
         }
         mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     }
@@ -1381,6 +1408,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
             if (strcmp(s->leases[i].username, conn->username) != 0) continue;
             if (mqvpn_addr_pool_alloc_at(&s->pool, s->leases[i].offset,
                                          &conn->assigned_ip) == 0) {
+                s->leases[i].last_use = ++s->lease_clock;
                 char ip_str[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
                 LOG_I(s, "restored leased IP %s for user '%s'", ip_str, conn->username);
