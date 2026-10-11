@@ -328,6 +328,10 @@ tcp_lane_gone_status(const mqvpn_tcp_flow_t *f)
 void tcp_lane_flow_hold(mqvpn_tcp_flow_t *f);
 void tcp_lane_flow_release(mqvpn_tcp_flow_t *f);
 
+/* Defined in tcp_lane_uplink.c. tcp_recved() for a 32-bit length (in
+ * u16_t steps). */
+void tcp_lane_recved(struct tcp_pcb *pcb, uint32_t len);
+
 /* Defined in tcp_lane_uplink.c. The uplink queue's memory-weighted backlog
  * (unsent payload + per-node overhead) that the BP watermarks compare. */
 uint32_t tcp_lane_uplink_backlog(const mqvpn_tcp_flow_t *f);

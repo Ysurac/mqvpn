@@ -23,7 +23,7 @@
 /* tcp_recved takes a u16_t; the deferred resume total can exceed 65535
  * (bounded by TCP_WND, 512 KiB on the non-iOS profile), so re-open the
  * window in u16-sized steps. */
-static void
+void
 tcp_lane_recved(struct tcp_pcb *pcb, uint32_t len)
 {
     while (len > 0) {
@@ -279,11 +279,11 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
         free(n);
     }
 
-    tcp_lane_flow_status_t st = tcp_lane_uplink_maybe_fin(f);
-    if (st != TCP_LANE_FLOW_LIVE) {
-        return st; /* f was torn down (fatal error or clean-close completion) */
-    }
-
+    /* Re-open the withheld window BEFORE the FIN step: maybe_fin can
+     * complete a clean close (tcp_lane_finish_clean_close -> tcp_close),
+     * and lwIP's tcp_close RSTs an ESTABLISHED/CLOSE_WAIT pcb whose receive
+     * window is not fully re-opened (the downlink FIN may still be pending,
+     * TF_CLOSEPEND) — discarding downlink data not yet delivered. */
     if (f->uplink_withheld && tcp_lane_uplink_backlog(f) < MQVPN_TCP_LANE_BP_LOW_WATER) {
         f->uplink_withheld = 0;
         if (f->uplink_withheld_recved > 0 && f->pcb) {
@@ -291,7 +291,8 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
         }
         f->uplink_withheld_recved = 0;
     }
-    return TCP_LANE_FLOW_LIVE;
+
+    return tcp_lane_uplink_maybe_fin(f); /* LIVE, or torn down / clean-closed */
 }
 
 /* One lwIP data-arrival delivery (tcp_lane.c's on_lwip_recv dispatches here

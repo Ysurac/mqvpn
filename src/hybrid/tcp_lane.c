@@ -1310,6 +1310,17 @@ tcp_lane_finish_clean_close(mqvpn_tcp_flow_t *f)
      * duplicate) still finds an entry and gets routed to lwip_input
      * instead of leaking out as RAW to the already-closed origin. */
     if (f->pcb) {
+        /* Window fully re-opened first: if the downlink FIN is still
+         * pending (tcp_shutdown deferred it on ERR_MEM, TF_CLOSEPEND) the
+         * pcb is still ESTABLISHED/CLOSE_WAIT, and tcp_close RSTs such a pcb
+         * when rcv_wnd is not at its maximum — truncating the downlink data
+         * it still holds. With the window whole, tcp_close keeps the queued
+         * data and lets lwIP's timer send the pending FIN behind it. */
+        if (f->uplink_withheld_recved > 0) {
+            tcp_lane_recved(f->pcb, f->uplink_withheld_recved);
+            f->uplink_withheld_recved = 0;
+            f->uplink_withheld = 0;
+        }
         tcp_arg(f->pcb, NULL);
         tcp_recv(f->pcb, NULL);
         tcp_sent(f->pcb, NULL);

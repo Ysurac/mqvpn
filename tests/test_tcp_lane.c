@@ -135,6 +135,8 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
 
 static int g_recved_calls;
 static uint32_t g_recved_total;
+/* Call-order stamps shared by the recved/close hooks. */
+static int g_hook_seq, g_recved_last_seq, g_tcp_close_seq;
 
 static void
 test_recved_hook(struct tcp_pcb *pcb, unsigned int len)
@@ -142,6 +144,7 @@ test_recved_hook(struct tcp_pcb *pcb, unsigned int len)
     (void)pcb;
     g_recved_calls++;
     g_recved_total += len;
+    g_recved_last_seq = ++g_hook_seq;
 }
 
 /* ─── Task 11 downlink hooks: tcp_write/tcp_sndbuf/tcp_shutdown/tcp_output
@@ -258,6 +261,7 @@ test_tcp_close_hook(struct tcp_pcb *pcb)
 {
     g_tcp_close_calls++;
     g_tcp_close_last_pcb = pcb;
+    g_tcp_close_seq = ++g_hook_seq;
 }
 
 /* ─── cli_tcp_lane_h3_close test double (real impl: mqvpn_client.c) ─── */
@@ -3214,6 +3218,46 @@ test_lwip_sent_teardown_returns_abrt(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* A clean close whose last step is the uplink FIN must re-open the
+ * withheld receive window BEFORE tcp_close: lwIP's tcp_close RSTs an
+ * ESTABLISHED/CLOSE_WAIT pcb (downlink FIN still pending) whose rcv_wnd is
+ * not whole, truncating downlink data. The withheld bytes used to be
+ * recved after the FIN step — i.e. never, once the close completed. */
+static void
+test_clean_close_reopens_window_before_close(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe0c1ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8400, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+
+    /* Uplink backpressure: 1000 bytes queued, their tcp_recved withheld. */
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_AGAIN);
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, mk_pbuf(1000), ERR_OK);
+    ASSERT_EQ_INT(f->uplink_withheld_recved, 1000, "window withheld");
+
+    /* Downlink FIN forwarded to the pcb. */
+    h3_recv_push_data(NULL, 0, 1);
+    mqvpn_tcp_lane_downlink_pump(lane, &fake_stream);
+    ASSERT_EQ_INT(g_tcp_shutdown_calls, 1, "downlink FIN -> tcp_shutdown");
+
+    /* Peer FIN: the flush drains the queue, then the uplink FIN completes
+     * the clean close. */
+    g_hook_seq = 0;
+    err_t r = mqvpn_tcp_lane_on_lwip_recv(f, &pcb, NULL, ERR_OK);
+    ASSERT_EQ_INT(r, ERR_OK, "clean close stays ERR_OK");
+    ASSERT_EQ_INT(g_tcp_close_calls, 1, "pcb tcp_close()d");
+    ASSERT_EQ_INT(g_recved_total, 1000, "withheld window re-opened");
+    ASSERT_TRUE(g_recved_last_seq != 0 && g_recved_last_seq < g_tcp_close_seq,
+                "tcp_recved happens before tcp_close");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_clean_close_uplink_fin_first(void)
 {
@@ -4080,6 +4124,7 @@ main(void)
     test_accept_open_stream_fail_returns_abrt();
     test_lwip_sent_teardown_returns_abrt();
     test_clean_close_uplink_fin_first();
+    test_clean_close_reopens_window_before_close();
     test_clean_close_downlink_fin_first();
     test_removal_updates_stats();
 
