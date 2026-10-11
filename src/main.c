@@ -79,10 +79,14 @@ usage(const char *prog)
         "  --no-routes               Skip all automatic route setup; manage routes\n"
         "  --noroutes               Alias for --no-routes\n"
         "                            manually (client mode)\n"
-        "  --control-port PORT       TCP port for JSON control API (server mode)\n"
+        "  --no-manage-routes        Do not modify the host routing table "
+        "(router/embedded integration; same as --no-routes)\n"
+        "  --control-port PORT       TCP port for JSON control API (0 disables it)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
-        "                            (also configurable via [Control] Listen in INI / "
-        "control_listen in JSON)\n"
+        "                            (also configurable via [Control] Listen or "
+        "Port/Addr in INI,\n"
+        "                            control_listen or control_port/control_addr in "
+        "JSON)\n"
         "  --status                  Query server status via control API and exit\n"
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
@@ -119,9 +123,26 @@ usage(const char *prog)
         prog, prog, prog);
 }
 
+/* Strict decimal integer in [min, max]: no sign prefix other than '-', no
+ * whitespace, no trailing junk, no overflow. Returns 0 on success. */
+static int
+parse_cli_int(const char *s, long min, long max, int *out)
+{
+    if (!s || !(*s == '-' || (*s >= '0' && *s <= '9'))) return -1;
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE || v < min || v > max) return -1;
+    *out = (int)v;
+    return 0;
+}
+
 static int
 parse_host_port(const char *str, char *host, size_t host_len, int *port)
 {
+    const char *port_str;
+    size_t hlen;
+    const char *hstart;
     if (str[0] == '[') {
         /* Bracket notation for IPv6: [host]:port */
         const char *close = strchr(str, ']');
@@ -129,11 +150,9 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
             fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
             return -1;
         }
-        size_t hlen = (size_t)(close - str - 1);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str + 1, hlen);
-        host[hlen] = '\0';
-        *port = atoi(close + 2);
+        hstart = str + 1;
+        hlen = (size_t)(close - str - 1);
+        port_str = close + 2;
     } else {
         /* Legacy: host:port (last colon) */
         const char *colon = strrchr(str, ':');
@@ -141,16 +160,21 @@ parse_host_port(const char *str, char *host, size_t host_len, int *port)
             fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
             return -1;
         }
-        size_t hlen = (size_t)(colon - str);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str, hlen);
-        host[hlen] = '\0';
-        *port = atoi(colon + 1);
+        hstart = str;
+        hlen = (size_t)(colon - str);
+        port_str = colon + 1;
     }
-    if (*port <= 0 || *port > 65535) {
+    if (hlen >= host_len) {
+        fprintf(stderr, "error: host too long in '%s' (max %zu bytes)\n", str,
+                host_len - 1);
+        return -1;
+    }
+    if (*port_str == '-' || parse_cli_int(port_str, 1, 65535, port) < 0) {
         fprintf(stderr, "error: invalid port in '%s'\n", str);
         return -1;
     }
+    memcpy(host, hstart, hlen);
+    host[hlen] = '\0';
     return 0;
 }
 
@@ -201,6 +225,7 @@ main(int argc, char *argv[])
         {"routesviaserver", no_argument, NULL, 'w'},
         {"no-routes", no_argument, NULL, 'W'},
         {"noroutes", no_argument, NULL, 'W'},
+        {"no-manage-routes", no_argument, NULL, 0x103},
         {"tls-server-name", required_argument, NULL, 0x104},
         {"pinned-pubkey", required_argument, NULL, 0x107},
         {"no-sync-path-labels", no_argument, NULL, 0x105},
@@ -250,6 +275,7 @@ main(int argc, char *argv[])
     int kill_switch = -1;        /* -1 = not set by CLI */
     int route_via_server = -1;   /* -1 = not set by CLI */
     int no_routes = -1;          /* -1 = not set by CLI */
+    int manage_routes = -1;      /* -1 = not set by CLI; 0 = --no-manage-routes */
     int sync_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
     int push_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
     int control_port = 0;
@@ -258,7 +284,7 @@ main(int argc, char *argv[])
     int status_mode = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWRKTVh",
+    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:EeF:M:L:X:x:wWRKTVh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -280,6 +306,10 @@ main(int argc, char *argv[])
                 return 1;
             }
             char pair[360];
+            if (strlen(optarg) >= sizeof(pair)) {
+                fprintf(stderr, "error: --user value too long\n");
+                return 1;
+            }
             snprintf(pair, sizeof(pair), "%s", optarg);
             char *sep = strchr(pair, ':');
             if (!sep) {
@@ -287,15 +317,29 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
+            if (pair[0] == '\0' || sep[1] == '\0') {
+                fprintf(stderr, "error: --user must be NAME:KEY\n");
+                return 1;
+            }
+            /* Same rule as [Auth] User / mqvpn_config_add_user: a name the
+             * library would reject must stop startup here, not be dropped
+             * later and leave the server running without that credential. */
+            if (!mqvpn_user_name_ok(pair, sizeof(cli_user_names[0]))) {
+                fprintf(stderr,
+                        "error: --user name must be 1-%zu bytes without '\"', '\\' "
+                        "or control characters\n",
+                        sizeof(cli_user_names[0]) - 1);
+                return 1;
+            }
+            if (strlen(sep + 1) >= sizeof(cli_user_keys[0])) {
+                fprintf(stderr, "error: --user key too long (max %zu bytes)\n",
+                        sizeof(cli_user_keys[0]) - 1);
+                return 1;
+            }
             mqvpn_copy_str(cli_user_names[n_cli_users],
                            sizeof(cli_user_names[n_cli_users]), pair);
             mqvpn_copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
                            sep + 1);
-            if (cli_user_names[n_cli_users][0] == '\0' ||
-                cli_user_keys[n_cli_users][0] == '\0') {
-                fprintf(stderr, "error: --user must be NAME:KEY\n");
-                return 1;
-            }
             n_cli_users++;
             break;
         }
@@ -365,17 +409,27 @@ main(int argc, char *argv[])
             cli_mtu = v;
             break;
         }
-        case 'M': max_clients = atoi(optarg); break;
+        case 'M':
+            /* 0 keeps its historical meaning: the library default (64). */
+            if (parse_cli_int(optarg, 0, INT_MAX, &max_clients) < 0) {
+                fprintf(stderr, "error: --max-clients must be a non-negative integer\n");
+                return 1;
+            }
+            break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
         case 'w': route_via_server = 1; break;
         case 'W': no_routes = 1; break;
+        case 0x103: manage_routes = 0; break;
         case 0x104: tls_server_name = optarg; break;
         case 0x107: pinned_pubkey = optarg; break;
         case 0x105: sync_path_labels = 0; break;
         case 0x106: push_path_labels = 1; break;
         case 'X':
-            control_port = atoi(optarg);
+            if (parse_cli_int(optarg, 0, 65535, &control_port) < 0) {
+                fprintf(stderr, "error: --control-port must be 0..65535 (0 disables)\n");
+                return 1;
+            }
             control_port_set = 1;
             break;
         case 'x': control_addr = optarg; break;
@@ -404,24 +458,30 @@ main(int argc, char *argv[])
         }
     }
 
-    /* Resolve effective control endpoint (INI base + per-field CLI overrides).
-     * Used by both --status (below) and the server-mode listener (further down). */
+    /* Resolve effective control endpoint ([Control] Listen, then [Control]
+     * Port/Addr, then per-field CLI overrides). Used by --status (below) and
+     * by the control listener in both client and server mode. */
     char eff_control_addr_buf[256] = {0};
     const char *eff_control_addr = NULL;
     int eff_control_port = 0;
-    if (mqvpn_resolve_control_endpoint(file_cfg.control_listen, control_addr,
-                                       control_port, control_port_set,
-                                       eff_control_addr_buf, sizeof(eff_control_addr_buf),
-                                       &eff_control_addr, &eff_control_port) < 0) {
+    if (mqvpn_resolve_control_endpoint_ex(
+            file_cfg.control_listen, file_cfg.control_addr, file_cfg.control_port,
+            control_addr, control_port, control_port_set, eff_control_addr_buf,
+            sizeof(eff_control_addr_buf), &eff_control_addr, &eff_control_port) < 0) {
         fprintf(stderr, "error: invalid [Control] Listen = '%s'\n",
                 file_cfg.control_listen);
         return 1;
     }
-    /* --control-addr without a port is a silent-disable trap: warn so admins
-     * notice the missing --control-port / [Control] Listen. */
-    if (eff_control_addr != NULL && eff_control_port == 0) {
-        LOG_WRN("--control-addr ignored: no port configured (use --control-port "
-                "or [Control] Listen)");
+    /* An address without a port is a silent-disable trap: warn so admins
+     * notice the missing port. An explicit --control-port 0 is a deliberate
+     * disable and stays quiet. */
+    if (eff_control_addr != NULL && eff_control_port == 0 && !control_port_set) {
+        if (control_addr)
+            LOG_WRN("--control-addr ignored: no port configured (use --control-port "
+                    "or [Control] Listen)");
+        else
+            LOG_WRN("[Control] Addr ignored: no port configured (use [Control] Port "
+                    "or Listen)");
     }
 
 #ifndef _WIN32
@@ -651,6 +711,14 @@ main(int argc, char *argv[])
 
         int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
 
+        /* NoRoutes/--no-routes (this fork) and ManageRoutes/--no-manage-routes
+         * (upstream v0.16.0) are one switch: either one asking mqvpn to keep
+         * out of the routing table wins. CLI still overrides the file for the
+         * flag it names. Routes are managed iff manage_routes && !no_routes. */
+        int eff_no_routes_flag = no_routes >= 0 ? no_routes : file_cfg.no_routes;
+        int eff_manage_routes = manage_routes >= 0 ? manage_routes : file_cfg.manage_routes;
+        int eff_no_routes = eff_no_routes_flag || !eff_manage_routes;
+
         const char *eff_auth_key_client = eff_auth_key;
         const char *eff_auth_username = file_cfg.auth_username[0] ? file_cfg.auth_username : NULL;
         if (!eff_auth_key_client && eff_n_users > 0) {
@@ -660,6 +728,13 @@ main(int argc, char *argv[])
             eff_auth_key_client = eff_user_keys[0];
             if (!eff_auth_username)
                 eff_auth_username = eff_user_names[0];
+        }
+        /* The username travels in a request header and is echoed by the
+         * control API: hold it to the same rule as a server-side user name. */
+        if (eff_auth_username && !mqvpn_user_name_ok(eff_auth_username, 64)) {
+            fprintf(stderr, "error: [Auth] Username must be 1-63 bytes without '\"', "
+                            "'\\' or control characters\n");
+            return 1;
         }
         const char *eff_tls_name = tls_server_name ? tls_server_name
                                    : file_cfg.tls_server_name[0]
@@ -689,11 +764,11 @@ main(int argc, char *argv[])
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .route_via_server = route_via_server >= 0 ? route_via_server
                                                       : file_cfg.route_via_server,
-            .no_routes = no_routes >= 0 ? no_routes : file_cfg.no_routes,
-            .manage_routes = file_cfg.manage_routes,
-            .control_port = control_port ? control_port : file_cfg.control_port,
-            .control_addr = control_addr ? control_addr
-                          : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
+            /* Both spellings mean the same thing (see eff_no_routes). */
+            .no_routes = eff_no_routes,
+            .manage_routes = !eff_no_routes,
+            .control_port = eff_control_port,
+            .control_addr = eff_control_addr,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .reinjection = reinjection,
