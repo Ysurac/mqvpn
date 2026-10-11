@@ -50,8 +50,11 @@ typedef struct {
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on
- * purpose: a server with no PSK/users configured is intentionally open on
- * BOTH protocols, not just one — do not let the two call sites diverge. */
+ * purpose: a server created with no PSK/users is intentionally open on BOTH
+ * protocols, not just one — do not let the two call sites diverge. Once any
+ * credential has been configured (at creation or by add_user) it stays true
+ * for the server's life, even if remove_user deletes the last one: auth fails
+ * closed (everyone is refused) rather than open. */
 int svr_auth_required(const mqvpn_server_t *s);
 
 /* Credential check shared by every authenticated request type. Constant-

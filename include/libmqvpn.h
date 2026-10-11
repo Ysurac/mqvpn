@@ -1297,6 +1297,11 @@ MQVPN_API int mqvpn_server_get_n_clients(const mqvpn_server_t *server);
 MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server, const char *username,
                                     const char *key);
 
+/* Remove a user and close its active sessions. A server that was created with
+ * a credential, or that had one added, keeps requiring auth after the last
+ * credential is removed: every new request is then refused until a user is
+ * added. Only a server that never had a credential admits clients without
+ * auth. */
 MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server, const char *username);
 
 /* Assign or clear a fixed (pinned) IP for a user at runtime.

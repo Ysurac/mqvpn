@@ -321,6 +321,10 @@ struct mqvpn_server_s {
 
     int started;
 
+    /* Set once any credential (global PSK or a user) has been configured, at
+     * creation or by add_user, and never cleared: see svr_auth_required. */
+    int auth_latched;
+
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
      * Contents are mutated exclusively by tcp_egress.c through the bundled
@@ -1577,7 +1581,10 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
 int
 svr_auth_required(const mqvpn_server_t *s)
 {
-    return (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
+    /* auth_latched keeps auth on once any credential was ever configured, so
+     * removing the last user at runtime (remove_user) leaves a server that
+     * rejects everyone rather than one that admits anyone. */
+    return s->auth_latched || (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
 }
 
 /* Credential check shared by every authenticated request type (CONNECT-IP,
@@ -2652,6 +2659,10 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     } else {
         LOG_I(s, "auth: no global psk configured");
     }
+    /* A server created with no credential at all stays open (no auth) for
+     * embedders that want that; the CLI refuses to start one (main.c). Once
+     * any credential exists, auth stays required for the server's life. */
+    s->auth_latched = (s->config.auth_key[0] != '\0') || (s->config.n_users > 0);
     for (int i = 0; i < s->config.n_users; i++) {
         const char *k = s->config.user_keys[i];
         if (k[0] == '\0') continue;
@@ -3624,6 +3635,7 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
     for (int i = 0; i < s->config.n_users; i++) {
         if (strcmp(s->config.user_names[i], username) == 0) {
             snprintf(s->config.user_keys[i], sizeof(s->config.user_keys[i]), "%s", key);
+            s->auth_latched = 1;
             return MQVPN_OK;
         }
     }
@@ -3635,6 +3647,7 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
     snprintf(s->config.user_keys[s->config.n_users],
              sizeof(s->config.user_keys[s->config.n_users]), "%s", key);
     s->config.n_users++;
+    s->auth_latched = 1;
     return MQVPN_OK;
 }
 
@@ -3662,6 +3675,12 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
         }
     }
     if (!found) return MQVPN_ERR_INVALID_ARG;
+
+    /* Auth stays required (auth_latched), so with no credential left every
+     * new request is refused: say so rather than leave it to be discovered. */
+    if (s->config.n_users == 0 && s->config.auth_key[0] == '\0')
+        LOG_W(s, "last credential removed: new connections will be rejected until a "
+                 "user is added");
 
     /* Release pinned IP for the removed user if not currently connected */
     for (int i = 0; i < s->n_pinned_ips; i++) {
