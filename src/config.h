@@ -80,7 +80,7 @@ typedef struct mqvpn_file_config_s {
     int n_users;
     int max_clients;
 
-    /* [Control] — server */
+    /* [Control] — client and server */
     char control_listen[280]; /* "addr:port" — empty string when control API disabled */
 
     /* [Multipath] */
@@ -132,9 +132,10 @@ typedef struct mqvpn_file_config_s {
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
     int route_via_server;   /* 1=default via server tunnel IP, 0=0/1+128/1 trick (default) */
     int no_routes;          /* 1=skip automatic route setup entirely, 0=auto (default) */
-    int manage_routes;      /* 1=manage host routes (default), 0=skip routing table setup */
+    int manage_routes;      /* 1=manage host routes (default), 0=same as no_routes=1 */
 
-    /* [Control] — server */
+    /* [Control] Port / Addr — client and server (see
+     * mqvpn_resolve_control_endpoint_ex for the merge with Listen) */
     int control_port;           /* TCP port for JSON control API (0 = disabled) */
     char control_addr[64];      /* bind address for control API (default "127.0.0.1") */
 
@@ -199,5 +200,18 @@ int mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr
                                    int cli_port, int cli_port_set, char *addr_buf,
                                    size_t addr_buf_len, const char **out_addr,
                                    int *out_port);
+
+/*
+ * Same, with the separate [Control] Addr / Port keys (control_addr /
+ * control_port in JSON) as well. Precedence per field, lowest first:
+ * [Control] Listen, then [Control] Addr / Port (when set: non-empty /
+ * > 0), then --control-addr / --control-port. Used for both client and
+ * server mode.
+ */
+int mqvpn_resolve_control_endpoint_ex(const char *file_listen, const char *file_addr,
+                                      int file_port, const char *cli_addr, int cli_port,
+                                      int cli_port_set, char *addr_buf,
+                                      size_t addr_buf_len, const char **out_addr,
+                                      int *out_port);
 
 #endif /* MQVPN_CONFIG_H */

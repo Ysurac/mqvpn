@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int g_pass = 0, g_fail = 0;
@@ -2659,6 +2660,8 @@ test_ini_json_scalar_parity(void)
                   "parity advanced recv_rate_limit is non-default");
     ASSERT_EQ_INT(a.udp_gso, 0, "parity advanced udp_gso is non-default");
     ASSERT_EQ_INT(a.udp_gro, 0, "parity advanced udp_gro is non-default");
+    ASSERT_EQ_INT(a.manage_routes, b.manage_routes, "parity manage_routes");
+    ASSERT_EQ_INT(a.manage_routes, 0, "parity manage_routes is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */
@@ -2800,6 +2803,234 @@ test_sched_cc_name_roundtrip(void)
     ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name("bogus"), -1, "reinj from_name(bogus)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name(NULL), -1, "reinj from_name(NULL)");
+}
+
+/* ── Inline comments, booleans, line handling ────────────────────────────── */
+
+static int
+load_ini(mqvpn_file_config_t *cfg, const char *text)
+{
+    char *p = write_tmp(text);
+    mqvpn_config_defaults(cfg);
+    int rc = mqvpn_config_load(cfg, p);
+    unlink(p);
+    return rc;
+}
+
+static void
+test_ini_inline_comments(void)
+{
+    mqvpn_file_config_t cfg;
+    int rc = load_ini(&cfg, "[Interface]   # section comment\n"
+                            "TunName = tun9    # trailing comment\n"
+                            "LogLevel = debug\t; semicolon comment\n"
+                            "KillSwitch = true # bool with comment\n"
+                            "\n"
+                            "[Server]\n"
+                            "Address = vpn.example.com:443  # host\n"
+                            "PinnedPubkey = a#b;c\n" /* no space before '#'/';' */
+                            "[Multipath]\n"
+                            "Scheduler = wlb    # Scheduler (wlb|minrtt)\n"
+                            "Path = eth0 # first\n"
+                            "[Auth]\n"
+                            "Key = abc+/def=  # base64 key\n");
+    ASSERT_EQ_INT(rc, 0, "inline comments load ok");
+    ASSERT_EQ_STR(cfg.tun_name, "tun9", "inline # stripped");
+    ASSERT_EQ_STR(cfg.log_level, "debug", "inline ; stripped");
+    ASSERT_EQ_INT(cfg.kill_switch, 1, "bool with inline comment");
+    ASSERT_EQ_STR(cfg.server_addr, "vpn.example.com:443", "address with comment");
+    ASSERT_EQ_STR(cfg.pinned_pubkey, "a#b;c", "'#'/';' without preceding space kept");
+    ASSERT_EQ_STR(cfg.scheduler, "wlb", "scheduler with comment");
+    ASSERT_EQ_STR(cfg.paths[0], "eth0", "path with comment");
+    ASSERT_EQ_STR(cfg.auth_key, "abc+/def=", "key with comment");
+}
+
+static void
+test_ini_crlf_and_blank_lines(void)
+{
+    mqvpn_file_config_t cfg;
+    int rc = load_ini(&cfg, "\r\n\r\n[Interface]\r\n\r\n\r\nTunName = tcrlf\r\n");
+    ASSERT_EQ_INT(rc, 0, "crlf load ok");
+    ASSERT_EQ_STR(cfg.tun_name, "tcrlf", "crlf value trimmed");
+}
+
+static void
+test_ini_bool_words(void)
+{
+    const char *yes[] = {"true", "TRUE", "Yes", "on", "ON", "1"};
+    const char *no[] = {"false", "False", "NO", "off", "Off", "0"};
+    char text[128];
+    mqvpn_file_config_t cfg;
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); i++) {
+        snprintf(text, sizeof(text), "[Interface]\nKillSwitch = %s\n", yes[i]);
+        load_ini(&cfg, text);
+        ASSERT_EQ_INT(cfg.kill_switch, 1, yes[i]);
+        snprintf(text, sizeof(text), "[Interface]\nReconnect = %s\n", no[i]);
+        load_ini(&cfg, text);
+        ASSERT_EQ_INT(cfg.reconnect, 0, no[i]);
+    }
+    /* Unrecognized: warn and keep the default (Reconnect defaults to on). */
+    load_ini(&cfg, "[Interface]\nReconnect = maybe\nKillSwitch = enable\n");
+    ASSERT_EQ_INT(cfg.reconnect, 1, "unknown bool keeps default true");
+    ASSERT_EQ_INT(cfg.kill_switch, 0, "unknown bool keeps default false");
+    /* [Reorder] Enabled shares the vocabulary (+ auto). */
+    load_ini(&cfg, "[Reorder]\nEnabled = Yes\n");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_ON, "reorder Enabled=Yes");
+    load_ini(&cfg, "[Reorder]\nEnabled = 0\n");
+    ASSERT_EQ_INT(cfg.reorder.mode, MQVPN_REORDER_OFF, "reorder Enabled=0");
+}
+
+static void
+test_manage_routes_key(void)
+{
+    mqvpn_file_config_t cfg;
+    ASSERT_EQ_INT(load_ini(&cfg, "[Interface]\nManageRoutes = false\n"), 0,
+                  "ManageRoutes load ok");
+    ASSERT_EQ_INT(cfg.manage_routes, 0, "ManageRoutes=false parsed");
+    ASSERT_EQ_INT(cfg.no_routes, 0, "ManageRoutes leaves NoRoutes alone");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.manage_routes, 1, "ManageRoutes default true");
+    mqvpn_config_load_json_filecfg(&cfg, "{\"manage_routes\":false}");
+    ASSERT_EQ_INT(cfg.manage_routes, 0, "JSON manage_routes=false parsed");
+}
+
+static void
+test_json_explicit_mode_wins(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, "{\"mode\":\"client\",\"listen\":\"0.0.0.0:443\","
+                                         "\"server_addr\":\"1.2.3.4:443\"}");
+    ASSERT_EQ_INT(cfg.is_server, 0, "explicit client mode beats listen");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, "{\"listen\":\"0.0.0.0:443\"}");
+    ASSERT_EQ_INT(cfg.is_server, 1, "listen alone still infers server");
+}
+
+static void
+test_json_nested_keys_not_top_level(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    /* "mtu" only inside an unrelated object must not set the top-level mtu. */
+    mqvpn_config_load_json_filecfg(&cfg, "{\"extra\":{\"mtu\":1400,\"tun_name\":\"x\"}}");
+    ASSERT_EQ_INT(cfg.tun_mtu, 0, "nested mtu ignored");
+    ASSERT_EQ_STR(cfg.tun_name, "mqvpn0", "nested tun_name ignored");
+}
+
+static void
+test_too_long_values_rejected(void)
+{
+    char key[400];
+    memset(key, 'k', sizeof(key) - 1);
+    key[sizeof(key) - 1] = '\0';
+    char text[600];
+    mqvpn_file_config_t cfg;
+
+    /* Scalar string longer than its field: ignored, not truncated. */
+    snprintf(text, sizeof(text), "[Auth]\nKey = %s\n", key);
+    ASSERT_EQ_INT(load_ini(&cfg, text), 0, "long key load ok");
+    ASSERT_EQ_STR(cfg.auth_key, "", "over-long INI key ignored");
+
+    char json[600];
+    snprintf(json, sizeof(json), "{\"auth_key\":\"%s\"}", key);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_STR(cfg.auth_key, "", "over-long JSON key ignored");
+
+    /* User whose key does not fit: skipped. */
+    snprintf(text, sizeof(text), "[Auth]\nUser = alice:%s\n", key);
+    load_ini(&cfg, text);
+    ASSERT_EQ_INT(cfg.n_users, 0, "over-long user key skipped");
+
+    /* JSON users array with an over-long name fails the load. */
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(
+                      &cfg, "{\"users\":[{\"name\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"key\":\"k\"}]}"),
+                  -1, "over-long JSON user name fails the load");
+}
+
+static void
+test_cap_packets_upper_bound(void)
+{
+    mqvpn_file_config_t cfg;
+    load_ini(&cfg, "[Reorder]\nCapPackets = 131072\n");
+    ASSERT_EQ_INT(cfg.reorder.has_explicit_cap, 0, "global cap above max rejected");
+    load_ini(&cfg, "[Reorder]\nCapPackets = 65536\n");
+    ASSERT_EQ_INT((int)cfg.reorder.cap_packets_per_flow, 65536, "global cap at max ok");
+    load_ini(&cfg, "[ReorderRule]\nPort = 443\nCapPackets = 131072\n");
+    ASSERT_EQ_INT((int)cfg.reorder.rules[0].explicit_cap, 0, "rule cap above max rejected");
+    load_ini(&cfg, "[ReorderRule]\nPort = 443\nCapPackets = 2048\n");
+    ASSERT_EQ_INT((int)cfg.reorder.rules[0].explicit_cap, 2048, "rule cap ok");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(
+        &cfg, "{\"reorder_rules\":[{\"port\":443,\"cap_packets\":1048576}]}");
+    ASSERT_EQ_INT((int)cfg.reorder.rules[0].explicit_cap, 0, "JSON rule cap above max");
+}
+
+static void
+test_resolve_control_endpoint_ex(void)
+{
+    char buf[256];
+    const char *addr = NULL;
+    int port = 0;
+
+    /* Separate keys alone (the OpenMPTCProuter client form). */
+    ASSERT_EQ_INT(mqvpn_resolve_control_endpoint_ex(NULL, "127.0.0.1", 9091, NULL, 0, 0, buf,
+                                                    sizeof(buf), &addr, &port),
+                  0, "ex: Port/Addr ok");
+    ASSERT_EQ_INT(port, 9091, "ex: file Port");
+    ASSERT_TRUE(addr && strcmp(addr, "127.0.0.1") == 0, "ex: file Addr");
+
+    /* Port alone: default address (NULL → 127.0.0.1 in the socket). */
+    mqvpn_resolve_control_endpoint_ex("", "", 9092, NULL, 0, 0, buf, sizeof(buf), &addr,
+                                      &port);
+    ASSERT_EQ_INT(port, 9092, "ex: Port alone");
+    ASSERT_TRUE(addr == NULL, "ex: Port alone keeps default addr");
+
+    /* Listen + Port: the separate key wins for its field. */
+    mqvpn_resolve_control_endpoint_ex("127.0.0.2:9000", NULL, 9093, NULL, 0, 0, buf,
+                                      sizeof(buf), &addr, &port);
+    ASSERT_EQ_INT(port, 9093, "ex: Port over Listen port");
+    ASSERT_TRUE(addr && strcmp(addr, "127.0.0.2") == 0, "ex: Listen addr kept");
+
+    /* --control-port 0 disables a file Port. */
+    mqvpn_resolve_control_endpoint_ex(NULL, NULL, 9094, NULL, 0, 1, buf, sizeof(buf), &addr,
+                                      &port);
+    ASSERT_EQ_INT(port, 0, "ex: --control-port 0 disables file Port");
+
+    /* CLI overrides both. */
+    mqvpn_resolve_control_endpoint_ex("127.0.0.2:9000", "127.0.0.3", 9095, "::1", 9096, 1,
+                                      buf, sizeof(buf), &addr, &port);
+    ASSERT_EQ_INT(port, 9096, "ex: CLI port wins");
+    ASSERT_TRUE(addr && strcmp(addr, "::1") == 0, "ex: CLI addr wins");
+
+    /* The INI keys parse in both modes' section. */
+    mqvpn_file_config_t cfg;
+    load_ini(&cfg, "[Control]\nPort = 9097\nAddr = 127.0.0.1\n");
+    ASSERT_EQ_INT(cfg.control_port, 9097, "[Control] Port parsed");
+    ASSERT_EQ_STR(cfg.control_addr, "127.0.0.1", "[Control] Addr parsed");
+}
+
+static void
+test_world_readable_secret_still_loads(void)
+{
+    char *p = write_tmp("[Auth]\nKey = secret\n");
+    chmod(p, 0644);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "0644 file with PSK warns, still loads");
+    ASSERT_EQ_STR(cfg.auth_key, "secret", "0644 file key parsed");
+    unlink(p);
+}
+
+static void
+test_auth_user_plain_invalid_chars(void)
+{
+    mqvpn_file_config_t cfg;
+    load_ini(&cfg, "[Auth]\nUser = bad\"name\n");
+    ASSERT_EQ_STR(cfg.auth_username, "", "plain User with quote rejected");
 }
 
 int
@@ -2956,6 +3187,19 @@ main(void)
 
     /* mqvpn_sched_names.h table parity */
     test_sched_cc_name_roundtrip();
+
+    /* parser hardening */
+    test_ini_inline_comments();
+    test_ini_crlf_and_blank_lines();
+    test_ini_bool_words();
+    test_manage_routes_key();
+    test_json_explicit_mode_wins();
+    test_json_nested_keys_not_top_level();
+    test_too_long_values_rejected();
+    test_cap_packets_upper_bound();
+    test_resolve_control_endpoint_ex();
+    test_world_readable_secret_still_loads();
+    test_auth_user_plain_invalid_chars();
 
     printf("\n=== test_config: %d passed, %d failed ===\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
