@@ -34,6 +34,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "platform/linux/control_socket.c"
@@ -43,7 +44,11 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size > CTRL_MAX_REQ) return 0;
 
-    char req[CTRL_MAX_REQ + 1];
+    /* Exact-size heap copies (size + NUL): a parser read past the
+     * terminator lands outside the allocation, where ASan reports it; a
+     * fixed 4097-byte buffer would hide such over-reads. */
+    char *req = malloc(size + 1);
+    if (!req) return 0;
     memcpy(req, data, size);
     req[size] = '\0';
 
@@ -57,11 +62,21 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     static char resp[CTRL_MAX_RESP_BYTES];
     (void)dispatch(req, resp, sizeof(resp), &cs);
 
-    /* Framed path, as ctrl_on_read runs it on a complete object. */
+    /* Framed path, as ctrl_on_read runs it on a complete object; the cut
+     * object is again dispatched from an exact-size copy. */
     static ctrl_conn_t conn;
     memcpy(conn.req, data, size);
     conn.req[size] = '\0';
     conn.req_len = size;
-    if (ctrl_frame_request(&conn) == 1) (void)dispatch(conn.req, resp, sizeof(resp), &cs);
+    if (ctrl_frame_request(&conn) == 1) {
+        size_t n = strlen(conn.req);
+        char *framed = malloc(n + 1);
+        if (framed) {
+            memcpy(framed, conn.req, n + 1);
+            (void)dispatch(framed, resp, sizeof(resp), &cs);
+            free(framed);
+        }
+    }
+    free(req);
     return 0;
 }

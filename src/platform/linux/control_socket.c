@@ -6,7 +6,8 @@
  *
  * Supported JSON commands:
  *
- *   {"cmd":"add_user",    "name":"alice","key":"alice-secret"}
+ *   {"cmd":"add_user",    "name":"alice","key":"alice-secret"[,"fixed_ip":"10.0.0.5"]}
+ *   {"cmd":"set_user_fixed_ip", "name":"alice","fixed_ip":"10.0.0.5"}  ("" clears)
  *   {"cmd":"remove_user", "name":"alice"}
  *   {"cmd":"list_users"}
  *   {"cmd":"get_stats"}

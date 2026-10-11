@@ -64,8 +64,6 @@ static mqvpn_internal_fec_stats_t g_client_fec_tmpl;
 
 static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
 
-static int g_all_fec_rc = 0;
-static int g_all_fec_n = 0;
 
 static int g_reorder_rc = 0;
 
