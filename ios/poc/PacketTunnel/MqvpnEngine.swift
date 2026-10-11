@@ -153,6 +153,7 @@ final class MqvpnEngine: NSObject {
             mqvpn_client_destroy(c)
             bindCtx.removeAll()
             poisoned.removeAll()
+            fdClosed.removeAll()
         }
         tickThread.cancel()
     }
@@ -160,6 +161,12 @@ final class MqvpnEngine: NSObject {
     /// Handles whose release the library did not recognise (path-ledger
     /// corruption): never dereferenced or reused again; cleared by destroy.
     private var poisoned: Set<mqvpn_path_handle_t> = []
+
+    /// Handles whose socket the platform already closed while the ctx stays
+    /// library-owned (a release the library refused with a non-OK, non-
+    /// INVALID_ARG code): `drain` must not read through a closed — possibly
+    /// already reused — fd. Cleared by addPath (a recycled handle) and destroy.
+    private var fdClosed: Set<mqvpn_path_handle_t> = []
 
     private func logRxStats(_ h: mqvpn_path_handle_t, _ ctx: UnsafeMutableRawPointer, tag: String) {
         var st = mqvpn_bind_posix_stats_t()
@@ -345,6 +352,7 @@ final class MqvpnEngine: NSObject {
             return (h, outcome)
         }
         bindCtx[h] = bctx
+        fdClosed.remove(h)
         return (h, outcome)
     }
     func removePath(_ handle: mqvpn_path_handle_t) {
@@ -355,7 +363,8 @@ final class MqvpnEngine: NSObject {
     /// library (tick thread). A hard error is ignored: NWPathMonitor and
     /// reconcile own drop detection.
     func drain(_ handle: mqvpn_path_handle_t) {
-        guard let c = client, let ctx = bindCtx[handle], !poisoned.contains(handle) else { return }
+        guard let c = client, let ctx = bindCtx[handle], !poisoned.contains(handle),
+              !fdClosed.contains(handle) else { return }
         _ = mqvpn_bind_posix_path_drain(ctx, c, handle, 64)
         scheduleTick(afterMs: 0)   // input may arm new engine work; tick soon
     }
@@ -379,7 +388,9 @@ final class MqvpnEngine: NSObject {
         default:
             // Unreachable: PathBinder removes before it cancels, so the slot
             // is CLOSED_DROPPED here. Were it reached, the ctx would stay
-            // library-owned on an already-closed fd until destroy.
+            // library-owned on an already-closed fd until destroy — so no
+            // queued drain may read through it again.
+            fdClosed.insert(handle)
             log.warning("[path] handle=\(handle) path_released rc=\(rc); transport stays library-owned")
         }
     }
