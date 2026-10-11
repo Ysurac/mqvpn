@@ -48,6 +48,7 @@ Sections 1–4 below describe the **desktop/router** profile unless stated other
 | hash bucket array | tcp_lane.c `pick_buckets` | 8192 buckets × 8 B pointer = 64 KiB | sized from `tcp_max_flows + TCP_LANE_RAW_MARKER_CAP` (256 + 4096 → next pow2). Unchanged at the 4096 ceiling: 4096 + 4096 lands on the same 8192 buckets, so raising the flow cap costs nothing here |
 | `MQVPN_TCP_LANE_BP_HIGH_WATER` | tcp_lane.h | 262,144 B (256 KiB) | see §2 — not the per-flow hard bound |
 | `MQVPN_TCP_LANE_BP_LOW_WATER` | tcp_lane.h | 65,536 B (64 KiB) | resume threshold, prevents withhold/resume flapping |
+| `MQVPN_H3_RECV_BODY_HIGH_WATER` | mqvpn_internal.h | 262,144 B (256 KiB) | xquic h3 `recv_body_buf_high_water` on both ends: unread request body xquic holds for a paused flow before QUIC flow control pushes back (§6); xquic memory, not lane memory |
 
 ### 1a. PBUF_POOL status
 
@@ -480,10 +481,19 @@ isolation (the shipped profile, §5c, applies both together):
   the server's egress `connect()` completes are held by mqvpn (up to 256 KiB per flow, sent
   first once connected); past that the flow is reset. A rejected connect-tcp request's body
   is read and discarded, never buffered.
-- **A paused ACTIVE flow is not backpressured (open).** Stopping `recv_body` does not stop
-  the peer: xquic's HTTP/3 layer keeps reading stream data into its own body buffer and
-  returns flow-control credit. A target (server uplink) or LAN device (client downlink)
-  slower than the tunnel therefore lets that buffer grow. Capping it on the mqvpn side could
-  only reset the flow, which would break ordinary slow-receiver transfers, so it is left
-  open pending an h3 body-buffer high-water mark in the xquic fork that stops pulling stream
-  data and lets QUIC stream flow control push back.
+- **A paused ACTIVE flow is backpressured through QUIC flow control, after a bounded
+  buffer.** A flow whose target (server uplink) or LAN device (client downlink) is slower
+  than the tunnel pauses and stops calling `recv_body`. Client and server set xquic's
+  HTTP/3 `recv_body_buf_high_water` to `MQVPN_H3_RECV_BODY_HIGH_WATER` (256 KiB,
+  `mqvpn_internal.h`): once a request holds that much unread body, xquic stops reading its
+  QUIC stream, so no more stream flow-control credit goes back and the sender stalls. The
+  flow resumes reading where it left off as soon as its relay drains below the mark. A
+  paused flow therefore holds at most the mark plus its QUIC stream receive window in
+  xquic (xquic sizes that window to the flow's recent throughput, at most 16 MiB), instead
+  of a buffer that grew for as long as the pause lasted. That memory is xquic's, not the
+  lane's, so it is not part of the §3 figures. The data a paused flow holds still counts
+  against the connection-level flow-control window it shares with the other TCP-lane
+  flows of the session: several fast flows paused at once can slow new TCP-lane data on
+  that connection until they resume. RAW-lane traffic (HTTP Datagrams) is not flow
+  controlled and is unaffected, and the CONNECT-IP stream is read to the end on every
+  notify, so its capsules never wait on the mark.

@@ -2275,6 +2275,138 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     free(h.probe.raw_recv_buf);
 }
 
+/* Test 4b: a paused flow pushes back on the client instead of buffering.
+ * The sink never reads, so the egress socket fills and the flow pauses
+ * (stops calling recv_body). The server sets xquic's h3
+ * recv_body_buf_high_water (MQVPN_H3_RECV_BODY_HIGH_WATER), so the paused
+ * request stops being read past it: the rest stays in the QUIC stream receive
+ * buffer, no flow-control credit goes back, and the probe's own sends stall.
+ * Without the mark, xquic kept reading into the request's body buffer and
+ * returning credit, so the probe could push all 48 MiB (and server memory
+ * grew with it). Once the sink drains, the flow resumes, the server reads
+ * again, and the whole payload arrives byte-identical, then the SHUT_WR. */
+TEST(mqvpn_tcp_paused_flow_backpressures_client)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    /* Far more than the kernel socket buffers, the stash, the mark and the
+     * QUIC stream window together can absorb. */
+    const size_t payload_len = 48u * 1024u * 1024u;
+    uint8_t *payload = malloc(payload_len);
+    ASSERT_EQ(payload != NULL, 1);
+    for (size_t i = 0; i < payload_len; i++)
+        payload[i] = (uint8_t)((i * 31u + (i >> 16)) & 0xFF);
+
+    /* Phase 1: send until the probe has made no progress for 50 consecutive
+     * pump slices (1 s), with the sink still not reading. */
+    size_t off = 0;
+    int idle_slices = 0;
+    long long heap_at_stall = -1;
+    for (int i = 0; i < 3000 && off < payload_len && idle_slices < 50; i++) {
+        size_t before = off;
+        while (off < payload_len) {
+            ssize_t sent = xqc_h3_request_send_body(
+                h.probe.req, (unsigned char *)(payload + off), payload_len - off, 0);
+            if (sent == -XQC_EAGAIN) break;
+            ASSERT_EQ(sent > 0, 1);
+            off += (size_t)sent;
+        }
+        idle_slices = (off == before) ? idle_slices + 1 : 0;
+        if (idle_slices == 10) heap_at_stall = test_heap_in_use();
+        tcp_sink_pump(&sink);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    /* THE ASSERTION: the client was flow-controlled well short of the
+     * payload, and stayed stalled while the target was not reading. */
+    if (off >= payload_len || idle_slices < 50) {
+        printf("FAIL\n    %s:%d: probe pushed %zu of %zu bytes into a paused flow "
+               "(stalled slices: %d) — no backpressure\n",
+               __FILE__, __LINE__, off, payload_len, idle_slices);
+        exit(1);
+    }
+    /* Nothing kept piling up on the server while stalled. */
+    long long heap_end = test_heap_in_use();
+    if (heap_at_stall >= 0 && heap_end - heap_at_stall > (1 << 20)) {
+        printf("FAIL\n    %s:%d: heap grew by %lld bytes while the flow was paused\n",
+               __FILE__, __LINE__, heap_end - heap_at_stall);
+        exit(1);
+    }
+    printf("[stalled after %zu bytes] ", off);
+
+    /* Phase 2: drain the sink while sending the rest and the fin. */
+    uint8_t *received = malloc(payload_len);
+    ASSERT_EQ(received != NULL, 1);
+    size_t received_len = 0;
+    int fin_sent = 0;
+    for (int i = 0; i < 20000 && received_len < payload_len; i++) {
+        while (off < payload_len) {
+            ssize_t sent = xqc_h3_request_send_body(
+                h.probe.req, (unsigned char *)(payload + off), payload_len - off, 0);
+            if (sent == -XQC_EAGAIN) break;
+            ASSERT_EQ(sent > 0, 1);
+            off += (size_t)sent;
+        }
+        if (off == payload_len && !fin_sent) {
+            ssize_t sent = xqc_h3_request_send_body(h.probe.req, NULL, 0, 1);
+            if (sent >= 0)
+                fin_sent = 1;
+            else
+                ASSERT_EQ(sent, -XQC_EAGAIN);
+        }
+        tcp_sink_pump(&sink);
+        if (sink.conn_fd >= 0) {
+            uint8_t buf[65536];
+            ssize_t n;
+            while ((n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+                if (received_len + (size_t)n <= payload_len)
+                    memcpy(received + received_len, buf, (size_t)n);
+                received_len += (size_t)n;
+            }
+        }
+        int never = 0;
+        harness_pump(&h, &never, 2);
+    }
+    ASSERT_EQ(fin_sent, 1);
+    ASSERT_EQ(received_len, payload_len);
+    ASSERT_EQ(memcmp(received, payload, payload_len), 0);
+
+    int shutdown_seen = 0;
+    for (int i = 0; i < 500 && !shutdown_seen; i++) {
+        uint8_t buf[4096];
+        ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n == 0) shutdown_seen = 1;
+        if (!shutdown_seen) {
+            int never = 0;
+            harness_pump(&h, &never, 20);
+        }
+    }
+    ASSERT_EQ(shutdown_seen, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(payload);
+    free(received);
+    free(h.probe.raw_recv_buf);
+}
+
 /* 1 if any egress fd the server registered currently asks for writable
  * events — tcp_egress.c only does that for a downlink-paused ACTIVE flow
  * (svr_tcp_egress_update_fd_interest), so this is the harness-visible
@@ -3751,6 +3883,7 @@ main(void)
     run_mqvpn_tcp_h3_fin_becomes_shut_wr();
     run_mqvpn_tcp_bodiless_fin_becomes_shut_wr();
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
+    run_mqvpn_tcp_paused_flow_backpressures_client();
     run_mqvpn_tcp_relay_error_stops_fd_dispatch();
     run_mqvpn_tcp_uplink_backlog_stops_at_unsent_cap();
     run_mqvpn_tcp_closing_notify_idempotent();

@@ -3678,6 +3678,7 @@ init_xquic_engine(mqvpn_client_t *c)
         .qpack_dec_max_table_capacity = 16 * 1024,
         .enable_connect_protocol = 1,
         .h3_datagram = 1,
+        .recv_body_buf_high_water = MQVPN_H3_RECV_BODY_HIGH_WATER,
     };
     xqc_h3_engine_set_local_settings(c->engine, &h3s);
     return 0;

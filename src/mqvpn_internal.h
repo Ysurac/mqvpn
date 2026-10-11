@@ -81,6 +81,21 @@ mqvpn_tx_batch_enabled(int udp_gso)
  * high default is safe. */
 #define MQVPN_TUN_MTU_AUTO 1382
 
+/* xquic h3 recv_body_buf_high_water, set by client and server on every
+ * request stream. A hybrid-lane flow that stops calling recv_body (inner
+ * receiver or egress target slower than the tunnel) then holds at most this
+ * much unread body in xquic's h3 buffer; the rest stays in the QUIC stream
+ * receive buffer, unacknowledged by MAX_STREAM_DATA, so stream flow control
+ * slows the peer down. 256 KiB is the order of the lane's other per-flow
+ * buffers (the desktop MQVPN_TCP_LANE_BP_HIGH_WATER, the server's
+ * CONNECTING body cap) and small next to the per-flow lwIP windows
+ * (docs/hybrid_h2_memory_budget.md §1, §6). It does not cost throughput: a
+ * flow only pauses with its consumer's own send buffer (lwIP TCP_SND_BUF,
+ * the egress socket) full, and a flow read from its notify never waits on
+ * the mark. The CONNECT-IP stream is always read to the end in its notify,
+ * so its capsules never wait on it either. */
+#define MQVPN_H3_RECV_BODY_HIGH_WATER (256u * 1024u)
+
 /* ─── Config (opaque to callers) ─── */
 
 struct mqvpn_config_s {

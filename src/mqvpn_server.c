@@ -3367,6 +3367,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         .qpack_dec_max_table_capacity = 16 * 1024,
         .enable_connect_protocol = 1,
         .h3_datagram = 1,
+        .recv_body_buf_high_water = MQVPN_H3_RECV_BODY_HIGH_WATER,
     };
     xqc_h3_engine_set_local_settings(s->engine, &h3s);
 

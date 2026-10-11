@@ -479,11 +479,11 @@ svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status, uint8_t fin)
 
 /* Read and drop whatever request body xquic holds for a stream no flow
  * will ever relay (rejected at request time, or its connect failed).
- * xquic's h3 layer moves every received DATA byte into the request's
- * body_buf and returns the flow-control credit right away, so a body that
- * is never read is not backpressure: it stays buffered until the stream
- * closes, and a peer that keeps sending grows it without bound. Draining
- * keeps the memory flat; the bytes are discarded. Never runs the engine. */
+ * Left unread, the body would sit in xquic until the stream closes: up to
+ * MQVPN_H3_RECV_BODY_HIGH_WATER in the h3 buffer, then the rest held in
+ * the QUIC stream with the client stalled on flow control. Draining keeps
+ * the memory flat and lets the client finish; the bytes are discarded.
+ * Never runs the engine. */
 static void
 svr_tcp_egress_discard_body(xqc_h3_request_t *h3_request)
 {
@@ -580,17 +580,15 @@ typedef struct svr_tcp_egress_flow_s {
      * TCP_EGRESS_CONNECTING_BODY_CAP (256 KiB) — conforming clients send
      * none (they gate on the 2xx).
      *
-     * KNOWN LIMITATION: once ACTIVE, a downlink pause (egress socket full)
-     * stops reading recv_body, but that is not backpressure on the client —
-     * xquic's h3 layer keeps moving arriving DATA into the request's
-     * body_buf and returning flow-control credit, so a client that keeps
-     * sending faster than the target drains grows server memory for as
-     * long as the pause lasts. Bounding it without resetting legitimate
-     * uploads to slow targets needs the xquic fork to stop pulling stream
-     * data into body_buf above a high-water mark (QUIC stream flow control
-     * then pushes back on the client); a mqvpn-side cap could only reset
-     * the flow. The idle eviction (tcp_idle_timeout_sec) does not apply:
-     * bytes keep moving. */
+     * Once ACTIVE, a downlink pause (egress socket full) stops reading
+     * recv_body, and that is what pushes back on the client: when
+     * MQVPN_H3_RECV_BODY_HIGH_WATER of body sits unread in xquic's h3
+     * buffer (recv_body_buf_high_water, set in mqvpn_server.c), xquic stops
+     * reading the QUIC stream, returns no more flow-control credit, and the
+     * client stalls instead of server memory growing for as long as the
+     * pause lasts. The resume path (writable -> flush_downlink_retry ->
+     * drain_body) calls recv_body again, and taking the buffer below the
+     * mark is what makes xquic read the stream again. */
     int downlink_paused; /* send()-side backpressure: downlink_stash holds
                           * one unsent chunk pulled out of xquic's body_buf
                           * (already destructively consumed — cannot be
