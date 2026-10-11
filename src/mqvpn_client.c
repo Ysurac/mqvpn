@@ -1600,14 +1600,21 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 
 /* ─── MASQUE tunnel start ─── */
 
-/* Append `authorization: Bearer <auth_key>` when configured. auth_buf is
- * caller-owned and must stay live until xqc_h3_request_send_headers (the
- * header only holds an iovec into it). Returns the new header count. Shared
- * by cli_masque_start_tunnel and cli_tcp_lane_open_stream. */
+/* Most headers cli_append_auth_header can add (authorization + x-user). */
+#define CLI_AUTH_HDR_MAX 2
+
+/* Append `authorization: Bearer <auth_key>` and `x-user: <username>` when
+ * configured. auth_buf is caller-owned and must stay live until
+ * xqc_h3_request_send_headers (the header only holds an iovec into it).
+ * hdr_cap is the capacity of hdrs; returns the new header count, or -1
+ * (nothing appended) when the headers would not fit. Shared by
+ * cli_masque_start_tunnel and cli_tcp_lane_open_stream. */
 static int
 cli_append_auth_header(const mqvpn_client_t *c, xqc_http_header_t *hdrs, int hdr_count,
-                       char *auth_buf, size_t auth_buf_len)
+                       int hdr_cap, char *auth_buf, size_t auth_buf_len)
 {
+    int need = (c->config.auth_key[0] != '\0') + (c->config.auth_username[0] != '\0');
+    if (hdr_count < 0 || hdr_count > hdr_cap - need) return -1;
     if (c->config.auth_key[0] != '\0') {
         snprintf(auth_buf, auth_buf_len, "Bearer %s", c->config.auth_key);
         hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
@@ -1651,10 +1658,8 @@ cli_masque_start_tunnel(cli_conn_t *conn)
 
     char auth_value[300];
 
-    int has_username = (c->config.auth_username[0] != '\0');
-
-
-    xqc_http_header_t hdrs[9] = {
+    /* 6 fixed + auth + mqvpn-reorder */
+    xqc_http_header_t hdrs[6 + CLI_AUTH_HDR_MAX + 1] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -1674,13 +1679,20 @@ cli_masque_start_tunnel(cli_conn_t *conn)
          .value = {.iov_base = "?1", .iov_len = 2},
          .flags = 0},
     };
-    int hdr_count = 6;
-    hdr_count =
-        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
+    int hdr_count =
+        cli_append_auth_header(c, hdrs, 6, (int)(sizeof(hdrs) / sizeof(hdrs[0])),
+                               auth_value, sizeof(auth_value));
+    if (hdr_count < 0) {
+        LOG_E(c, "Extended CONNECT: header array too small");
+        conn->masque_request = NULL;
+        xqc_h3_request_close(req);
+        return -1;
+    }
     /* §19.2/§19.3: advertise the reorder capability only when locally enabled AND
      * the rx engine actually allocated — advertising with a NULL engine would make
      * the server stamp packets we then drop (one-way blackhole). */
-    if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx)) {
+    if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx) &&
+        hdr_count < (int)(sizeof(hdrs) / sizeof(hdrs[0]))) {
         hdrs[hdr_count].name =
             (struct iovec){.iov_base = MQVPN_REORDER_HDR_NAME,
                            .iov_len = sizeof(MQVPN_REORDER_HDR_NAME) - 1};
@@ -1690,7 +1702,8 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 9};
+    xqc_http_headers_t headers = {
+        .headers = hdrs, .count = hdr_count, .capacity = sizeof(hdrs) / sizeof(hdrs[0])};
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
@@ -1779,7 +1792,7 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
      * and deliberately NO capsule-protocol / mqvpn-reorder headers — the TCP
      * lane carries a raw byte relay, not capsules, and reorder is a
      * DATAGRAM-lane concern. */
-    xqc_http_header_t hdrs[6] = {
+    xqc_http_header_t hdrs[5 + CLI_AUTH_HDR_MAX] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -1796,10 +1809,16 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
          .value = {.iov_base = path, .iov_len = strlen(path)},
          .flags = 0},
     };
-    int hdr_count = 5;
-    hdr_count =
-        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 6};
+    int hdr_count =
+        cli_append_auth_header(c, hdrs, 5, (int)(sizeof(hdrs) / sizeof(hdrs[0])),
+                               auth_value, sizeof(auth_value));
+    if (hdr_count < 0) {
+        LOG_E(c, "connect-tcp: header array too small");
+        xqc_h3_request_close(req); /* close notify frees stream */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+    xqc_http_headers_t headers = {
+        .headers = hdrs, .count = hdr_count, .capacity = sizeof(hdrs) / sizeof(hdrs[0])};
 
     mqvpn_tcp_lane_bind_h3_request(flow_handle, req, stream);
 
