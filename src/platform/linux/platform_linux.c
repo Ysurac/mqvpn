@@ -150,7 +150,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     } else {
         LOG_INF("no_routes=true: host routing table left untouched");
     }
-    if (setup_killswitch(p) < 0) {
+    /* The kill switch block itself has been up since startup; only the
+     * ACCEPT for this TUN follows the tunnel. */
+    if (killswitch_tun_up(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
         goto fail;
     }
@@ -195,7 +197,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     return;
 
 fail:
-    cleanup_killswitch(p);
+    killswitch_tun_down(p); /* the block stays until the process exits */
     if (p->manage_routes) cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
@@ -267,7 +269,9 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->paths[i].recover_failures = 0;
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         if (p->ev_recover) event_del(p->ev_recover);
-        cleanup_killswitch(p);
+        /* Kill switch: only the TUN ACCEPT goes; the block stays through
+         * the reconnect and is removed at final shutdown. */
+        killswitch_tun_down(p);
         if (p->manage_routes) cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
@@ -326,9 +330,11 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
     /* Re-resolve the server hostname so a reconnect picks up a changed IP
      * (dynamic DNS, DNS failover) instead of retrying a stale address
      * forever. Literal IPs round-trip through mqvpn_resolve_host() as a
-     * no-op. Kill switch / split-tunnel routing are pinned to the address
-     * resolved at startup and are NOT updated here — if either is active
-     * and the IP actually changes, a client restart is still required. */
+     * no-op. The kill switch's server ACCEPT moves with the address; the
+     * split-tunnel routes are torn down on RECONNECTING and rebuilt from
+     * p->server_addr when the next tunnel comes up. With the kill switch on
+     * and the resolver reachable only outside the tunnel, the lookup itself
+     * is blocked and the previous address is kept. */
     struct sockaddr_storage new_addr;
     socklen_t new_addrlen;
     if (mqvpn_resolve_host(p->server_host, &new_addr, &new_addrlen) < 0) {
@@ -341,17 +347,23 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
     char old_ip[INET6_ADDRSTRLEN], new_ip[INET6_ADDRSTRLEN];
     mqvpn_sa_ntop(&p->server_addr, old_ip, sizeof(old_ip));
     mqvpn_sa_ntop(&new_addr, new_ip, sizeof(new_ip));
-    if (new_addr.ss_family != p->server_addr.ss_family || strcmp(old_ip, new_ip) != 0) {
+    int changed =
+        new_addr.ss_family != p->server_addr.ss_family || strcmp(old_ip, new_ip) != 0;
+    if (changed)
         LOG_INF("dns: '%s' resolved to %s (was %s)", p->server_host, new_ip, old_ip);
-        if (p->killswitch_active || p->routing_configured) {
-            LOG_WRN("kill switch / split-tunnel routing still reference %s; "
-                     "restart mqvpn to fully apply the new address",
-                     old_ip);
-        }
-    }
 
+    struct sockaddr_storage prev_addr = p->server_addr;
+    socklen_t prev_addrlen = p->server_addrlen;
     p->server_addr = new_addr;
     p->server_addrlen = new_addrlen;
+    if (changed && killswitch_update_server(p) < 0) {
+        /* The kill switch would block the new address: stay on the old one. */
+        LOG_WRN("kill switch could not allow %s; keeping previous server address %s",
+                new_ip, old_ip);
+        p->server_addr = prev_addr;
+        p->server_addrlen = prev_addrlen;
+        return;
+    }
     if (p->client) {
         mqvpn_client_set_server_addr(p->client, (struct sockaddr *)&new_addr, new_addrlen);
     }
@@ -461,7 +473,7 @@ tun_fatal_error(platform_ctx_t *p)
         event_free(p->ev_tun);
         p->ev_tun = NULL;
     }
-    cleanup_killswitch(p);
+    killswitch_tun_down(p);
     if (p->manage_routes) cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
@@ -868,6 +880,18 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_client_set_server_addr(ctx.client, (struct sockaddr *)&ctx.server_addr,
                                  ctx.server_addrlen);
 
+    /* Kill switch: block everything but the server before the first packet
+     * goes out, and keep it up until the process exits — reconnects and TUN
+     * rebuilds only add/remove the TUN ACCEPT. Rules a crashed instance
+     * left behind go first. */
+    if (ctx.killswitch_enabled) {
+        killswitch_flush_stale();
+        if (setup_killswitch(&ctx) < 0) {
+            LOG_ERR("killswitch setup failed, aborting");
+            goto cleanup;
+        }
+    }
+
     /* Create event base */
     ctx.eb = event_base_new();
     if (!ctx.eb) {
@@ -1011,6 +1035,7 @@ cleanup:
 
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
+    if (ctx.killswitch_enabled) killswitch_flush_stale();
     if (ctx.manage_routes) cleanup_routes(&ctx);
     mqvpn_dns_restore(&ctx.dns);
 

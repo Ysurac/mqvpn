@@ -148,6 +148,15 @@ struct platform_ctx {
     int killswitch_active;
     int killswitch_enabled;
     char ks_comment[64];
+    /* Linux (killswitch.c): the per-process chain, the server rule and TUN
+     * the installed ACCEPTs name ("" = none), and which ip6tables parts are
+     * installed. Unused on Darwin. */
+    char ks_chain[32];
+    char ks_server_rule[INET6_ADDRSTRLEN + 5];
+    int ks_server_v6;
+    int ks_v6_active;
+    char ks_tun_name[IFNAMSIZ];
+    int ks_tun_v6;
     char ks_pf_token[24]; /* Darwin pf enable token (pfctl -E); unused on Linux.
                            * Length vs. real token format: verify on macOS. */
 
@@ -282,6 +291,22 @@ int darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af);
 /* killswitch.c */
 int setup_killswitch(platform_ctx_t *p);
 void cleanup_killswitch(platform_ctx_t *p);
+
+/* linux/killswitch.c — the Linux kill switch is installed once by
+ * setup_killswitch() before the first connect and stays up across
+ * reconnects; these follow the parts that change underneath it. All are
+ * no-ops while the kill switch is not active. Declarations are inert on
+ * Darwin (darwin/killswitch.c does not define them).
+ *   killswitch_tun_up / _tun_down: the ACCEPT for the current TUN.
+ *   killswitch_update_server: move the server ACCEPT to p->server_addr
+ *     (re-resolution). 0, or -1 with the previous rule kept.
+ *   killswitch_flush_stale: remove the rules and chains of mqvpn processes
+ *     that are no longer running (crash leftovers); call only while this
+ *     process has none installed. */
+int killswitch_tun_up(platform_ctx_t *p);
+void killswitch_tun_down(platform_ctx_t *p);
+int killswitch_update_server(platform_ctx_t *p);
+void killswitch_flush_stale(void);
 
 /* linux/platform_linux.c — runtime path management (called from the control
  * API). Declarations are inert on Darwin (control_socket.c is Linux-only). */
