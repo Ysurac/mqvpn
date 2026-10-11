@@ -1166,6 +1166,37 @@ svr_masque_send_409(xqc_h3_request_t *h3_request)
     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
 }
 
+/* Address pool exhausted: 503, so the client sees a clean refusal on this
+ * stream instead of a 200 followed by a torn-down connection. 0.16.x clients
+ * treat it like any other non-200 response. */
+static int
+svr_masque_send_503(xqc_h3_request_t *h3_request)
+{
+    xqc_http_header_t resp[] = {
+        {.name = {.iov_base = ":status", .iov_len = 7},
+         .value = {.iov_base = "503", .iov_len = 3},
+         .flags = 0},
+    };
+    xqc_http_headers_t hdrs = {.headers = resp, .count = 1, .capacity = 1};
+    return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
+}
+
+/* Index of `username`'s pinned (fixed) address in s->pinned_ips, or -1. */
+static int
+svr_pinned_index(const mqvpn_server_t *s, const char *username)
+{
+    if (!username[0]) return -1;
+    for (int i = 0; i < s->n_pinned_ips; i++) {
+        if (strcmp(s->pinned_ips[i].username, username) == 0) return i;
+    }
+    return -1;
+}
+
+/* Admission, address allocation, 200 and the setup capsules for an
+ * authenticated CONNECT-IP request. Returns 0 when the request was answered,
+ * with the tunnel up or with a canned refusal (role REJECTED); -1 only for a
+ * failure after the 200 went out, which the caller's read notify escalates
+ * to closing the H3 connection. */
 static int
 svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
 {
@@ -1173,7 +1204,18 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     mqvpn_server_t *s = conn->server;
     ssize_t ret;
 
-    if (s->n_sessions >= s->max_clients) {
+    /* A pinned user reconnecting before its old tunnel timed out supersedes
+     * that tunnel (same offset, see the registration below), so the old
+     * session's slot is not counted against max_clients. */
+    int pinned_idx = svr_pinned_index(s, conn->username);
+    int n_after = s->n_sessions;
+    if (pinned_idx >= 0) {
+        uint32_t poff = s->pinned_ips[pinned_idx].offset;
+        if (poff >= 1 && poff <= MQVPN_ADDR_POOL_MAX && s->sessions[poff] &&
+            s->sessions[poff] != conn)
+            n_after--;
+    }
+    if (n_after >= s->max_clients) {
         LOG_W(s, "max clients reached (%d), rejecting (user=%s)", s->max_clients,
               conn->username);
         svr_masque_send_403(h3_request);
@@ -1186,7 +1228,44 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         return 0;
     }
 
-    /* 1. Send 200 response headers */
+    /* 1. Allocate the client IP before answering, so that pool exhaustion
+     * can still be refused with a status on this stream. */
+
+    /* 1a. Fixed (pinned) IP for this user — already reserved in pool */
+    if (pinned_idx >= 0) {
+        conn->assigned_ip = s->pinned_ips[pinned_idx].ip;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
+        LOG_I(s, "assigned pinned IP %s for user '%s'", ip_str, conn->username);
+        goto ip_assigned;
+    }
+
+    /* 1b. Restore previous lease for named users */
+    if (conn->username[0]) {
+        for (int i = 0; i < MQVPN_MAX_USERS; i++) {
+            if (s->leases[i].offset == 0) continue;
+            if (strcmp(s->leases[i].username, conn->username) != 0) continue;
+            if (mqvpn_addr_pool_alloc_at(&s->pool, s->leases[i].offset,
+                                         &conn->assigned_ip) == 0) {
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
+                LOG_I(s, "restored leased IP %s for user '%s'", ip_str, conn->username);
+                goto ip_assigned;
+            }
+            /* Lease exists but offset is taken — fall through to normal alloc */
+            break;
+        }
+    }
+    if (mqvpn_addr_pool_alloc(&s->pool, &conn->assigned_ip) < 0) {
+        LOG_E(s, "IP pool exhausted (user=%s)", conn->username);
+        memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
+        svr_masque_send_503(h3_request);
+        stream->role = SVR_STREAM_ROLE_REJECTED; /* return 0: see the 403 above */
+        return 0;
+    }
+ip_assigned:;
+
+    /* 2. Send 200 response headers */
     xqc_http_header_t resp_hdrs[3] = {
         {.name = {.iov_base = ":status", .iov_len = 7},
          .value = {.iov_base = "200", .iov_len = 3},
@@ -1218,47 +1297,10 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     ret = xqc_h3_request_send_headers(h3_request, &hdrs, 0);
     if (ret < 0) {
         LOG_E(s, "send 200 headers: %zd (user=%s)", ret, conn->username);
-        return -1;
+        goto fail_release_ip;
     }
     stream->header_sent = 1;
     conn->masque_stream_id = xqc_h3_stream_id(h3_request);
-
-    /* 2. Allocate client IP */
-
-    /* 2a. Fixed (pinned) IP for this user — already reserved in pool */
-    if (conn->username[0]) {
-        for (int i = 0; i < s->n_pinned_ips; i++) {
-            if (strcmp(s->pinned_ips[i].username, conn->username) != 0) continue;
-            conn->assigned_ip = s->pinned_ips[i].ip;
-            char ip_str[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
-            LOG_I(s, "assigned pinned IP %s for user '%s'", ip_str, conn->username);
-            goto ip_assigned;
-        }
-    }
-
-    /* 2b. Restore previous lease for named users */
-    if (conn->username[0]) {
-        for (int i = 0; i < MQVPN_MAX_USERS; i++) {
-            if (s->leases[i].offset == 0) continue;
-            if (strcmp(s->leases[i].username, conn->username) != 0) continue;
-            if (mqvpn_addr_pool_alloc_at(&s->pool, s->leases[i].offset,
-                                         &conn->assigned_ip) == 0) {
-                char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &conn->assigned_ip, ip_str, sizeof(ip_str));
-                LOG_I(s, "restored leased IP %s for user '%s'",
-                      ip_str, conn->username);
-                goto ip_assigned;
-            }
-            /* Lease exists but offset is taken — fall through to normal alloc */
-            break;
-        }
-    }
-    if (mqvpn_addr_pool_alloc(&s->pool, &conn->assigned_ip) < 0) {
-        LOG_E(s, "IP pool exhausted (user=%s)", conn->username);
-        return -1;
-    }
-ip_assigned:;
 
     /* 3. ADDRESS_ASSIGN capsule */
     uint8_t addr_payload[64];
@@ -1763,7 +1805,10 @@ svr_x_user_name_acceptable(const mqvpn_server_t *s, const char *name)
 }
 
 /* CONNECT-IP request: header-phase handling (validate, auth, 200 response).
- * Returns 0 on success, -1 to reset the stream. */
+ * Returns 0 when the request was answered (tunnel up, or a canned refusal
+ * with role REJECTED). -1 is returned from cb_request_read, and xquic turns
+ * that into closing the whole H3 connection (H3_FRAME_ERROR), not just this
+ * stream: it is kept for malformed requests and failures after the 200. */
 static int
 svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
                           xqc_h3_request_t *h3_request, const svr_req_headers_t *hdrs)
