@@ -816,14 +816,14 @@ mock_on_client_disconnected(uint32_t session_id, mqvpn_error_t reason, void *use
 static int g_cli_tun_output_called = 0;
 static int g_cli_tunnel_ready_called = 0;
 static mqvpn_tunnel_info_t g_cli_tunnel_info;
+static int g_cli_last_tun_v4_proto = -1; /* IPv4 protocol of the last tun_output */
 
 static void
 mock_cli_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
 {
-    (void)pkt;
-    (void)len;
     (void)user_ctx;
     g_cli_tun_output_called++;
+    g_cli_last_tun_v4_proto = (len >= 20 && (pkt[0] >> 4) == 4) ? pkt[9] : -1;
 }
 
 static void
@@ -1643,6 +1643,25 @@ TEST(server_session_quic_loopback)
         poll(pfds, 2, 2);
     }
     ASSERT_EQ(g_cli_tun_output_called, cli_baseline);
+
+    /* Phase 2c: TTL=2 leaves the server with TTL=1 and reaches the client,
+     * the packet's destination: it is delivered as is, not answered with an
+     * ICMP Time Exceeded (from the client's own address) into the TUN. */
+    ttl1_pkt[8] = 2;
+    cli_baseline = g_cli_tun_output_called;
+    ASSERT_EQ(mqvpn_server_on_tun_packet(svr, ttl1_pkt, sizeof(ttl1_pkt)), MQVPN_OK);
+    for (int i = 0; i < 5000; i++) {
+        drain_and_tick(svr, svr_tctx, cli, cli_tctx, path_h);
+        if (g_cli_tun_output_called > cli_baseline) break;
+        struct pollfd pfds[2] = {
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = cli_fd, .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 5);
+        i += (w == 0) ? 5 : 1;
+    }
+    ASSERT_EQ(g_cli_tun_output_called, cli_baseline + 1);
+    ASSERT_EQ(g_cli_last_tun_v4_proto, 17); /* the UDP packet itself, not ICMP */
 
     /* Phase 3: client disconnect releases the session */
     mqvpn_client_disconnect(cli);

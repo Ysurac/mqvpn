@@ -2697,7 +2697,7 @@ cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
 /*
  * forward_inner_ip — post-process one de-stamped inner IP packet and hand it to
  * TUN. Shared by the RAW dispatch in cb_dgram_read AND the reorder RX deliver()
- * callback, so reordered packets get identical TTL/hop-limit + ICMP handling
+ * callback, so reordered packets get identical TTL/hop-limit handling
  * (§5: both paths MUST be semantically identical). `pkt[0..len)` is the bare
  * inner IP packet (no reorder header).
  */
@@ -2716,12 +2716,19 @@ forward_inner_ip(cli_conn_t *conn, const uint8_t *pkt, size_t len)
             LOG_D(c, "dgram: IPv4 too short (%zu bytes)", len);
             return;
         }
+        if (!conn->addr_assigned) {
+            LOG_D(c, "dgram: IPv4 before ADDRESS_ASSIGN; dropping");
+            return;
+        }
         memcpy(fwd_pkt, pkt, len);
         if (fwd_pkt[8] <= 1) {
-            if (c->conn && c->conn->addr_assigned)
-                mqvpn_icmp_send_v4(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip,
-                                   11, 0, 0, pkt, len);
-            return;
+            /* Expiring here. Never answer with an ICMP Time Exceeded into
+             * the local TUN: it would come from our own address, toward the
+             * host side (a martian). A packet for our own address has
+             * reached its destination and is delivered as is; one the host
+             * would forward further is dropped. */
+            if (memcmp(pkt + 16, conn->assigned_ip, 4) != 0) return;
+            goto deliver;
         }
         fwd_pkt[8]--;
         uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
@@ -2735,10 +2742,9 @@ forward_inner_ip(cli_conn_t *conn, const uint8_t *pkt, size_t len)
         }
         memcpy(fwd_pkt, pkt, len);
         if (fwd_pkt[7] <= 1) {
-            if (c->conn && c->conn->addr6_assigned)
-                mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip6,
-                                   3, 0, 0, pkt, len);
-            return;
+            /* Same as the IPv4 hop limit above. */
+            if (memcmp(pkt + 24, conn->assigned_ip6, 16) != 0) return;
+            goto deliver;
         }
         fwd_pkt[7]--;
     } else {
@@ -2746,6 +2752,7 @@ forward_inner_ip(cli_conn_t *conn, const uint8_t *pkt, size_t len)
         return;
     }
 
+deliver:
     c->dgram_recv++;
     c->bytes_rx += len;
     c->cbs.tun_output(fwd_pkt, len, c->user_ctx);
@@ -2778,6 +2785,17 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
                                                    &ctx_id, &payload, &payload_len);
     if (xret != XQC_OK) {
         LOG_D(c, "dgram: unframe failed (xret=%d, data_len=%zu)", xret, data_len);
+        return;
+    }
+    /* RFC 9297 §2.1 / RFC 9484 §6: an HTTP Datagram belongs to the request
+     * whose stream ID is 4 * quarter_stream_id; anything else (a stale or
+     * unknown request) is dropped, and so is a non-zero Context ID, since
+     * CONNECT-IP only defines 0 (IP packets) and none other was registered.
+     * Servers, 0.16.0 included, frame every tunnel packet on the CONNECT-IP
+     * stream with Context ID 0. */
+    if (qsid != conn->masque_stream_id / 4 || ctx_id != 0) {
+        LOG_D(c, "dgram: dropped (quarter_stream_id=%" PRIu64 " context_id=%" PRIu64 ")",
+              qsid, ctx_id);
         return;
     }
     if (payload_len < 1) {
