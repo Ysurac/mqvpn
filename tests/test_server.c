@@ -848,6 +848,7 @@ mock_cli_tunnel_closed(mqvpn_error_t reason, void *user_ctx)
 /* Counts the verifier site's own ERROR line; the CONNECT-IP e2e marker is
  * deliberately silent for TLS, so this line is what an operator sees. */
 static int g_cli_tls_fail_log_count = 0;
+static int g_cli_deferred_abandon_log_count = 0;
 
 static void
 mock_cli_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
@@ -856,6 +857,8 @@ mock_cli_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
     if (level == MQVPN_LOG_ERROR && msg &&
         strstr(msg, "TLS certificate verification failed"))
         g_cli_tls_fail_log_count++;
+    if (msg && strstr(msg, "deferred PATH_ABANDON sent"))
+        g_cli_deferred_abandon_log_count++;
 }
 
 /* Packet relay helper: drain sockets and tick both engines */
@@ -935,6 +938,7 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     g_cli_tunnel_closed_count = 0;
     g_cli_tunnel_closed_reason = MQVPN_OK;
     g_cli_tls_fail_log_count = 0;
+    g_cli_deferred_abandon_log_count = 0;
     memset(&g_cli_tunnel_info, 0, sizeof(g_cli_tunnel_info));
 
     lb->svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
@@ -1824,6 +1828,91 @@ TEST(client_backup_path_validates_into_standby)
     ASSERT_EQ(st, MQVPN_PATH_STANDBY);
     /* the primary path is untouched */
     ASSERT_EQ(get_path_status_or_invalid(lb.cli, lb.path_h), MQVPN_PATH_ACTIVE);
+
+    mqvpn_client_disconnect(lb.cli);
+    loopback_teardown(&lb); /* finalises cli_tctx1 too */
+    close(cli_fd1);
+}
+
+/* The platform drops the only active path: xquic refuses its PATH_ABANDON
+ * (last active path), the connection is kept, and the abandon is sent as
+ * soon as a replacement path is active, so the dead path does not linger. */
+extern int mqvpn_client_test_abandon_due(mqvpn_client_t *c, mqvpn_path_handle_t handle);
+
+static void
+tweak_multipath_info_log(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_multipath(cfg, 1);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_INFO); /* the abandon log line */
+}
+
+static int
+done_never(loopback_t *lb)
+{
+    (void)lb;
+    return 0;
+}
+
+TEST(client_dropped_last_path_abandoned_once_replaced)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_multipath_info_log);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_ESTABLISHED);
+
+    /* Let the server's spare connection IDs arrive (multipath ready). */
+    loopback_pump_until(&lb, done_never, 1000);
+
+    ASSERT_EQ(mqvpn_client_on_platform_path_dropped(lb.cli, lb.path_h, NULL), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_test_abandon_due(lb.cli, lb.path_h), 1); /* refused */
+    ASSERT_EQ(g_cli_deferred_abandon_log_count, 0);
+
+    int cli_fd1 = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(cli_fd1, -1);
+    struct sockaddr_in cli_addr1;
+    memset(&cli_addr1, 0, sizeof(cli_addr1));
+    cli_addr1.sin_family = AF_INET;
+    cli_addr1.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cli_addr1.sin_port = htons(0);
+    ASSERT_EQ(bind(cli_fd1, (struct sockaddr *)&cli_addr1, sizeof(cli_addr1)), 0);
+    socklen_t alen = sizeof(cli_addr1);
+    getsockname(cli_fd1, (struct sockaddr *)&cli_addr1, &alen);
+
+    mqvpn_path_desc_t d1;
+    memset(&d1, 0, sizeof(d1));
+    d1.struct_size = sizeof(d1);
+    memcpy(d1.local_addr, &cli_addr1, sizeof(cli_addr1));
+    d1.local_addr_len = sizeof(cli_addr1);
+    snprintf(d1.iface, sizeof(d1.iface), "eth1");
+    void *cli_tctx1 = NULL;
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = 1;
+    bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(cli_fd1, &bopts, &cli_tctx1), MQVPN_OK);
+    mqvpn_path_handle_t h1 =
+        mqvpn_client_add_path(lb.cli, &d1, mqvpn_bind_posix_path_ops(), cli_tctx1, NULL);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    /* The dropped path's socket is no longer read, as on a real platform. */
+    for (int elapsed = 0; elapsed < 12000; elapsed++) {
+        mqvpn_bind_posix_server_drain(lb.svr_tctx, lb.svr, 64);
+        mqvpn_bind_posix_path_drain(cli_tctx1, lb.cli, h1, 64);
+        mqvpn_server_tick(lb.svr);
+        mqvpn_client_tick(lb.cli);
+        if (g_cli_deferred_abandon_log_count > 0) break;
+        struct pollfd pfds[2] = {
+            {.fd = lb.svr_fd, .events = POLLIN},
+            {.fd = cli_fd1, .events = POLLIN},
+        };
+        int w = poll(pfds, 2, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+    ASSERT_EQ(get_path_status_or_invalid(lb.cli, h1), MQVPN_PATH_ACTIVE);
+    ASSERT_EQ(g_cli_deferred_abandon_log_count, 1);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_ESTABLISHED);
 
     mqvpn_client_disconnect(lb.cli);
     loopback_teardown(&lb); /* finalises cli_tctx1 too */
@@ -2784,6 +2873,7 @@ main(void)
     run_server_session_quic_loopback();
     run_server_runtime_added_path_not_stuck_pending();
     run_client_backup_path_validates_into_standby();
+    run_client_dropped_last_path_abandoned_once_replaced();
     run_client_auth_refused_leaves_authenticating();
 
     /* Control API: get_status with and without clients */

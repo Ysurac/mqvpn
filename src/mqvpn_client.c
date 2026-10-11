@@ -142,6 +142,10 @@ struct cli_conn_s {
     int close_pending;
     const char *close_why;
     int closed_early; /* close notify ran inside xqc_h3_connect */
+    /* Slots (bit = slot index) dropped by the platform while xquic refused
+     * their PATH_ABANDON (the last active path): retried by
+     * tick_retry_path_abandon once another path is active. */
+    uint32_t abandon_retry_mask;
     int addr_assigned;
     uint8_t assigned_ip[4];
     uint8_t assigned_prefix;
@@ -4179,10 +4183,19 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t han
 
     /* Draft-21 PATH_ABANDON: tell xquic to abandon the dead path so its
      * CID/path_id slot is released for reuse. Non-blocking (queues frame
-     * on an alternate path). Fails gracefully if this is the only active
-     * path or if the connection is already closing. */
-    if (path_xquic_abandon_due(p) && c->engine && c->conn)
-        xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+     * on an alternate path). xquic refuses it for the last active path:
+     * unlike remove_path, the connection is kept then (on desktop the
+     * platform re-adds the interface once it is back, and the new path can
+     * take over without a reconnect), and the abandon is retried by
+     * tick_retry_path_abandon as soon as another path is active, so the
+     * dead path never lingers next to a live one. */
+    if (path_xquic_abandon_due(p) && c->engine && c->conn) {
+        xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+        if (rc == -XQC_EMP_NO_ACTIVE_PATH) {
+            LOG_I(c, "path[%s] PATH_ABANDON deferred: last active path", p->name);
+            c->conn->abandon_retry_mask |= 1u << (unsigned)(p - c->paths);
+        }
+    }
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
@@ -4912,6 +4925,36 @@ tick_conn_close_pending(mqvpn_client_t *c)
     xqc_h3_conn_close(c->engine, &conn->cid);
 }
 
+/* ─── Tick: deferred PATH_ABANDON of platform-dropped paths ─── */
+
+static void
+tick_retry_path_abandon(mqvpn_client_t *c)
+{
+    cli_conn_t *conn = c->conn;
+    if (!conn || !conn->abandon_retry_mask || !c->engine || c->shutting_down) return;
+    for (int i = 0; i < c->n_paths; i++) {
+        uint32_t bit = 1u << (unsigned)i;
+        if (!(conn->abandon_retry_mask & bit)) continue;
+        path_entry_t *p = &c->paths[i];
+        /* Gone from xquic meanwhile (or slot moved on): nothing to abandon. */
+        if (p->state != PATH_LC_CLOSED_DROPPED || !path_xquic_abandon_due(p)) {
+            conn->abandon_retry_mask &= ~bit;
+            continue;
+        }
+        /* Only once another validated path exists: asking xquic earlier
+         * would just be refused again, with a warning on every tick. */
+        int other_live = 0;
+        for (int j = 0; j < c->n_paths && !other_live; j++)
+            other_live = j != i && (c->paths[j].state == PATH_LC_ACTIVE ||
+                                    c->paths[j].state == PATH_LC_STANDBY);
+        if (!other_live) continue;
+        xqc_int_t rc = xqc_conn_close_path(c->engine, &conn->cid, p->xqc_path_id);
+        if (rc == -XQC_EMP_NO_ACTIVE_PATH) continue; /* still the last one */
+        conn->abandon_retry_mask &= ~bit;
+        LOG_I(c, "path[%s] deferred PATH_ABANDON sent (rc=%d)", p->name, (int)rc);
+    }
+}
+
 /* ─── Tick ─── */
 
 int
@@ -4923,6 +4966,7 @@ mqvpn_client_tick(mqvpn_client_t *c)
     tick_handshake_watchdog(c);
     tick_conn_close_pending(c);
     if (c->engine) xqc_engine_main_logic(c->engine);
+    tick_retry_path_abandon(c);
     tick_path_recovery(c);
     tick_reconnect(c);
 
