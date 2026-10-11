@@ -11,15 +11,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* §10.1 send_flow. Kept ~40B (key 38 + state) so the table can be sized large
- * enough that forced eviction of an active flow never happens (§14.2(a')). */
+/* §10.1 send_flow. Kept small (key 38 + state) so the table can be sized large
+ * enough that forced eviction of an active flow never happens (§14.2(a')).
+ * Only eligible flows are stored: eligibility is a pure function of the
+ * immutable config and the 5-tuple, so an ineligible flow needs no state. */
 typedef struct mqvpn_send_flow {
     mqvpn_flow_key_t key;         /* 5-tuple */
     uint64_t next_seq;            /* 0-start, 48-bit, never wraps (§7) */
     uint64_t last_activity_us;    /* for idle-based eviction (§14.2(a')) */
     uint32_t reset_marks_left;    /* K on creation; FLOW_RESET budget (§10.5) */
-    uint8_t eligible;             /* cached at creation (port/proto only, §10.1) */
     struct mqvpn_send_flow *next; /* hash chain */
+    /* recency list ordered by last_activity_us (head = least recent), so the
+     * table-full path checks one candidate instead of scanning the table */
+    struct mqvpn_send_flow *lru_prev;
+    struct mqvpn_send_flow *lru_next;
 } mqvpn_send_flow_t;
 
 struct mqvpn_reorder_tx {
@@ -28,6 +33,8 @@ struct mqvpn_reorder_tx {
     mqvpn_send_flow_t **buckets;
     uint32_t n_buckets;
     uint32_t n_flows;
+    mqvpn_send_flow_t *lru_head; /* least recent last_activity_us */
+    mqvpn_send_flow_t *lru_tail; /* most recent */
     mqvpn_reorder_tx_stats_t stats;
 };
 
@@ -99,11 +106,16 @@ compute_eligible(const mqvpn_reorder_config_t *cfg, const mqvpn_flow_key_t *key)
     return mqvpn_reorder_profile_preset(r->profile, &w, &c) ? 1u : 0u;
 }
 
+static uint32_t
+table_bucket(const mqvpn_reorder_tx_t *tx, const mqvpn_flow_key_t *key)
+{
+    return (uint32_t)(mqvpn_flow_key_hash(key, tx->hash_seed) & (tx->n_buckets - 1));
+}
+
 static mqvpn_send_flow_t *
 table_lookup(mqvpn_reorder_tx_t *tx, const mqvpn_flow_key_t *key, uint32_t *bucket_out)
 {
-    uint32_t b =
-        (uint32_t)(mqvpn_flow_key_hash(key, tx->hash_seed) & (tx->n_buckets - 1));
+    uint32_t b = table_bucket(tx, key);
     if (bucket_out) {
         *bucket_out = b;
     }
@@ -115,45 +127,75 @@ table_lookup(mqvpn_reorder_tx_t *tx, const mqvpn_flow_key_t *key, uint32_t *buck
     return NULL;
 }
 
+static void
+lru_unlink(mqvpn_reorder_tx_t *tx, mqvpn_send_flow_t *f)
+{
+    if (f->lru_prev) {
+        f->lru_prev->lru_next = f->lru_next;
+    } else {
+        tx->lru_head = f->lru_next;
+    }
+    if (f->lru_next) {
+        f->lru_next->lru_prev = f->lru_prev;
+    } else {
+        tx->lru_tail = f->lru_prev;
+    }
+    f->lru_prev = NULL;
+    f->lru_next = NULL;
+}
+
+static void
+lru_append(mqvpn_reorder_tx_t *tx, mqvpn_send_flow_t *f)
+{
+    f->lru_next = NULL;
+    f->lru_prev = tx->lru_tail;
+    if (tx->lru_tail) {
+        tx->lru_tail->lru_next = f;
+    } else {
+        tx->lru_head = f;
+    }
+    tx->lru_tail = f;
+}
+
 /*
  * §14.2(a'): when the table is full, evict ONLY a send_flow that is idle
  * (now_us - last_activity_us > egress_idle_timeout). Returns 1 if it freed a
  * slot, 0 if no idle victim exists (caller must then send RAW). We never force-
  * evict an active flow; forced_evict_count counts the should-never-happen case
  * and stays 0 here.
+ *
+ * Every last_activity_us write is the current now_us and moves the flow to the
+ * recency-list tail, so the head is the least recently active flow: if it is
+ * not idle, none is. O(1) plus a chain walk of the victim's bucket.
  */
 static int
 evict_one_idle(mqvpn_reorder_tx_t *tx, uint64_t now_us)
 {
     uint64_t idle_us = (uint64_t)tx->cfg.egress_idle_timeout_sec * 1000000ULL;
-    mqvpn_send_flow_t *oldest = NULL;
-    mqvpn_send_flow_t **oldest_link = NULL;
-    for (uint32_t b = 0; b < tx->n_buckets; b++) {
-        mqvpn_send_flow_t **link = &tx->buckets[b];
-        for (mqvpn_send_flow_t *f = *link; f; link = &f->next, f = f->next) {
-            /* §14.2(c) wrap-safe: a backwards-clock blip (now_us <
-             * last_activity_us) must NOT underflow and spuriously evict a live
-             * flow. Mirrors the RX-side guard. */
-            if (now_us > f->last_activity_us && now_us - f->last_activity_us > idle_us) {
-                if (!oldest || f->last_activity_us < oldest->last_activity_us) {
-                    oldest = f;
-                    oldest_link = link;
-                }
-            }
-        }
-    }
-    if (!oldest) {
+    mqvpn_send_flow_t *oldest = tx->lru_head;
+    /* §14.2(c) wrap-safe: a backwards-clock blip (now_us < last_activity_us)
+     * must NOT underflow and spuriously evict a live flow. Mirrors the RX-side
+     * guard. */
+    if (!oldest || now_us <= oldest->last_activity_us ||
+        now_us - oldest->last_activity_us <= idle_us) {
         return 0; /* no idle victim */
     }
-    *oldest_link = oldest->next;
+    for (mqvpn_send_flow_t **link = &tx->buckets[table_bucket(tx, &oldest->key)]; *link;
+         link = &(*link)->next) {
+        if (*link == oldest) {
+            *link = oldest->next;
+            break;
+        }
+    }
+    lru_unlink(tx, oldest);
     free(oldest);
     tx->n_flows--;
     tx->stats.idle_evict_count++;
     return 1;
 }
 
-/* Get or create a send_flow for key. Returns NULL if the table is full and no
- * idle flow can be evicted (§14.2(a') → caller sends RAW). */
+/* Get or create a send_flow for an ELIGIBLE key. Returns NULL if the table is
+ * full and no idle flow can be evicted (§14.2(a') → caller sends RAW). */
 static mqvpn_send_flow_t *
 get_or_create(mqvpn_reorder_tx_t *tx, const mqvpn_flow_key_t *key, uint64_t now_us)
 {
@@ -176,10 +218,10 @@ get_or_create(mqvpn_reorder_tx_t *tx, const mqvpn_flow_key_t *key, uint64_t now_
     f->key = *key;
     f->next_seq = 0;
     f->reset_marks_left = tx->cfg.reset_mark_packets;
-    f->eligible = compute_eligible(&tx->cfg, key);
     f->last_activity_us = now_us;
     f->next = tx->buckets[bucket];
     tx->buckets[bucket] = f;
+    lru_append(tx, f);
     tx->n_flows++;
     tx->stats.flows_created++;
     return f;
@@ -206,9 +248,15 @@ mqvpn_reorder_tx_peek(mqvpn_reorder_tx_t *tx, const uint8_t *pkt, size_t len,
         return out->action;
     }
 
+    /* §15.1: not eligible → RAW, without taking a table slot. */
+    if (!compute_eligible(&tx->cfg, &key)) {
+        out->action = MQVPN_REORDER_TX_RAW;
+        return out->action;
+    }
+
     mqvpn_send_flow_t *flow = get_or_create(tx, &key, now_us);
-    if (!flow || !flow->eligible) {
-        /* not eligible, or table full + no idle victim → RAW (§15.1/§14.2(a')). */
+    if (!flow) {
+        /* table full + no idle victim → RAW (§14.2(a')). */
         out->action = MQVPN_REORDER_TX_RAW;
         return out->action;
     }
@@ -237,17 +285,21 @@ void
 mqvpn_reorder_tx_commit(mqvpn_reorder_tx_t *tx, mqvpn_reorder_tx_peek_t *peek,
                         uint64_t now_us)
 {
-    (void)tx;
-    if (!peek || peek->action != MQVPN_REORDER_TX_STAMP || !peek->flow) {
+    if (!tx || !peek || peek->action != MQVPN_REORDER_TX_STAMP || !peek->flow) {
         return;
     }
     mqvpn_send_flow_t *flow = (mqvpn_send_flow_t *)peek->flow;
-    /* §10.3 peek-commit: advance only on successful send. */
+    /* §10.3 peek-commit: advance only on successful send. Activity is a sent
+     * datagram (what keeps the receiver's flow alive, §14.2), not a peek. */
     flow->next_seq++;
     if (flow->reset_marks_left > 0) {
         flow->reset_marks_left--;
     }
     flow->last_activity_us = now_us;
+    if (tx->lru_tail != flow) {
+        lru_unlink(tx, flow);
+        lru_append(tx, flow);
+    }
 }
 
 const mqvpn_reorder_tx_stats_t *
