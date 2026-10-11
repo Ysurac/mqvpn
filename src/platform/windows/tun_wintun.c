@@ -16,6 +16,7 @@
 #  include "wintun.h"
 
 #  include <stdio.h>
+#  include <stdlib.h>
 #  include <string.h>
 
 /* ── Wintun function pointers (resolved at runtime) ── */
@@ -130,6 +131,21 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
     }
     tun->pipe_rd = pair[0];
     tun->pipe_wr = pair[1];
+
+    /* Main-thread frame reassembly buffer (mqvpn_tun_win_read) */
+    tun->rx_buf = (uint8_t *)malloc(MQVPN_TUN_WIN_FRAME_MAX);
+    if (!tun->rx_buf) {
+        LOG_ERR("TUN frame buffer allocation failed");
+        evutil_closesocket(tun->pipe_rd);
+        evutil_closesocket(tun->pipe_wr);
+        tun->pipe_rd = tun->pipe_wr = EVUTIL_INVALID_SOCKET;
+        WintunEndSession(tun->session);
+        WintunCloseAdapter(tun->adapter);
+        tun->session = NULL;
+        tun->adapter = NULL;
+        return -1;
+    }
+    tun->rx_len = 0;
 
     /* Make both ends non-blocking */
     evutil_make_socket_nonblocking(tun->pipe_rd);
@@ -252,8 +268,44 @@ mqvpn_tun_win_set_mtu(mqvpn_tun_win_t *tun, int mtu)
  * Protocol on the socketpair:
  *   [2-byte big-endian length] [IP packet payload]
  *
- * This framing is needed because the socketpair uses SOCK_STREAM.
+ * This framing is needed because the socketpair uses SOCK_STREAM, and it
+ * holds only while every frame goes in whole: a frame cut short would make
+ * the reader take payload bytes for the next length header, and the stream
+ * would never resynchronise. So the writer drops a frame only before its
+ * first byte is sent (pipe full), and once a byte is in it finishes the
+ * frame; the reader (mqvpn_tun_win_read) reassembles across partial reads.
  */
+
+/* Reader thread: send one whole frame, or nothing. -1 = dropped (pipe full
+ * before the first byte, or the pipe is going away). */
+static int
+send_frame(mqvpn_tun_win_t *tun, const uint8_t *frame, int total)
+{
+    int off = 0;
+    while (off < total) {
+        int r = send(tun->pipe_wr, (const char *)frame + off, total - off, 0);
+        if (r > 0) {
+            off += r;
+            continue;
+        }
+        if (r == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+            if (off == 0) return -1; /* nothing sent: drop the whole frame */
+            /* Mid-frame: wait for room — the main thread drains the pipe.
+             * The stop flag is polled so destroy never waits on a full pipe
+             * (the pipes are closed after this thread exits, so a cut frame
+             * then is never read). */
+            if (InterlockedCompareExchange(&tun->stop, 0, 0)) return -1;
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            FD_SET(tun->pipe_wr, &wfds);
+            struct timeval tv = {0, 250000};
+            (void)select(0, NULL, &wfds, NULL, &tv);
+            continue;
+        }
+        return -1; /* broken pipe */
+    }
+    return 0;
+}
 
 static DWORD WINAPI
 tun_reader_thread(LPVOID arg)
@@ -284,8 +336,7 @@ tun_reader_thread(LPVOID arg)
                 frame[1] = (uint8_t)(pkt_size & 0xFF);
                 memcpy(frame + 2, pkt, pkt_size);
 
-                int ret = send(tun->pipe_wr, (const char *)frame, (int)(2 + pkt_size), 0);
-                if (ret < 0) {
+                if (send_frame(tun, frame, (int)(2 + pkt_size)) < 0) {
                     drop_count++;
                     drop_bytes += pkt_size;
                     /* Log at most once per second */
@@ -320,6 +371,39 @@ mqvpn_tun_win_start_reader(mqvpn_tun_win_t *tun)
     return 0;
 }
 
+/* ── Read (UL direction — main thread) ── */
+
+int
+mqvpn_tun_win_read(mqvpn_tun_win_t *tun, const uint8_t **pkt)
+{
+    if (!tun->rx_buf || tun->pipe_rd == EVUTIL_INVALID_SOCKET) return -1;
+    for (;;) {
+        int need;
+        if (tun->rx_len < 2) {
+            need = 2 - tun->rx_len;
+        } else {
+            int plen = ((int)tun->rx_buf[0] << 8) | tun->rx_buf[1];
+            if (plen == 0) { /* never written; skip the empty frame */
+                tun->rx_len = 0;
+                continue;
+            }
+            if (tun->rx_len == 2 + plen) {
+                tun->rx_len = 0;
+                *pkt = tun->rx_buf + 2;
+                return plen;
+            }
+            need = 2 + plen - tun->rx_len;
+        }
+        int r = recv(tun->pipe_rd, (char *)tun->rx_buf + tun->rx_len, need, 0);
+        if (r > 0) {
+            tun->rx_len += r;
+            continue;
+        }
+        if (r == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) return 0;
+        return -1; /* peer closed or error */
+    }
+}
+
 /* ── Write (DL direction — main thread) ── */
 
 int
@@ -344,7 +428,24 @@ mqvpn_tun_win_destroy(mqvpn_tun_win_t *tun)
     InterlockedExchange(&tun->stop, 1);
 
     if (tun->reader_thread) {
-        WaitForSingleObject(tun->reader_thread, 3000);
+        /* The thread polls the stop flag at least every 250 ms (read-event
+         * wait, mid-frame send wait). It uses the session and both pipes, so
+         * none of them may be released while it can still run: on a timeout
+         * leak them all rather than free them under it. */
+        DWORD w = WaitForSingleObject(tun->reader_thread, 10000);
+        if (w != WAIT_OBJECT_0) {
+            LOG_ERR("TUN %s reader thread did not stop (wait %lu); leaking its "
+                    "session and pipes",
+                    tun->name, (unsigned long)w);
+            tun->reader_thread = NULL; /* handle leaked with the rest */
+            tun->session = NULL;
+            tun->adapter = NULL;
+            tun->pipe_rd = EVUTIL_INVALID_SOCKET;
+            tun->pipe_wr = EVUTIL_INVALID_SOCKET;
+            tun->rx_buf = NULL;
+            tun->rx_len = 0;
+            return;
+        }
         CloseHandle(tun->reader_thread);
         tun->reader_thread = NULL;
     }
@@ -367,6 +468,9 @@ mqvpn_tun_win_destroy(mqvpn_tun_win_t *tun)
         evutil_closesocket(tun->pipe_wr);
         tun->pipe_wr = EVUTIL_INVALID_SOCKET;
     }
+    free(tun->rx_buf);
+    tun->rx_buf = NULL;
+    tun->rx_len = 0;
 
     LOG_INF("TUN %s destroyed", tun->name);
 }

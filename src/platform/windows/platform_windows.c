@@ -505,7 +505,8 @@ on_tick_timer(evutil_socket_t fd, short what, void *arg)
 
 /*
  * Read framed packets from the TUN reader thread socketpair.
- * Frame format: [2-byte big-endian length][IP packet payload]
+ * Frame format: [2-byte big-endian length][IP packet payload]; partial
+ * frames are reassembled by mqvpn_tun_win_read across calls.
  */
 static void
 on_tun_read(evutil_socket_t fd, short what, void *arg)
@@ -513,25 +514,13 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     (void)fd;
     (void)what;
     platform_win_ctx_t *p = (platform_win_ctx_t *)arg;
-    uint8_t frame[2 + 65536];
 
     for (int i = 0; i < 64; i++) {
-        /* Read length header */
-        int n = recv(p->tun.pipe_rd, (char *)frame, 2, MSG_PEEK);
-        if (n < 2) break;
+        const uint8_t *pkt = NULL;
+        int n = mqvpn_tun_win_read(&p->tun, &pkt);
+        if (n <= 0) break;
 
-        uint16_t pkt_len = ((uint16_t)frame[0] << 8) | frame[1];
-        if (pkt_len == 0 || pkt_len > 65535) {
-            /* Drain bad frame header */
-            recv(p->tun.pipe_rd, (char *)frame, 2, 0);
-            continue;
-        }
-
-        int total = 2 + pkt_len;
-        n = recv(p->tun.pipe_rd, (char *)frame, total, 0);
-        if (n < total) break;
-
-        int ret = mqvpn_client_on_tun_packet(p->client, frame + 2, pkt_len);
+        int ret = mqvpn_client_on_tun_packet(p->client, pkt, (size_t)n);
         if (ret == MQVPN_ERR_AGAIN) {
             event_del(p->ev_tun);
             break;
