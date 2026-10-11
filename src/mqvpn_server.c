@@ -134,17 +134,19 @@ struct svr_conn_s {
     /* MASQUE session */
     char username[64]; /* authenticated user name, or empty for global key */
     uint64_t masque_stream_id;
-    /* The CONNECT-IP request stream's h3_request handle, kept around so
+    /* The stream that owns the live tunnel (its h3_request is
+     * connect_ip_stream->h3_request), kept around so
      * svr_push_path_label_to_client() can send a PATH_LABEL_PUSH capsule
      * at an arbitrary time (e.g. from mqvpn_server_set_path_weight_by_iface(),
      * called outside any request-read callback) — unlike every other
      * capsule this server sends, which is always written synchronously
      * from inside the body-read callback that already has an h3_request
-     * parameter at hand. Set when cb_request_read tags the stream
-     * SVR_STREAM_ROLE_CONNECT_IP; cleared in cb_request_close alongside
-     * tunnel_established, so a stale pointer into a freed request can
-     * never be used. NULL whenever there is no live CONNECT-IP stream. */
-    xqc_h3_request_t *connect_ip_request;
+     * parameter at hand. Set only once a CONNECT-IP request has established
+     * the tunnel (cb_request_read), and cleared in cb_request_close only by
+     * that same stream, so neither a rejected request nor its close can
+     * clobber the live tunnel's pointer, and a stale pointer into a freed
+     * stream can never be used. NULL whenever there is no live tunnel. */
+    svr_stream_t *connect_ip_stream;
     struct in_addr assigned_ip;
     struct in6_addr assigned_ip6;
     int has_v6;
@@ -1604,12 +1606,10 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
          * tunnel dead. Mirrors the client-side role gate in
          * mqvpn_client.c's cb_request_close.
          *
-         * REJECTED is included here too: cb_request_read sets
-         * conn->connect_ip_request to this stream's h3_request before
-         * svr_connect_ip_on_request() gets a chance to reject it, so a
-         * rejected stream must still clear that pointer on close or it's
-         * left dangling at a freed request. tunnel_established is already
-         * 0 for a rejected stream (never set on the reject path).
+         * conn->connect_ip_stream is cleared only when it points at THIS
+         * stream: a rejected request (403/503) never owned the tunnel, and
+         * its close must not drop the pointer of a tunnel that another
+         * stream established meanwhile.
          *
          * RFC 9484 §4.1 ties the tunnel's lifetime to its request stream, so
          * a CONNECT_IP stream also tears down the WHOLE session here
@@ -1625,10 +1625,8 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
          * current tunnel owner: a duplicate request is 409'd with role
          * UNKNOWN, and a re-establishment is preceded by the previous
          * release. */
-        if (stream->conn && (stream->role == SVR_STREAM_ROLE_CONNECT_IP ||
-                             stream->role == SVR_STREAM_ROLE_REJECTED)) {
-            stream->conn->connect_ip_request = NULL;
-        }
+        if (stream->conn && stream->conn->connect_ip_stream == stream)
+            stream->conn->connect_ip_stream = NULL;
         if (stream->conn && stream->role == SVR_STREAM_ROLE_CONNECT_IP)
             svr_session_release(stream->conn->server, stream->conn);
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
@@ -1718,7 +1716,7 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
             out->path = (const char *)h->value.iov_base;
             out->path_len = h->value.iov_len;
             if (h->value.iov_len >= 24 &&
-                memcmp(h->value.iov_base, "/.well-known/masque/ip/", 22) == 0)
+                memcmp(h->value.iov_base, "/.well-known/masque/ip/", 23) == 0)
                 out->has_valid_path = 1;
         }
         if (h->name.iov_len == 16 &&
@@ -2175,7 +2173,7 @@ svr_path_label_find_or_create(svr_conn_t *conn, const char *iface)
  *     dscp_mask_from_operator both unset): nothing to push — a value
  *     merely adopted from this same client's own PATH_LABEL announcement
  *     is never echoed back to it.
- *   - No live CONNECT-IP stream yet (conn->connect_ip_request NULL, or
+ *   - No live CONNECT-IP stream yet (conn->connect_ip_stream NULL, or
  *     the tunnel isn't up): dropped: nowhere to send it. Whenever the
  *     stream does come up, the client's own subsequent announcement for
  *     this iface (if any) re-triggers this from svr_connect_ip_on_body,
@@ -2191,7 +2189,7 @@ svr_push_path_label_to_client(mqvpn_server_t *s, svr_conn_t *conn, const svr_pat
 {
     if (!s->config.push_path_labels) return;
     if (!label->weight_from_operator && !label->dscp_mask_from_operator) return;
-    if (!conn->connect_ip_request || !conn->tunnel_established) return;
+    if (!conn->connect_ip_stream || !conn->tunnel_established) return;
 
     uint32_t weight = label->weight_from_operator ? label->weight : 0;
     uint64_t dscp_mask = label->dscp_mask_from_operator ? label->dscp_mask : 0;
@@ -2212,10 +2210,10 @@ svr_push_path_label_to_client(mqvpn_server_t *s, svr_conn_t *conn, const svr_pat
         return;
     }
 
-    xqc_int_t sret = xqc_h3_request_send_body(conn->connect_ip_request, cap_buf, cap_written, 0);
+    ssize_t sret = svr_stream_send_capsule(conn->connect_ip_stream, cap_buf, cap_written);
     if (sret < 0) {
         LOG_W(s, "path_label push send failed: user=%s iface=%s ret=%d", conn->username,
-              label->iface, sret);
+              label->iface, (int)sret);
     } else {
         LOG_I(s, "pushed path_label: user=%s iface=%s weight=%u dscp_mask=%" PRIu64,
               conn->username, label->iface, weight, dscp_mask);
@@ -2445,6 +2443,7 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                 void *strm_user_data)
 {
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+    if (!stream || !stream->conn) return -1;
     mqvpn_server_t *s = stream->conn->server;
     unsigned char fin = 0;
 
@@ -2474,18 +2473,22 @@ cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
              * request stream, so that is a legitimate re-establishment —
              * svr_connect_ip_on_request releases the stale session after
              * auth and proceeds. */
-            if (stream->conn && stream->conn->tunnel_established) {
+            if (stream->conn->tunnel_established) {
                 LOG_W(s, "rejecting duplicate CONNECT-IP: connection already has "
                          "a tunnel");
                 svr_masque_send_409(h3_request);
                 return 0;
             }
             /* Role is tagged even though the handler may still fail with -1
-             * (stream reset); harmless — a reset stream's role is never
-             * consulted again. */
+             * (which closes the connection); harmless — the role is never
+             * consulted again. A refusal re-tags it REJECTED. */
             stream->role = SVR_STREAM_ROLE_CONNECT_IP;
-            stream->conn->connect_ip_request = h3_request;
-            return svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
+            int rc = svr_connect_ip_on_request(s, stream, h3_request, &hdrs);
+            /* Only the stream that actually established the tunnel owns it. */
+            if (rc == 0 && stream->role == SVR_STREAM_ROLE_CONNECT_IP &&
+                stream->conn->tunnel_established)
+                stream->conn->connect_ip_stream = stream;
+            return rc;
         }
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
         /* [Hybrid] Enabled is a client+server kill switch (docs/control-api.md),
