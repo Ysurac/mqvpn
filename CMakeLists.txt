@@ -757,6 +757,11 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/src/platform/darwin)
         add_test(NAME ${t} COMMAND ${t})
     endforeach()
+    # The PATH-stub fakes are found through PATH; production execs the
+    # tools by absolute path (see MQVPN_DARWIN_EXEC_VIA_PATH in the twins).
+    foreach(t test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+        target_compile_definitions(${t} PRIVATE MQVPN_DARWIN_EXEC_VIA_PATH)
+    endforeach()
 
     # Bundled POSIX transport over real loopback sockets — the only test of
     # the bind's non-Linux branch, which macOS and iOS run. Links the bind
@@ -1097,6 +1102,8 @@ if(BUILD_TESTING)
     target_compile_definitions(test_killswitch_rules_darwin PRIVATE F_SETNOSIGPIPE=2)
 
     foreach(t test_dns_state_darwin test_routing_seq_darwin test_killswitch_rules_darwin)
+        # PATH-stub fakes: exec through PATH, not the production absolute paths
+        target_compile_definitions(${t} PRIVATE MQVPN_DARWIN_EXEC_VIA_PATH)
         target_include_directories(${t} PRIVATE
             ${EVENT_INCLUDE_DIR}   # platform_internal.h includes <event2/event.h>
             ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src

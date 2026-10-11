@@ -63,6 +63,15 @@
 
 #define MQVPN_PF_ANCHOR "com.apple/250.mqvpn"
 
+/* This runs as root: exec pfctl(8) by absolute path, never through the
+ * caller's PATH. The PATH-stub unit tests (tests/fake_cmd.h) build with
+ * MQVPN_DARWIN_EXEC_VIA_PATH so their fakes are found through PATH. */
+#ifdef MQVPN_DARWIN_EXEC_VIA_PATH
+#  define MQVPN_PFCTL_BIN "pfctl"
+#else
+#  define MQVPN_PFCTL_BIN "/sbin/pfctl"
+#endif
+
 /* ------------------------------------------------------------------ */
 /* exec helpers — twins of routing.c's run_route_cmd / dns.c's         */
 /* run_networksetup_capture, targeting "pfctl".                        */
@@ -83,7 +92,7 @@ run_pfctl(const char *const argv[])
          * switch loaded after exit (hardware-reproduced on macOS 26.5).
          * With SIG_IGN inherited the banner write fails with EPIPE, pfctl
          * ignores it and the flush still executes. */
-        execvp("pfctl", (char *const *)argv);
+        execvp(MQVPN_PFCTL_BIN, (char *const *)argv);
         _exit(127);
     }
     int status = 0;
@@ -130,7 +139,7 @@ run_pfctl_stdin(const char *const argv[], const char *text)
         if (dup2(fds[0], STDIN_FILENO) < 0) _exit(127);
         close(fds[0]);
         /* SIGPIPE stays SIG_IGN (inherited) — see run_pfctl. */
-        execvp("pfctl", (char *const *)argv);
+        execvp(MQVPN_PFCTL_BIN, (char *const *)argv);
         _exit(127);
     }
 
@@ -201,7 +210,7 @@ run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
         if (dup2(fds[1], STDERR_FILENO) < 0) _exit(127);
         close(fds[1]);
         /* SIGPIPE stays SIG_IGN (inherited) — see run_pfctl. */
-        execvp("pfctl", (char *const *)argv);
+        execvp(MQVPN_PFCTL_BIN, (char *const *)argv);
         _exit(127);
     }
 

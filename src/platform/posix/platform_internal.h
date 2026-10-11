@@ -131,6 +131,9 @@ struct platform_ctx {
     uint64_t gro_datagrams; /* datagrams delivered to the library */
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
+    int server_pin_owned; /* Darwin: setup_routes created the unscoped server
+                           * pin (vs. found one already there); only an owned
+                           * pin is deleted. Unused on Linux. */
     char server_ip_str[INET6_ADDRSTRLEN];
     char server_tunnel_ip[INET_ADDRSTRLEN]; /* server-side tunnel IP (peer on TUN) */
     int route_via_server;   /* 1=use default via server_tunnel_ip instead of /1 trick */

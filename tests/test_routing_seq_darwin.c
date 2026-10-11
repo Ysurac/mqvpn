@@ -130,7 +130,8 @@ test_happy_path(fake_cmd_env_t *e)
 }
 
 /* ================================================================
- * 2. pin `add` fails once -> `change` fallback used, overall rc 0
+ * 2. pin `add` fails once -> `change` probe succeeds (the route already
+ *    exists), overall rc 0; that route is not ours, so cleanup leaves it
  * ================================================================ */
 static void
 test_pin_change_fallback(fake_cmd_env_t *e)
@@ -157,9 +158,16 @@ test_pin_change_fallback(fake_cmd_env_t *e)
         "route|-n|add|-net|0.0.0.0/1|-interface|utun9",
     };
     assert_log_order(log, seq, 4, "pin-change-fallback sequence");
+    ASSERT_EQ_INT(p.server_pin_owned, 0, "pin-change-fallback: pin not owned");
 
     fake_cmd_clear_fail();
+    fake_cmd_reset(e);
     cleanup_routes(&p);
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "delete|203.0.113.9/32") == NULL,
+                "pin-change-fallback: pre-existing pin not deleted");
+    ASSERT_TRUE(strstr(log, "delete|-net|0.0.0.0/1") != NULL,
+                "pin-change-fallback: own catch-all still deleted");
 }
 
 /* ================================================================
