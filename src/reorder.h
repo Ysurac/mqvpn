@@ -453,6 +453,11 @@ mqvpn_reorder_cap_is_valid(uint32_t cap)
     return cap != 0 && (cap & (cap - 1)) == 0;
 }
 
+/* Largest per-flow ring cap the receiver uses (a power of two). The slot array
+ * of a flow costs up to 32 bytes per slot at full span (2 MiB at this cap), so the RX
+ * engine clamps a larger configured cap to it. */
+#define MQVPN_REORDER_CAP_MAX 65536u
+
 /* Resolve each rule's effective (wait,cap): rule-explicit > global-explicit >
  * profile-preset > builtin. Idempotent. Run AFTER full config parse (rule- and
  * global-explicit arrive in separate sections). Tiers 2 & 4 intentionally read

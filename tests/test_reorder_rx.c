@@ -1653,9 +1653,11 @@ test_rx_double_overflow_flush(void)
      * reclassify the packet lands in-order and drains, so the buffer is empty by
      * the time the pool gate is reached: that gate takes the ring_empty drop
      * branch and does NOT call overflow_flush on an empty buffer. Keep the
-     * budgets equal and tight to exercise both gates back-to-back. */
+     * budgets equal and tight to exercise both gates back-to-back. The pool
+     * also carries the flow's slot array (RING_MIN_SIZE slots for these small
+     * spans), so it gets exactly that much on top of the two packets. */
     c.max_buffer_bytes_per_flow = 256;
-    c.global_max_buffer_bytes = 256;
+    c.global_max_buffer_bytes = 256 + RING_SLOT_BYTES(RING_MIN_SIZE);
     mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
     uint8_t buf[256];
 
@@ -1841,6 +1843,190 @@ test_stats_accumulate_carries_residence(void)
     ASSERT_TRUE(a.residence_max_us == 60000, "max takes the larger");
 }
 
+/* ─────────────── ring memory, flow table, deadline (review fixes) ────────── */
+
+/* ring_bytes_used == Σ slot-array bytes over every flow (catches a charge or
+ * uncharge asymmetry that ASan cannot see). */
+static int
+ring_acct_holds(mqvpn_reorder_rx_t *rx)
+{
+    uint64_t sum = 0;
+    uint32_t n = 0;
+    for (mqvpn_reorder_flow_t *f = rx->lru_head; f; f = f->lru_next) {
+        if (f->buffer.slots != NULL) {
+            sum += RING_SLOT_BYTES(f->buffer.size);
+        }
+        n++;
+    }
+    return sum == rx->ring_bytes_used && n == rx->n_flows;
+}
+
+/* Two datagrams opening a full-cap span allocate a cap-sized slot array: it is
+ * charged to the pool and given back once the flow drains. */
+static void
+test_rx_ring_memory_charged_and_freed(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.cap_packets_per_flow = 1024;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000); /* cold start, expected=1 */
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_TRUE(f->buffer.slots == NULL, "no slot array after an in-order packet");
+    ASSERT_EQ_INT(rx->ring_bytes_used, 0, "nothing charged yet");
+
+    n = build_reorder_dgram(buf, 0, 1023, 2, 5000, 443, 10); /* span 1022 */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
+    ASSERT_EQ_INT(f->buffer.size, 1024, "span 1022 needs the full 1024-slot array");
+    ASSERT_EQ_INT(rx->ring_bytes_used, RING_SLOT_BYTES(1024), "slot array charged");
+    ASSERT_TRUE(ring_acct_holds(rx), "ring accounting while buffered");
+
+    mqvpn_reorder_rx_tick(rx, 2000 + (uint64_t)c.max_wait_ms * 1000ULL); /* timeout */
+    ASSERT_TRUE(ring_empty(&f->buffer), "timeout drained the flow");
+    ASSERT_TRUE(f->buffer.slots == NULL, "drained flow holds no slot array");
+    ASSERT_EQ_INT(rx->ring_bytes_used, 0, "slot array uncharged on drain");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after drain");
+
+    /* A small gap allocates only RING_MIN_SIZE slots, freed when filled. */
+    n = build_reorder_dgram(buf, 0, 1025, 3, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 50000);
+    ASSERT_EQ_INT(f->buffer.size, RING_MIN_SIZE, "small span: minimum array");
+    n = build_reorder_dgram(buf, 0, 1024, 4, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 50001);
+    ASSERT_TRUE(f->buffer.slots == NULL, "filled gap: array freed");
+    ASSERT_EQ_INT(rx->ring_bytes_used, 0, "uncharged after fill");
+    mqvpn_reorder_rx_free(rx);
+}
+
+/* Many spoofed 5-tuples each opening a sparse full-cap span: the slot arrays
+ * cannot outgrow global_max_buffer_bytes; the excess is a pool drop. */
+static void
+test_rx_ring_memory_bounded_by_pool(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.cap_packets_per_flow = 1024;
+    c.global_max_buffer_bytes = 4 * RING_SLOT_BYTES(1024) + 4096;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    for (uint16_t i = 0; i < 64; i++) {
+        size_t n = build_reorder_dgram(buf, 0, 0, 1, (uint16_t)(7000 + i), 443, 10);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);
+        n = build_reorder_dgram(buf, 0, 1023, 2, (uint16_t)(7000 + i), 443, 10);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);
+        ASSERT_TRUE(rx->pool_bytes_used + rx->ring_bytes_used <=
+                        c.global_max_buffer_bytes,
+                    "slot arrays + packets within the global budget");
+    }
+    ASSERT_TRUE(ring_acct_holds(rx), "ring accounting under a flow flood");
+    ASSERT_TRUE(invariant_holds(rx), "invariant under a flow flood");
+    mqvpn_reorder_stats_t st;
+    mqvpn_reorder_rx_get_stats(rx, &st);
+    ASSERT_EQ_INT(st.pool_drop_count, 60, "flows past the budget pool-dropped");
+    mqvpn_reorder_rx_free(rx);
+}
+
+/* An oversized configured cap (global or per-rule) is clamped to
+ * MQVPN_REORDER_CAP_MAX by the RX engine. */
+static void
+test_rx_cap_clamped(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.cap_packets_per_flow = 1u << 30;
+    c.has_explicit_cap = 1;
+    c.n_rules = 1;
+    c.rules[0].proto = MQVPN_IPPROTO_UDP;
+    c.rules[0].port = 4433;
+    c.rules[0].profile = MQVPN_RPROF_QUIC_BULK;
+    c.rules[0].explicit_cap = 1u << 31;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    ASSERT_TRUE(rx != NULL, "oversized cap still creates the engine");
+    ASSERT_EQ_INT(rx->cfg.cap_packets_per_flow, MQVPN_REORDER_CAP_MAX, "global clamped");
+    ASSERT_EQ_INT(rx->cfg.rules[0].resolved_cap, MQVPN_REORDER_CAP_MAX, "rule clamped");
+
+    uint8_t buf[256];
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+    ASSERT_EQ_INT(f->buffer.cap, MQVPN_REORDER_CAP_MAX, "flow window clamped");
+    n = build_reorder_dgram(buf, 0, 1 + MQVPN_REORDER_CAP_MAX, 2, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1001);
+    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 1, "beyond the clamped window");
+    mqvpn_reorder_rx_free(rx);
+}
+
+static mqvpn_reorder_flow_t *
+flow_by_sport(mqvpn_reorder_rx_t *rx, uint16_t sport)
+{
+    for (mqvpn_reorder_flow_t *f = rx->lru_head; f; f = f->lru_next) {
+        if (f->key.src_port == sport) return f;
+    }
+    return NULL;
+}
+
+/* At max_flows the evicted flow is the one with the oldest last_progress_us,
+ * and the bucket array grows with the population. */
+static void
+test_rx_lru_eviction_and_bucket_growth(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_flows = 3;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+    size_t n;
+
+    for (uint16_t i = 0; i < 3; i++) { /* A=6000 @1, B=6001 @2, C=6002 @3 */
+        n = build_reorder_dgram(buf, 0, 0, 1, (uint16_t)(6000 + i), 443, 10);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, (uint64_t)(i + 1));
+    }
+    n = build_reorder_dgram(buf, 0, 1, 2, 6000, 443, 10); /* A progresses @4 */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 4);
+    n = build_reorder_dgram(buf, 0, 5, 3, 6002, 443, 10); /* C buffers ahead @5 */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 5);
+    n = build_reorder_dgram(buf, 0, 0, 1, 6003, 443, 10); /* D @6 → evict B */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 6);
+    ASSERT_EQ_INT(rx->n_flows, 3, "table stays at max_flows");
+    ASSERT_TRUE(flow_by_sport(rx, 6001) == NULL, "least recent flow (B) evicted");
+    ASSERT_TRUE(flow_by_sport(rx, 6000) && flow_by_sport(rx, 6002) &&
+                    flow_by_sport(rx, 6003),
+                "recent flows kept");
+    ASSERT_TRUE(ring_acct_holds(rx), "list consistent after eviction");
+    mqvpn_reorder_rx_free(rx);
+
+    /* Growth: 3000 flows with a large MaxFlows → buckets double past 1024. */
+    c = rx_cfg();
+    rx = mqvpn_reorder_rx_new(&c, 0x2, mock_deliver, &rec);
+    ASSERT_EQ_INT(rx->n_buckets, MQVPN_RX_BUCKETS_INIT, "starts at the initial size");
+    for (uint32_t i = 0; i < 3000; i++) {
+        n = build_reorder_dgram(buf, 0, 0, 1, (uint16_t)(10000 + i), 443, 10);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1000 + i);
+    }
+    ASSERT_EQ_INT(rx->n_flows, 3000, "all flows kept");
+    ASSERT_EQ_INT(rx->n_buckets, 4096, "buckets grew with the population");
+    int found = 1;
+    for (uint32_t i = 0; i < 3000; i++) {
+        mqvpn_flow_key_t key;
+        size_t m = build_reorder_dgram(buf, 0, 0, 1, (uint16_t)(10000 + i), 443, 10);
+        mqvpn_reorder_parse_5tuple(buf + MQVPN_REORDER_HDR_LEN, m - MQVPN_REORDER_HDR_LEN,
+                                   &key);
+        if (flow_lookup(rx, &key) == NULL) found = 0;
+    }
+    ASSERT_TRUE(found, "every flow reachable after rehash");
+
+    /* Idle sweep removes every flow past ingress_idle_timeout. */
+    mqvpn_reorder_rx_tick(rx, 1000 + 3000 +
+                                  (uint64_t)c.ingress_idle_timeout_sec * 1000000ULL + 1);
+    ASSERT_EQ_INT(rx->n_flows, 0, "idle sweep evicted all");
+    ASSERT_TRUE(rx->lru_head == NULL && rx->lru_tail == NULL, "list empty");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -1911,6 +2097,12 @@ main(void)
     test_latency_percentile_from_buckets();
     test_latency_overflow_boundary_and_max();
     test_stats_accumulate_carries_residence();
+
+    /* Review fixes: ring memory, flow table, deadline */
+    test_rx_ring_memory_charged_and_freed();
+    test_rx_ring_memory_bounded_by_pool();
+    test_rx_cap_clamped();
+    test_rx_lru_eviction_and_bucket_growth();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
