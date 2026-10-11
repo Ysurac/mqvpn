@@ -475,7 +475,8 @@ typedef struct {
     uint64_t dgram_acked;
     int srtt_ms;
     /* Hybrid-mode per-lane counters (0 unless hybrid classifier active).
-     * tcp/dgram/raw partition every classified packet exactly once. */
+     * tcp/dgram/raw partition every classified packet exactly once.
+     * pkts_lane_* and tcp_flows_* appended under ABI 2. */
     uint64_t pkts_lane_tcp;   /* packets actually handed to the TCP lane (lwIP) */
     uint64_t pkts_lane_dgram; /* packets sent via the datagram lane */
     uint64_t pkts_lane_raw;   /* packets sent via the raw lane, incl. TCP
@@ -494,11 +495,11 @@ typedef struct {
      * failures are not counted). */
     uint64_t tcp_flows_rejected;
     /* pkts_lane_tcp_dropped: client-only — TCP-lane packets lwIP refused
-     * (e.g. no matching pcb). Always 0 server-side. */
+     * (e.g. no matching pcb). Always 0 server-side. Appended under ABI 2. */
     uint64_t pkts_lane_tcp_dropped;
     /* raw_markers_active: client-only gauge — sticky-RAW markers currently
      * held in the TCP-lane flow table (5-tuples pinned to RAW under
-     * tcp=auto). Always 0 server-side. */
+     * tcp=auto). Always 0 server-side. Appended under ABI 2. */
     uint64_t raw_markers_active;
     /* Outer-UDP transmit offload counters, the live counterpart of the
      * "udp-tx: " teardown log line. udp_tx_datagrams / udp_tx_sends is the
@@ -515,7 +516,8 @@ typedef struct {
      * ever sees one datagram at a time because every receive arrives through
      * mqvpn_client_on_socket_recv() / mqvpn_server_on_socket_recv(). The
      * platform harvests those counters from the bind, and the server's
-     * control API reports them from there (see ctrl_socket_create). */
+     * control API reports them from there (see ctrl_socket_create).
+     * Appended under ABI 2. */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
 } mqvpn_stats_t;
@@ -1194,6 +1196,13 @@ MQVPN_API int mqvpn_client_tick(mqvpn_client_t *client);
 /* Query state */
 MQVPN_API mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *client);
 
+/* Out-parameter structs (mqvpn_stats_t, mqvpn_interest_t, the
+ * mqvpn_path_info_t array) grow only by appending fields. Set struct_size to
+ * sizeof(*out) (for get_paths, in out[0]; it is the array stride) before the
+ * call: the client fills at most that many bytes and writes back the size it
+ * filled. A struct_size below the layout libmqvpn.so.4 shipped with (0
+ * included) is taken as that layout, so callers that never set it keep
+ * working. */
 MQVPN_API int mqvpn_client_get_stats(const mqvpn_client_t *client, mqvpn_stats_t *out);
 
 /* Lists every path slot the client has used, in slot order, CLOSED ones

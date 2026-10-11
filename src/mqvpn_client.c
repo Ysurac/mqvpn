@@ -4952,12 +4952,51 @@ mqvpn_client_get_state(const mqvpn_client_t *c)
     return c->state;
 }
 
-int
-mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
+/* Out-parameter structs (mqvpn_stats_t, mqvpn_interest_t, mqvpn_path_info_t)
+ * grow by appending fields. The caller states how much storage it has in
+ * struct_size; the library writes at most that much, and never more than
+ * its own sizeof. Callers that leave struct_size unset or below the layout
+ * every libmqvpn.so.4 caller has (CLI_*_SIZE_SO4) are given that baseline,
+ * which is what the library always wrote, so they keep working; a large or
+ * garbage value is clamped to the library's own size. */
+#define CLI_SIZE_THROUGH(T, f) (offsetof(T, f) + sizeof(((T *)0)->f))
+#define CLI_ROUND_UP(n, a)     ((((n) + (a) - 1) / (a)) * (a))
+#define CLI_STATS_SIZE_SO4                                          \
+    CLI_ROUND_UP(CLI_SIZE_THROUGH(mqvpn_stats_t, udp_tx_datagrams), \
+                 _Alignof(mqvpn_stats_t))
+#define CLI_INTEREST_SIZE_SO4 \
+    CLI_ROUND_UP(CLI_SIZE_THROUGH(mqvpn_interest_t, is_idle), _Alignof(mqvpn_interest_t))
+#define CLI_PATH_INFO_SIZE_SO4                                  \
+    CLI_ROUND_UP(CLI_SIZE_THROUGH(mqvpn_path_info_t, bytes_rx), \
+                 _Alignof(mqvpn_path_info_t))
+_Static_assert(CLI_STATS_SIZE_SO4 <= sizeof(mqvpn_stats_t), "stats baseline");
+_Static_assert(CLI_INTEREST_SIZE_SO4 <= sizeof(mqvpn_interest_t), "interest baseline");
+_Static_assert(CLI_PATH_INFO_SIZE_SO4 <= sizeof(mqvpn_path_info_t), "path_info baseline");
+
+static size_t
+cli_out_struct_size(uint32_t caller_size, size_t baseline, size_t full)
 {
-    if (!c || !out) return MQVPN_ERR_INVALID_ARG;
+    if (caller_size < baseline) return baseline;
+    return caller_size < full ? caller_size : full;
+}
+
+MQVPN_INTERNAL
+size_t
+mqvpn_client_test_out_struct_size(uint32_t caller_size, size_t baseline, size_t full)
+{
+    return cli_out_struct_size(caller_size, baseline, full);
+}
+
+int
+mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out_user)
+{
+    if (!c || !out_user) return MQVPN_ERR_INVALID_ARG;
+    size_t out_size =
+        cli_out_struct_size(out_user->struct_size, CLI_STATS_SIZE_SO4, sizeof(*out_user));
+    mqvpn_stats_t st_local;
+    mqvpn_stats_t *out = &st_local;
     memset(out, 0, sizeof(*out));
-    out->struct_size = sizeof(*out);
+    out->struct_size = (uint32_t)out_size;
     out->bytes_tx = c->bytes_tx;
     out->bytes_rx = c->bytes_rx;
     out->dgram_sent = c->dgram_sent;
@@ -4994,6 +5033,7 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
         out->srtt_ms = (int)(xs.srtt / 1000);
         free(xs.paths_info);
     }
+    memcpy(out_user, out, out_size);
     return MQVPN_OK;
 }
 
@@ -5021,22 +5061,30 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
     if (c->engine && c->conn) xstats = xqc_conn_get_stats(c->engine, &c->conn->cid);
 
     int count = c->n_paths < max_paths ? c->n_paths : max_paths;
+    /* The array stride is the caller's element size (out[0].struct_size),
+     * see cli_out_struct_size. */
+    size_t stride = count > 0 ? cli_out_struct_size(out[0].struct_size,
+                                                    CLI_PATH_INFO_SIZE_SO4, sizeof(*out))
+                              : sizeof(*out);
     for (int i = 0; i < count; i++) {
         const path_entry_t *p = &c->paths[i];
-        out[i].struct_size = sizeof(out[i]);
-        out[i].handle = p->handle;
-        out[i].status = p->status;
-        out[i].flags = p->flags;
-        memcpy(out[i].name, p->name, sizeof(out[i].name));
-        out[i].bytes_tx = p->bytes_tx;
-        out[i].bytes_rx = p->bytes_rx;
+        mqvpn_path_info_t pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.struct_size = (uint32_t)stride;
+        pi.handle = p->handle;
+        pi.status = p->status;
+        pi.flags = p->flags;
+        memcpy(pi.name, p->name, sizeof(pi.name));
+        pi.bytes_tx = p->bytes_tx;
+        pi.bytes_rx = p->bytes_rx;
 
         /* Map SRTT from xquic path metrics (us -> ms) */
-        out[i].srtt_ms = 0;
+        pi.srtt_ms = 0;
         if (p->xquic_path_live) {
             const xqc_path_metrics_t *pm = xqc_find_path_metrics(&xstats, p->xqc_path_id);
-            if (pm) out[i].srtt_ms = (int)(pm->path_srtt / 1000);
+            if (pm) pi.srtt_ms = (int)(pm->path_srtt / 1000);
         }
+        memcpy((uint8_t *)out + (size_t)i * stride, &pi, stride);
     }
     *n_paths = count;
     free(xstats.paths_info);
@@ -5244,11 +5292,15 @@ mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats_t *
 }
 
 int
-mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
+mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out_user)
 {
-    if (!c || !out) return MQVPN_ERR_INVALID_ARG;
+    if (!c || !out_user) return MQVPN_ERR_INVALID_ARG;
+    size_t out_size = cli_out_struct_size(out_user->struct_size, CLI_INTEREST_SIZE_SO4,
+                                          sizeof(*out_user));
+    mqvpn_interest_t in_local;
+    mqvpn_interest_t *out = &in_local;
     memset(out, 0, sizeof(*out));
-    out->struct_size = sizeof(*out);
+    out->struct_size = (uint32_t)out_size;
 
     int ms = (int)(c->next_wake_us / 1000);
 
@@ -5368,6 +5420,7 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
     out->next_timer_ms = ms > 0 ? ms : 1;
     out->tun_readable = (c->tun_active && !c->backpressure) ? 1 : 0;
     out->is_idle = (c->state != MQVPN_STATE_ESTABLISHED) ? 1 : 0;
+    memcpy(out_user, out, out_size);
     return MQVPN_OK;
 }
 

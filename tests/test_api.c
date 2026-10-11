@@ -3119,6 +3119,59 @@ TEST(server_tunnel_ip_guess_never_own_address)
     ASSERT_EQ(memcmp(srv, (const uint8_t[]){10, 0, 255, 1}, 4), 0);
 }
 
+extern size_t mqvpn_client_test_out_struct_size(uint32_t caller_size, size_t baseline,
+                                                size_t full);
+
+/* Out-parameter structs: the library writes min(struct_size, its sizeof),
+ * and a struct_size below the soname-4 baseline (0 = never set) gets the
+ * baseline, i.e. what it always wrote. */
+TEST(out_struct_size_clamps_to_caller_and_library)
+{
+    ASSERT_EQ(mqvpn_client_test_out_struct_size(0, 100, 120), 100);
+    ASSERT_EQ(mqvpn_client_test_out_struct_size(99, 100, 120), 100);
+    ASSERT_EQ(mqvpn_client_test_out_struct_size(110, 100, 120), 110);
+    ASSERT_EQ(mqvpn_client_test_out_struct_size(120, 100, 120), 120);
+    ASSERT_EQ(mqvpn_client_test_out_struct_size(0xffffffffu, 100, 120), 120);
+}
+
+TEST(get_stats_and_interest_never_write_past_library_size)
+{
+    mqvpn_client_t *c = make_test_client();
+    struct {
+        mqvpn_stats_t st;
+        uint8_t canary[64];
+    } sbuf;
+    memset(&sbuf, 0xA5, sizeof(sbuf));
+    /* A caller claiming a larger (newer) struct: only our size is written. */
+    sbuf.st.struct_size = (uint32_t)sizeof(sbuf);
+    ASSERT_EQ(mqvpn_client_get_stats(c, &sbuf.st), MQVPN_OK);
+    ASSERT_EQ(sbuf.st.struct_size, sizeof(mqvpn_stats_t));
+    ASSERT_EQ(sbuf.st.bytes_tx, 0);
+    for (size_t i = 0; i < sizeof(sbuf.canary); i++)
+        ASSERT_EQ(sbuf.canary[i], 0xA5);
+
+    /* Never set (0): the full soname-4 layout, as before. */
+    mqvpn_stats_t st0;
+    memset(&st0, 0xA5, sizeof(st0));
+    st0.struct_size = 0;
+    ASSERT_EQ(mqvpn_client_get_stats(c, &st0), MQVPN_OK);
+    ASSERT_EQ(st0.struct_size, sizeof(mqvpn_stats_t));
+    ASSERT_EQ(st0.udp_tx_datagrams, 0);
+
+    struct {
+        mqvpn_interest_t in;
+        uint8_t canary[32];
+    } ibuf;
+    memset(&ibuf, 0xA5, sizeof(ibuf));
+    ibuf.in.struct_size = (uint32_t)sizeof(ibuf);
+    ASSERT_EQ(mqvpn_client_get_interest(c, &ibuf.in), MQVPN_OK);
+    ASSERT_EQ(ibuf.in.struct_size, sizeof(mqvpn_interest_t));
+    for (size_t i = 0; i < sizeof(ibuf.canary); i++)
+        ASSERT_EQ(ibuf.canary[i], 0xA5);
+
+    mqvpn_client_destroy(c);
+}
+
 TEST(tunnel_setup_watchdog_window)
 {
     mqvpn_client_t *c = make_test_client();
@@ -4422,6 +4475,8 @@ main(void)
     run_request_close_during_local_shutdown_requests_nothing();
     run_headers_any_2xx_accepts_tunnel();
     run_tunnel_setup_watchdog_window();
+    run_out_struct_size_clamps_to_caller_and_library();
+    run_get_stats_and_interest_never_write_past_library_size();
     run_server_tunnel_ip_guess_never_own_address();
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     run_client_new_warns_tcp_max_flows_above_pool_bound();
