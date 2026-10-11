@@ -22,6 +22,10 @@ concurrency:
   group: test-pending-regression-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   pending-regression:
     name: Unit regression checks (#4273)

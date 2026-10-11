@@ -28,6 +28,10 @@ on:
       - '.github/workflows/test-ciphers.yml'
   workflow_dispatch:
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   test-ciphers:
     name: E2E cipher suite test

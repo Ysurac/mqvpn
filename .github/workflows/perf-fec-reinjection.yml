@@ -33,6 +33,10 @@ concurrency:
   group: perf-fec-reinjection
   cancel-in-progress: true
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   perf-fec-reinjection:
     runs-on: ubuntu-latest

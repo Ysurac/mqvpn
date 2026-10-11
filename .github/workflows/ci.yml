@@ -7,6 +7,10 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   format-check:
     runs-on: ubuntu-latest
@@ -233,10 +237,15 @@ jobs:
                 -DCMAKE_C_COMPILER=clang \
                 -DXQUIC_BUILD_DIR=../third_party/xquic/build ..
           make -j$(nproc) fuzz_tcp_lane fuzz_control_dispatch
+          # libFuzzer writes new inputs into the FIRST corpus dir: give it a
+          # scratch one and pass the tracked seeds second, read-only.
+          mkdir -p "$RUNNER_TEMP/corpus-tcp_lane" "$RUNNER_TEMP/corpus-control_dispatch"
           ASAN_OPTIONS=abort_on_error=1 \
-            ./fuzz_tcp_lane -max_total_time=120 ../fuzz/corpus/tcp_lane/
+            ./fuzz_tcp_lane -max_total_time=120 \
+              "$RUNNER_TEMP/corpus-tcp_lane" ../fuzz/corpus/tcp_lane/
           ASAN_OPTIONS=abort_on_error=1 \
-            ./fuzz_control_dispatch -max_total_time=60 ../fuzz/corpus/control_dispatch/
+            ./fuzz_control_dispatch -max_total_time=60 \
+              "$RUNNER_TEMP/corpus-control_dispatch" ../fuzz/corpus/control_dispatch/
 
       - name: E2E smoke test (netns)
         env:

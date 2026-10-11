@@ -45,6 +45,10 @@ concurrency:
   group: test-path-api-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   unit-tests:
     name: Control API unit tests (get_status)
