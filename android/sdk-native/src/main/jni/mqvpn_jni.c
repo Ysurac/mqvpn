@@ -319,19 +319,27 @@ jni_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
-    /* Create byte arrays for IPs */
+    /* Create byte arrays for IPs. A failed allocation leaves a pending
+     * OutOfMemoryError: no further JNI call but cleanup may run with it, so
+     * clear it, drop what was made and skip the upcall. */
     jbyteArray assigned_ip = (*env)->NewByteArray(env, 4);
-    (*env)->SetByteArrayRegion(env, assigned_ip, 0, 4, (const jbyte *)info->assigned_ip);
-
-    jbyteArray server_ip = (*env)->NewByteArray(env, 4);
-    (*env)->SetByteArrayRegion(env, server_ip, 0, 4, (const jbyte *)info->server_ip);
-
+    jbyteArray server_ip = assigned_ip ? (*env)->NewByteArray(env, 4) : NULL;
     jbyteArray assigned_ip6 = NULL;
-    if (info->has_v6) {
-        assigned_ip6 = (*env)->NewByteArray(env, 16);
+    if (server_ip && info->has_v6) assigned_ip6 = (*env)->NewByteArray(env, 16);
+    if (!assigned_ip || !server_ip || (info->has_v6 && !assigned_ip6)) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        LOGW("tunnel_config_ready: byte array allocation failed");
+        if (assigned_ip) (*env)->DeleteLocalRef(env, assigned_ip);
+        if (server_ip) (*env)->DeleteLocalRef(env, server_ip);
+        if (assigned_ip6) (*env)->DeleteLocalRef(env, assigned_ip6);
+        detach_if_needed(ctx, did_attach);
+        return;
+    }
+    (*env)->SetByteArrayRegion(env, assigned_ip, 0, 4, (const jbyte *)info->assigned_ip);
+    (*env)->SetByteArrayRegion(env, server_ip, 0, 4, (const jbyte *)info->server_ip);
+    if (assigned_ip6)
         (*env)->SetByteArrayRegion(env, assigned_ip6, 0, 16,
                                    (const jbyte *)info->assigned_ip6);
-    }
 
     /* void onNativeTunnelConfigReady(byte[] assignedIp, int prefix,
      *     byte[] assignedIp6, int prefix6, byte[] serverIp, int serverPrefix,
@@ -1153,7 +1161,15 @@ JNI_FN(closeFd)(JNIEnv *env, jobject thiz, jint fd)
  *  I/O feed (TUN only — path receive happens inside reactorWait)
  * ════════════════════════════════════════════════════════════════════════════ */
 
-/* onTunPacket(client, pkt, offset, len) → int */
+/* Largest IP packet the TUN can hand over. */
+#define JNI_TUN_PKT_MAX 65535
+
+/* onTunPacket(client, pkt, offset, len) → int. [offset, offset+len) must lie
+ * inside pkt (MQVPN_ERR_INVALID_ARG otherwise — the old code read past the
+ * array). Only that slice is copied, into a stack buffer: the frames are
+ * pooled buffers far larger than the packet, and GetByteArrayElements could
+ * copy the whole array per packet. No critical section: the engine may call
+ * back into Java (log) while it handles the packet. */
 JNIEXPORT jint JNICALL
 JNI_FN(onTunPacket)(JNIEnv *env, jobject thiz, jlong client, jbyteArray pkt, jint offset,
                     jint len)
@@ -1161,13 +1177,18 @@ JNI_FN(onTunPacket)(JNIEnv *env, jobject thiz, jlong client, jbyteArray pkt, jin
     (void)thiz;
     mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
 
-    jbyte *data = (*env)->GetByteArrayElements(env, pkt, NULL);
-    if (!data) return MQVPN_ERR_NO_MEMORY;
+    if (!pkt) return MQVPN_ERR_INVALID_ARG;
+    jsize alen = (*env)->GetArrayLength(env, pkt);
+    if (offset < 0 || len <= 0 || len > JNI_TUN_PKT_MAX || offset > alen - len)
+        return MQVPN_ERR_INVALID_ARG;
 
-    int rc = mqvpn_client_on_tun_packet(c, (const uint8_t *)(data + offset), (size_t)len);
-
-    (*env)->ReleaseByteArrayElements(env, pkt, data, JNI_ABORT);
-    return rc;
+    uint8_t buf[JNI_TUN_PKT_MAX];
+    (*env)->GetByteArrayRegion(env, pkt, offset, len, (jbyte *)buf);
+    if ((*env)->ExceptionCheck(env)) { /* unreachable after the bounds check */
+        (*env)->ExceptionClear(env);
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    return mqvpn_client_on_tun_packet(c, buf, (size_t)len);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════

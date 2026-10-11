@@ -40,6 +40,15 @@ class MqvpnTunnelTest {
     }
 
     @Test
+    fun `onTunPacket rejects a slice outside the array without JNI`() {
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), -1, 2))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), 0, 0))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), 0, 5))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), 3, 2))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), Int.MAX_VALUE, 1))
+    }
+
+    @Test
     fun `destroy on a destroyed tunnel is a no-op`() {
         t.destroy()
         t.destroy()

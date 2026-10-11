@@ -74,8 +74,11 @@ class MqvpnTunnel internal constructor(
 
     // --- I/O feed (TUN; path receive happens inside the reactor's wait) ---
 
-    fun onTunPacket(data: ByteArray, offset: Int, length: Int): Int =
-        live(ERR_INVALID_STATE) { NativeBridge.onTunPacket(it, data, offset, length) }
+    /** [offset, offset + length) must lie inside [data]; otherwise [ERR_INVALID_ARG]. */
+    fun onTunPacket(data: ByteArray, offset: Int, length: Int): Int {
+        if (offset < 0 || length <= 0 || offset > data.size - length) return ERR_INVALID_ARG
+        return live(ERR_INVALID_STATE) { NativeBridge.onTunPacket(it, data, offset, length) }
+    }
 
     // --- Engine tick ---
 
@@ -156,6 +159,8 @@ class MqvpnTunnel internal constructor(
     companion object {
         private const val TAG = "MqvpnTunnel"
         private const val REORDER_STATS_FIELDS = 7
+        /** MQVPN_ERR_INVALID_ARG */
+        const val ERR_INVALID_ARG = -1
         const val ERR_AGAIN = -9
         /** MQVPN_ERR_INVALID_STATE: also what every call returns after [destroy]. */
         const val ERR_INVALID_STATE = -13
