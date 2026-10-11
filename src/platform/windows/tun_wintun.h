@@ -73,8 +73,13 @@ int mqvpn_tun_win_set_addr(mqvpn_tun_win_t *tun, const char *addr, const char *p
 /* Assign IPv6 address. */
 int mqvpn_tun_win_set_addr6(mqvpn_tun_win_t *tun, const char *addr6, int prefix_len);
 
-/* Set MTU on the adapter. */
+/* Set MTU on the adapter (IPv6 too once an IPv6 address is set; setting the
+ * IPv6 address applies the current MTU to IPv6). */
 int mqvpn_tun_win_set_mtu(mqvpn_tun_win_t *tun, int mtu);
+
+/* Pin the adapter's interface metric (automatic metric off), IPv4 and, once
+ * an IPv6 address is set, IPv6. Lives and dies with the adapter. */
+int mqvpn_tun_win_set_metric(mqvpn_tun_win_t *tun, ULONG metric);
 
 /* Start the reader thread that bridges Wintun → socketpair. */
 int mqvpn_tun_win_start_reader(mqvpn_tun_win_t *tun);

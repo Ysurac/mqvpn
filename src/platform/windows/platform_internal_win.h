@@ -105,6 +105,7 @@ struct platform_win_ctx {
 
     /* DNS */
     int dns_configured;
+    int dns_method; /* WIN_DNS_METHOD_*: how win_setup_dns applied it, undone alike */
     DWORD dns_if_index;
     int n_dns;
     char dns_servers[4][64];
@@ -161,6 +162,9 @@ void win_killswitch_revoke_tun(platform_win_ctx_t *p);
 void win_cleanup_killswitch(platform_win_ctx_t *p);
 
 /* dns.c */
+#  define WIN_DNS_METHOD_NONE  0
+#  define WIN_DNS_METHOD_API   1 /* SetInterfaceDnsSettings */
+#  define WIN_DNS_METHOD_NETSH 2
 int win_setup_dns(platform_win_ctx_t *p);
 void win_cleanup_dns(platform_win_ctx_t *p);
 

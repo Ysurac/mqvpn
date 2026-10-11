@@ -133,10 +133,47 @@ clear_dns_netsh(const char *adapter_name)
     run_netsh(args);
 }
 
+/* Only IP literals reach SetInterfaceDnsSettings and the netsh command line
+ * (an unquoted argument there): anything else is dropped with a warning. */
+static int
+dns_server_valid(const char *s)
+{
+    unsigned char scratch[sizeof(struct in6_addr)];
+    return inet_pton(AF_INET, s, scratch) == 1 || inet_pton(AF_INET6, s, scratch) == 1;
+}
+
+/* Interface metric pinned on the TUN when it carries the DNS override.
+ * Windows asks the DNS servers of the lowest-metric interface first, so this
+ * keeps queries on the tunnel's servers instead of racing the physical
+ * adapters'. It does not stop every query from leaving elsewhere (Windows
+ * can still fall back to other interfaces' servers); KillSwitch blocks
+ * those. An NRPT "." rule would, but it is a registry policy that outlives a
+ * crashed process, so it is not used here. Lives and dies with the adapter:
+ * nothing to restore. */
+#  define WIN_DNS_TUN_METRIC 0
+
 int
 win_setup_dns(platform_win_ctx_t *p)
 {
     if (p->dns_configured || p->n_dns <= 0) return 0;
+
+    const char *servers[4];
+    int n = 0;
+    for (int i = 0; i < p->n_dns && i < 4; i++) {
+        if (!dns_server_valid(p->dns_servers[i])) {
+            LOG_WRN("DNS server '%s' is not an IP address, ignored", p->dns_servers[i]);
+            continue;
+        }
+        servers[n++] = p->dns_servers[i];
+    }
+    if (n == 0) {
+        LOG_ERR("no valid DNS server address");
+        return -1;
+    }
+
+    if (mqvpn_tun_win_set_metric(&p->tun, WIN_DNS_TUN_METRIC) < 0)
+        LOG_WRN("could not lower the TUN interface metric; other adapters' DNS "
+                "servers may be preferred");
 
     resolve_dns_api();
 
@@ -144,9 +181,9 @@ win_setup_dns(platform_win_ctx_t *p)
         /* Build "addr1,addr2,..." nameserver string */
         WCHAR ns[512] = {0};
         int off = 0;
-        for (int i = 0; i < p->n_dns; i++) {
+        for (int i = 0; i < n; i++) {
             WCHAR addr[64];
-            MultiByteToWideChar(CP_ACP, 0, p->dns_servers[i], -1, addr, 64);
+            MultiByteToWideChar(CP_ACP, 0, servers[i], -1, addr, 64);
             if (i > 0) ns[off++] = L',';
             int len = (int)wcslen(addr);
             memcpy(ns + off, addr, len * sizeof(WCHAR));
@@ -175,21 +212,18 @@ win_setup_dns(platform_win_ctx_t *p)
         }
 
         p->dns_configured = 1;
-        LOG_INF("DNS configured via SetInterfaceDnsSettings (%d servers)", p->n_dns);
+        p->dns_method = WIN_DNS_METHOD_API;
+        LOG_INF("DNS configured via SetInterfaceDnsSettings (%d servers)", n);
         return 0;
     }
 
-fallback: {
-    const char *servers[4];
-    for (int i = 0; i < p->n_dns; i++)
-        servers[i] = p->dns_servers[i];
-
-    if (set_dns_netsh(p->tun.name, servers, p->n_dns) < 0) return -1;
+fallback:
+    if (set_dns_netsh(p->tun.name, servers, n) < 0) return -1;
 
     p->dns_configured = 1;
-    LOG_INF("DNS configured via netsh (%d servers)", p->n_dns);
+    p->dns_method = WIN_DNS_METHOD_NETSH;
+    LOG_INF("DNS configured via netsh (%d servers)", n);
     return 0;
-}
 }
 
 void
@@ -197,7 +231,9 @@ win_cleanup_dns(platform_win_ctx_t *p)
 {
     if (!p->dns_configured) return;
 
-    if (pSetInterfaceDnsSettings) {
+    /* Undo with the method that applied it: the API's presence says nothing
+     * about which one did (the API path falls back to netsh on error). */
+    if (p->dns_method == WIN_DNS_METHOD_API && pSetInterfaceDnsSettings) {
         GUID if_guid;
         if (ConvertInterfaceLuidToGuid(&p->tun.luid, &if_guid) == NO_ERROR) {
             DNS_INTERFACE_SETTINGS settings;
@@ -208,11 +244,12 @@ win_cleanup_dns(platform_win_ctx_t *p)
 
             pSetInterfaceDnsSettings(&if_guid, &settings);
         }
-    } else {
+    } else if (p->dns_method == WIN_DNS_METHOD_NETSH) {
         clear_dns_netsh(p->tun.name);
     }
 
     p->dns_configured = 0;
+    p->dns_method = WIN_DNS_METHOD_NONE;
     LOG_INF("DNS restored");
 }
 

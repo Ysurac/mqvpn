@@ -172,6 +172,8 @@ mqvpn_tun_win_create(mqvpn_tun_win_t *tun, const char *dev_name)
 
 /* ── IP address configuration ── */
 
+static int set_iface_mtu(const NET_LUID *luid, ADDRESS_FAMILY family, ULONG mtu);
+
 int
 mqvpn_tun_win_set_addr(mqvpn_tun_win_t *tun, const char *addr, const char *peer_addr,
                        int prefix_len)
@@ -216,6 +218,12 @@ mqvpn_tun_win_set_addr6(mqvpn_tun_win_t *tun, const char *addr6, int prefix_len)
 
     inet_pton(AF_INET6, addr6, &tun->addr6);
     tun->has_v6 = 1;
+
+    /* The IPv6 interface MTU: mqvpn_tun_win_set_mtu skips v6 until has_v6
+     * is set, and the platform sets the MTU before the v6 address, so apply
+     * the current one here or v6 keeps the adapter default. */
+    if (set_iface_mtu(&tun->luid, AF_INET6, (ULONG)tun->mtu) < 0)
+        LOG_WRN("IPv6 MTU set failed, continuing with default");
     return 0;
 }
 
@@ -245,6 +253,43 @@ set_iface_mtu(const NET_LUID *luid, ADDRESS_FAMILY family, ULONG mtu)
         return -1;
     }
     return 0;
+}
+
+/* Helper: pin one address family's interface metric */
+static int
+set_iface_metric(const NET_LUID *luid, ADDRESS_FAMILY family, ULONG metric)
+{
+    MIB_IPINTERFACE_ROW row;
+    InitializeIpInterfaceEntry(&row);
+    row.InterfaceLuid = *luid;
+    row.Family = family;
+
+    DWORD err = GetIpInterfaceEntry(&row);
+    if (err != NO_ERROR) {
+        LOG_WRN("GetIpInterfaceEntry(%s): error %lu", family == AF_INET ? "v4" : "v6",
+                err);
+        return -1;
+    }
+
+    row.UseAutomaticMetric = FALSE;
+    row.Metric = metric;
+    row.SitePrefixLength = 0; /* required: avoids ERROR_INVALID_PARAMETER */
+
+    err = SetIpInterfaceEntry(&row);
+    if (err != NO_ERROR) {
+        LOG_WRN("SetIpInterfaceEntry(%s, metric=%lu): error %lu",
+                family == AF_INET ? "v4" : "v6", metric, err);
+        return -1;
+    }
+    return 0;
+}
+
+int
+mqvpn_tun_win_set_metric(mqvpn_tun_win_t *tun, ULONG metric)
+{
+    int rc = set_iface_metric(&tun->luid, AF_INET, metric);
+    if (tun->has_v6 && set_iface_metric(&tun->luid, AF_INET6, metric) < 0) rc = -1;
+    return rc;
 }
 
 int
