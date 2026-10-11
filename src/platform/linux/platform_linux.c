@@ -1679,6 +1679,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
                     cfg->path_policy[i].user, cfg->path_policy[i].iface);
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
+    mqvpn_config_set_max_sessions_per_user(lib_cfg, cfg->max_sessions_per_user);
     mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
     switch (cfg->scheduler) {
     case MQVPN_SCHED_WLB: sched = MQVPN_SCHED_WLB; break;

@@ -434,6 +434,11 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->max_clients = iv;
     }
 
+    v = json_find_key(json_text, "max_sessions_per_user");
+    if (v && json_read_int(v, &iv) == MQVPN_OK && iv >= 0) {
+        cfg->max_sessions_per_user = iv;
+    }
+
     v = json_find_key(json_text, "insecure");
     if (v && json_read_bool(v, &iv) == MQVPN_OK) {
         cfg->insecure = iv;
@@ -820,6 +825,14 @@ mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->max_clients = max;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_max_sessions_per_user(mqvpn_config_t *cfg, int max)
+{
+    if (!cfg || max < 0) return MQVPN_ERR_INVALID_ARG;
+    cfg->max_sessions_per_user = max;
     return MQVPN_OK;
 }
 

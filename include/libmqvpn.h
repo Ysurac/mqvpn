@@ -982,6 +982,11 @@ MQVPN_API int mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert,
                                         const char *key);
 MQVPN_API int mqvpn_config_set_tls_ciphers(mqvpn_config_t *cfg, const char *ciphers);
 MQVPN_API int mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max);
+/* Most established tunnels one credential may hold at once (0 = unlimited,
+ * the default). The credential is the configured user, or the global key
+ * for every client using it whatever x-user name it sends. A request over
+ * the cap is refused with 403. Negative values are rejected. */
+MQVPN_API int mqvpn_config_set_max_sessions_per_user(mqvpn_config_t *cfg, int max);
 
 /* ─── Client API ─── */
 

@@ -844,6 +844,7 @@ main(int argc, char *argv[])
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,
+            .max_sessions_per_user = file_cfg.max_sessions_per_user,
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,

@@ -201,10 +201,13 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `User` | サーバー: ユーザー個別の PSK（`NAME:KEY` または `NAME:KEY:FIXED_IP` 形式、複数指定可）。クライアント: `NAME:KEY` はその名前と鍵を使い、`NAME` だけの場合は `Username` と同じくクライアントのユーザー名を設定する | — |
 | `Username` | クライアントのみ: サーバーのステータス出力やログでこのクライアントを識別するために送る名前。認証には影響しない | — |
 | `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
+| `MaxSessionsPerUser` | サーバーのみ: 認証情報（鍵）ごとの最大同時トンネル数。1 つの鍵で `MaxClients` の枠をすべて使われないようにする。`0` = 無制限 | `0` |
 
 ユーザー名は 1〜63 バイトで、`"`、`\`、制御文字は使えません。鍵は最大 255 バイトです。コマンドラインの `--user` が不正な場合は起動がエラーで止まり、設定ファイルの不正な `User` 行は警告付きでスキップされます。
 
 JSON ではクライアント・サーバーとも `auth_key` を使います（上の例のとおり）。
+
+`MaxSessionsPerUser` は認証情報ごとにトンネルを数えます。`User` はそれぞれ個別に数え、共有の `Key` で接続するクライアントは、`Username` でどの名前を送っていても（この名前は認証されません）すべて 1 つの共通枠で数えます。認証が設定されている場合にのみ適用されます。上限を超えたクライアントは満員のサーバーと同じく拒否され（HTTP 403、認証失敗として報告）、後で再試行します。固定 IP のユーザーが再接続した場合は以前のトンネルを置き換えるため、この上限で拒否されることはありません。それ以外のクライアントが、古いトンネルがサーバーに残っている間に再接続すると（ネットワーク切り替え後など）、サーバーが古いトンネルの消失を検出するまで拒否されることがあるため、余裕を持たせた値にしてください。
 
 ### `[Control]`
 
@@ -416,7 +419,7 @@ JSON の設定は（上記の `reorder`、`hybrid`、`advanced` オブジェク�
 | `[Interface]` `ManageRoutes`, `NoRoutes`, `RouteViaServer` | `manage_routes`, `no_routes`, `route_via_server` |
 | `[Server]` `Address`, `ServerName`, `Insecure`, `PinnedPubkey` | `server_addr`, `tls_server_name`, `insecure`, `pinned_pubkey` |
 | `[TLS]` `Cert`, `Key`, `Cipher` / `Ciphers` | `cert_file`, `key_file`, `cipher` / `ciphers` / `tls_ciphers` |
-| `[Auth]` `Key`, `Username`, `MaxClients`, `User` | `auth_key`, `auth_username`, `max_clients`, `users`（配列） |
+| `[Auth]` `Key`, `Username`, `MaxClients`, `MaxSessionsPerUser`, `User` | `auth_key`, `auth_username`, `max_clients`, `max_sessions_per_user`, `users`（配列） |
 | `[Control]` `Listen`, `Port`, `Addr` | `control_listen`, `control_port`, `control_addr` |
 | `[Multipath]` `Scheduler`, `CC` / `CongestionControl`, `Path`, `BackupPath` | `scheduler`, `cc` / `congestion_control`, `paths`（配列）, `backup_paths`（配列） |
 | `[Multipath]` `InitMaxPathId`, `Reinjection`, `ReinjectionSrttFactorPct`, `ReinjectionHardDeadlineMs`, `ReinjectionDeadlineLowerBoundMs` | `init_max_path_id`, `reinjection`, `reinjection_srtt_factor_pct`, `reinjection_hard_deadline_ms`, `reinjection_deadline_lower_bound_ms` |

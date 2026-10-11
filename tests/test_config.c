@@ -92,6 +92,7 @@ test_defaults(void)
     ASSERT_EQ_STR(cfg.tls_ciphers, "", "default tls_ciphers");
     ASSERT_EQ_INT(cfg.insecure, 0, "default insecure");
     ASSERT_EQ_INT(cfg.max_clients, 64, "default max_clients");
+    ASSERT_EQ_INT(cfg.max_sessions_per_user, 0, "default max_sessions_per_user");
     ASSERT_EQ_INT(cfg.n_paths, 0, "default n_paths");
     ASSERT_EQ_INT(cfg.n_dns, 0, "default n_dns");
     ASSERT_EQ_STR(cfg.scheduler, "wlb", "default scheduler");
@@ -641,6 +642,13 @@ test_max_clients_edge_cases(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.max_clients, 128, "MaxClients=128 → 128");
+
+    /* MaxSessionsPerUser: 0 is valid (unlimited), negative falls back to 0 */
+    path = write_tmp("[Auth]\nMaxSessionsPerUser = -2\n");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.max_sessions_per_user, 0, "MaxSessionsPerUser=-2 → 0");
 }
 
 static void
@@ -2469,6 +2477,7 @@ test_ini_json_scalar_parity(void)
                       "Key = /tmp/parity.key\n"
                       "[Auth]\n"
                       "MaxClients = 120\n"
+                      "MaxSessionsPerUser = 3\n"
                       "[Control]\n"
                       "Listen = 127.0.0.2:9091\n"
                       "[Multipath]\n"
@@ -2530,6 +2539,7 @@ test_ini_json_scalar_parity(void)
                        "\"auth_key\":\"parity-secret\","
                        "\"server_auth_key\":\"parity-secret\","
                        "\"max_clients\":120,"
+                       "\"max_sessions_per_user\":3,"
                        "\"control_listen\":\"127.0.0.2:9091\","
                        "\"scheduler\":\"min_srtt\","
                        "\"cc\":\"cubic\","
@@ -2590,6 +2600,9 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.is_server, b.is_server, "parity is_server");
     ASSERT_EQ_INT(a.tun_mtu, b.tun_mtu, "parity mtu");
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
+    ASSERT_EQ_INT(a.max_sessions_per_user, 3, "parity max_sessions_per_user ini");
+    ASSERT_EQ_INT(a.max_sessions_per_user, b.max_sessions_per_user,
+                  "parity max_sessions_per_user");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
     ASSERT_EQ_STR(a.reinjection, b.reinjection, "parity reinjection");

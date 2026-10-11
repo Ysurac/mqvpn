@@ -135,6 +135,7 @@ struct mqvpn_config_s {
     char tls_key[256];
     char tls_ciphers[256];
     int max_clients;
+    int max_sessions_per_user; /* 0 = unlimited */
 
     /* draft-21 §4.6: initial Maximum Path Identifier we advertise in TP.
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */

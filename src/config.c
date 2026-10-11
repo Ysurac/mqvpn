@@ -520,6 +520,12 @@ cfgk_int_positive(int v)
 }
 
 static int
+cfgk_int_nonneg(int v)
+{
+    return v >= 0;
+}
+
+static int
 cfgk_int_mtu(int v)
 {
     return v == 0 || (v >= 1280 && v <= 9000);
@@ -656,6 +662,8 @@ static const cfg_key_desc_t cfg_keys[] = {
                  cfgk_post_warn_server_auth_key),
     CFG_STR(SEC_AUTH, "Username", "auth_username", auth_username),
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
+    CFG_INT_FB(SEC_AUTH, "MaxSessionsPerUser", "max_sessions_per_user",
+               max_sessions_per_user, cfgk_int_nonneg, 0),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
     CFG_INT(SEC_CONTROL, "Port", "control_port", control_port, cfgk_int_positive),

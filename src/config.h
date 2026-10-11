@@ -79,6 +79,7 @@ typedef struct mqvpn_file_config_s {
     char user_fixed_ips[MQVPN_CONFIG_MAX_USERS][20]; /* "" = dynamic, "x.x.x.x" = pinned */
     int n_users;
     int max_clients;
+    int max_sessions_per_user; /* [Auth] MaxSessionsPerUser; 0 = unlimited */
 
     /* [Control] — client and server */
     char control_listen[280]; /* "addr:port" — empty string when control API disabled */

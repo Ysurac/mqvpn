@@ -206,10 +206,13 @@ Always set `Cert` and `Key` explicitly for a server: the defaults are file names
 | `User` | Server: per-user PSK in `NAME:KEY` or `NAME:KEY:FIXED_IP` format (repeatable). Client: `NAME:KEY` uses that name and key; a bare `NAME` sets the client username like `Username`. | — |
 | `Username` | Client only: name sent to the server to identify this client in its status output and logs; it does not affect authentication | — |
 | `MaxClients` | Maximum concurrent clients (server only) | `64` |
+| `MaxSessionsPerUser` | Server only: maximum concurrent tunnels per credential, so one key cannot take every `MaxClients` slot. `0` = no limit | `0` |
 
 User names are 1–63 bytes and may not contain `"`, `\` or control characters; keys are at most 255 bytes. An invalid `--user` on the command line stops startup with an error; an invalid `User` line in a file is skipped with a warning.
 
 In JSON, use `auth_key` on both client and server (as in the examples above).
+
+`MaxSessionsPerUser` counts tunnels per credential: each `User` is counted on its own, and every client that connects with the shared `Key` counts against one common budget, whatever name it sends with `Username` (that name is not authenticated). It only applies when authentication is configured. A client over the limit is refused like a client of a full server (HTTP 403, reported as an authentication failure) and retries later. A user with a fixed IP who reconnects replaces its previous tunnel and is never refused by this limit. Other clients that reconnect while their old tunnel still exists on the server (for example after a network change) can be refused until the server notices the old tunnel is gone, so leave some headroom.
 
 ### `[Control]`
 
@@ -424,7 +427,7 @@ JSON configs are flat (except the `reorder`, `hybrid` and `advanced` objects abo
 | `[Interface]` `ManageRoutes`, `NoRoutes`, `RouteViaServer` | `manage_routes`, `no_routes`, `route_via_server` |
 | `[Server]` `Address`, `ServerName`, `Insecure`, `PinnedPubkey` | `server_addr`, `tls_server_name`, `insecure`, `pinned_pubkey` |
 | `[TLS]` `Cert`, `Key`, `Cipher` / `Ciphers` | `cert_file`, `key_file`, `cipher` / `ciphers` / `tls_ciphers` |
-| `[Auth]` `Key`, `Username`, `MaxClients`, `User` | `auth_key`, `auth_username`, `max_clients`, `users` (array) |
+| `[Auth]` `Key`, `Username`, `MaxClients`, `MaxSessionsPerUser`, `User` | `auth_key`, `auth_username`, `max_clients`, `max_sessions_per_user`, `users` (array) |
 | `[Control]` `Listen`, `Port`, `Addr` | `control_listen`, `control_port`, `control_addr` |
 | `[Multipath]` `Scheduler`, `CC` / `CongestionControl`, `Path`, `BackupPath` | `scheduler`, `cc` / `congestion_control`, `paths` (array), `backup_paths` (array) |
 | `[Multipath]` `InitMaxPathId`, `Reinjection`, `ReinjectionSrttFactorPct`, `ReinjectionHardDeadlineMs`, `ReinjectionDeadlineLowerBoundMs` | `init_max_path_id`, `reinjection`, `reinjection_srtt_factor_pct`, `reinjection_hard_deadline_ms`, `reinjection_deadline_lower_bound_ms` |

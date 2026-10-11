@@ -20,6 +20,9 @@
  *   addrreq   ADDRESS_REQUEST is answered per requested family.
  *   pinned    a pinned user reconnecting at max_clients supersedes its old
  *             tunnel instead of getting 403.
+ *   usercap   MaxSessionsPerUser counts per credential (every global-key
+ *             client shares one budget, whatever its x-user); over the cap
+ *             is 403; a pinned user still supersedes its own old tunnel.
  *   backpr    one session's datagram backpressure does not stop the
  *             downlink of another; TUN reading pauses only when every
  *             session is blocked.
@@ -458,9 +461,11 @@ cli_connect(env_t *e, cli_conn_t *c)
     return c->handshake_done && !c->closed ? 0 : -1;
 }
 
-/* Send a CONNECT-IP request; auth = full authorization header value or NULL. */
+/* Send a CONNECT-IP request; auth = full authorization header value or NULL,
+ * x_user = x-user header value or NULL. */
 static int
-cli_connect_ip(env_t *e, cli_conn_t *c, cli_req_t *r, const char *auth)
+cli_connect_ip_as(env_t *e, cli_conn_t *c, cli_req_t *r, const char *auth,
+                  const char *x_user)
 {
     memset(r, 0, sizeof(*r));
     r->status = -1;
@@ -468,7 +473,7 @@ cli_connect_ip(env_t *e, cli_conn_t *c, cli_req_t *r, const char *auth)
     if (!r->req) return -1;
     char authority[64];
     snprintf(authority, sizeof(authority), "127.0.0.1:%d", ntohs(e->svr_addr.sin_port));
-    xqc_http_header_t hdrs[7] = {
+    xqc_http_header_t hdrs[8] = {
         {.name = {":method", 7}, .value = {"CONNECT", 7}},
         {.name = {":protocol", 9}, .value = {"connect-ip", 10}},
         {.name = {":scheme", 7}, .value = {"https", 5}},
@@ -480,12 +485,23 @@ cli_connect_ip(env_t *e, cli_conn_t *c, cli_req_t *r, const char *auth)
     if (auth) {
         hdrs[6].name = (struct iovec){"authorization", 13};
         hdrs[6].value = (struct iovec){(void *)auth, strlen(auth)};
-        n = 7;
+        n++;
     }
-    xqc_http_headers_t headers = {.headers = hdrs, .count = n, .capacity = 7};
+    if (x_user) {
+        hdrs[n].name = (struct iovec){"x-user", 6};
+        hdrs[n].value = (struct iovec){(void *)x_user, strlen(x_user)};
+        n++;
+    }
+    xqc_http_headers_t headers = {.headers = hdrs, .count = n, .capacity = 8};
     if (xqc_h3_request_send_headers(r->req, &headers, 0) < 0) return -1;
     pump_until(e, c_req_answered, r);
     return r->status;
+}
+
+static int
+cli_connect_ip(env_t *e, cli_conn_t *c, cli_req_t *r, const char *auth)
+{
+    return cli_connect_ip_as(e, c, r, auth, NULL);
 }
 
 /* ─── ADDRESS_REQUEST helpers ─── */
@@ -725,6 +741,56 @@ scenario_pinned(void)
     env_stop(&e);
 }
 
+static void
+scenario_user_cap(void)
+{
+    printf("usercap:\n");
+    env_t e;
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
+    mqvpn_config_set_auth_key(cfg, "globalkey");
+    mqvpn_config_add_user(cfg, "alice", "alicekey");
+    mqvpn_config_set_user_fixed_ip(cfg, "alice", "10.0.0.9");
+    mqvpn_config_add_user(cfg, "bob", "bobkey");
+    CHECK(mqvpn_config_set_max_sessions_per_user(cfg, -1) == MQVPN_ERR_INVALID_ARG,
+          "negative MaxSessionsPerUser rejected");
+    CHECK(mqvpn_config_set_max_sessions_per_user(cfg, 1) == MQVPN_OK,
+          "MaxSessionsPerUser = 1");
+    if (env_start(&e, cfg) != 0) {
+        CHECK(0, "server start");
+        env_stop(&e);
+        return;
+    }
+    enum { N = 6 };
+    cli_conn_t c[N];
+    cli_req_t r[N + 1];
+    int hs = 1;
+    for (int i = 0; i < N; i++)
+        hs &= cli_connect(&e, &c[i]) == 0;
+    CHECK(hs, "six handshakes");
+
+    CHECK(cli_connect_ip_as(&e, &c[0], &r[0], "Bearer globalkey", "router1") == 200,
+          "global key, x-user router1: 200");
+    CHECK(cli_connect_ip_as(&e, &c[1], &r[1], "Bearer globalkey", "router2") == 403,
+          "global key, other x-user: same credential, over cap (403)");
+    CHECK(!c[1].closed, "connection kept open after the cap 403");
+    CHECK(cli_connect_ip(&e, &c[2], &r[2], "Bearer bobkey") == 200, "bob: 200");
+    CHECK(cli_connect_ip(&e, &c[3], &r[3], "Bearer bobkey") == 403,
+          "bob's second session over cap (403)");
+    CHECK(cli_connect_ip(&e, &c[4], &r[4], "Bearer alicekey") == 200, "alice: 200");
+    CHECK(cli_connect_ip(&e, &c[5], &r[5], "Bearer alicekey") == 200,
+          "pinned alice reconnecting supersedes her old tunnel (200, not 403)");
+    CHECK(mqvpn_server_get_n_clients(e.svr) == 3, "three sessions (one per credential)");
+
+    /* Bob's first tunnel ends: his next request fits under the cap. */
+    xqc_h3_request_close(r[2].req);
+    int two = 2;
+    pump_until(&e, c_n_clients, &two);
+    CHECK(cli_connect_ip(&e, &c[3], &r[N], "Bearer bobkey") == 200,
+          "bob admitted once his old session is gone");
+    env_stop(&e);
+}
+
 /* Downlink packet to dst, 1000 bytes so each datagram fills a QUIC packet. */
 static int
 tun_send(env_t *e, const uint8_t dst[4])
@@ -822,6 +888,7 @@ main(void)
     scenario_pool();
     scenario_addrreq();
     scenario_pinned();
+    scenario_user_cap();
     scenario_backpressure();
     if (g_failed)
         printf("test_server_hardening: %d FAILED\n", g_failed);

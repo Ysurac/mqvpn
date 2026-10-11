@@ -140,6 +140,11 @@ struct svr_conn_s {
 
     /* MASQUE session */
     char username[64]; /* authenticated user name, or empty for global key */
+    /* The credential that authenticated the tunnel: a configured user name,
+     * or "(global)" for the global key whatever x-user name the client sent
+     * (x-user is not authenticated). Empty when the server has no auth.
+     * MaxSessionsPerUser counts sessions per value. */
+    char auth_identity[64];
     uint64_t masque_stream_id;
     /* The stream that owns the live tunnel (its h3_request is
      * connect_ip_stream->h3_request), kept around so
@@ -293,6 +298,7 @@ struct mqvpn_server_s {
     svr_conn_t *sessions[MQVPN_ADDR_POOL_MAX + 1];
     int n_sessions;
     int max_clients;
+    int max_sessions_per_user; /* 0 = unlimited */
 
     /* IP lease table: remembers the last IP offset for each named user so
      * they receive the same address on reconnect. */
@@ -368,6 +374,7 @@ struct mqvpn_server_s {
      * auth failures (any connection) and the per-request reorder advert. */
     svr_log_rl_t rl_auth;
     svr_log_rl_t rl_reorder_hdr;
+    svr_log_rl_t rl_user_cap;
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Connect-stage bookkeeping for src/hybrid/tcp_egress.c: STORAGE only.
@@ -1353,6 +1360,21 @@ svr_pinned_index(const mqvpn_server_t *s, const char *username)
     return -1;
 }
 
+/* Established sessions that authenticated with conn's credential, not
+ * counting conn itself nor the session at offset `skip_off` (a pinned
+ * user's old tunnel, which this request supersedes; 0 = none). */
+static int
+svr_identity_sessions(const mqvpn_server_t *s, const svr_conn_t *conn, uint32_t skip_off)
+{
+    int n = 0;
+    for (uint32_t i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+        const svr_conn_t *o = s->sessions[i];
+        if (!o || o == conn || i == skip_off) continue;
+        if (strcmp(o->auth_identity, conn->auth_identity) == 0) n++;
+    }
+    return n;
+}
+
 /* Admission, address allocation, 200 and the setup capsules for an
  * authenticated CONNECT-IP request. Returns 0 when the request was answered,
  * with the tunnel up or with a canned refusal (role REJECTED); -1 only for a
@@ -1370,11 +1392,14 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
      * session's slot is not counted against max_clients. */
     int pinned_idx = svr_pinned_index(s, conn->username);
     int n_after = s->n_sessions;
+    uint32_t superseded_off = 0;
     if (pinned_idx >= 0) {
         uint32_t poff = s->pinned_ips[pinned_idx].offset;
         if (poff >= 1 && poff <= MQVPN_ADDR_POOL_MAX && s->sessions[poff] &&
-            s->sessions[poff] != conn)
+            s->sessions[poff] != conn) {
             n_after--;
+            superseded_off = poff;
+        }
     }
     if (n_after >= s->max_clients) {
         LOG_W(s, "max clients reached (%d), rejecting (user=%s)", s->max_clients,
@@ -1386,6 +1411,20 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
          * close (xqc_h3_stream_process_request) instead of just this
          * stream's clean 403 — see svr_masque_send_403's doc comment. */
         stream->role = SVR_STREAM_ROLE_REJECTED;
+        return 0;
+    }
+
+    /* Per-credential cap (MaxSessionsPerUser): keeps one credential, the
+     * shared global key in particular, from taking every max_clients slot.
+     * Same 403 as max_clients, which clients treat as an auth failure. */
+    if (s->max_sessions_per_user > 0 && conn->auth_identity[0] &&
+        svr_identity_sessions(s, conn, superseded_off) >= s->max_sessions_per_user) {
+        if (svr_log_rl_allow(s, &s->rl_user_cap, 10, MQVPN_LOG_WARN,
+                             "max sessions per user reached"))
+            LOG_W(s, "max sessions per user reached (%d), rejecting (credential=%s user=%s)",
+                  s->max_sessions_per_user, conn->auth_identity, conn->username);
+        svr_masque_send_403(h3_request);
+        stream->role = SVR_STREAM_ROLE_REJECTED; /* return 0: see the 403 above */
         return 0;
     }
 
@@ -2046,6 +2085,8 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
             snprintf(stream->conn->username, sizeof(stream->conn->username), "%s",
                      username);
         }
+        snprintf(stream->conn->auth_identity, sizeof(stream->conn->auth_identity), "%s",
+                 username);
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
     }
@@ -3004,6 +3045,7 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     s->log_level = cfg->log_level;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
+    s->max_sessions_per_user = cfg->max_sessions_per_user > 0 ? cfg->max_sessions_per_user : 0;
     mqvpn_ptb_bucket_init(&s->ptb_bucket);
     s->boot_us = now_us();
 
