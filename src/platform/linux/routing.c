@@ -22,15 +22,18 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <net/if.h>
 
-#define ROUTE_DISCOVER_MAX_ATTEMPTS 6
-#define ROUTE_DISCOVER_RETRY_DELAY_SEC 1
-/* Once routes were set up once, the policy routes the startup retries wait
- * for exist: a reconnect retries discovery once, blocking the event loop
- * for at most one retry delay instead of five. */
-#define ROUTE_DISCOVER_MAX_ATTEMPTS_RECONNECT 2
+/* Route discovery retries block the event loop (setup_routes runs from the
+ * tunnel-ready callback), so they poll at a short interval and stop as soon
+ * as a route shows up. The first setup keeps the 5 s budget the policy
+ * routes of OpenMPTCProuter may need after boot; once routes were set up
+ * once those routes exist, and a reconnect waits at most 1 s. */
+#define ROUTE_DISCOVER_POLL_MS             200
+#define ROUTE_DISCOVER_BUDGET_MS           5000
+#define ROUTE_DISCOVER_BUDGET_MS_RECONNECT 1000
 
 /* Search PATH for the 'ip' binary first, then fall back to known absolute
  * paths: on some distributions /usr/sbin is not in root's PATH under sudo.
@@ -295,10 +298,10 @@ setup_routes(platform_ctx_t *p)
         const char *first_iface =
             (p->n_paths > 0 && p->paths[0].iface[0]) ? p->paths[0].iface : NULL;
         int route_ok = 0;
-        int max_attempts = p->routing_set_up_once ? ROUTE_DISCOVER_MAX_ATTEMPTS_RECONNECT
-                                                  : ROUTE_DISCOVER_MAX_ATTEMPTS;
+        int budget_ms = p->routing_set_up_once ? ROUTE_DISCOVER_BUDGET_MS_RECONNECT
+                                               : ROUTE_DISCOVER_BUDGET_MS;
 
-        for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        for (int waited_ms = 0;; waited_ms += ROUTE_DISCOVER_POLL_MS) {
             if (discover_route(p->server_ip_str, af, NULL, p->orig_gateway,
                                sizeof(p->orig_gateway), p->orig_iface,
                                sizeof(p->orig_iface)) == 0) {
@@ -334,12 +337,13 @@ setup_routes(platform_ctx_t *p)
                 break;
             }
 
-            if (attempt < max_attempts) {
-                LOG_WRN("route discovery attempt %d/%d failed for %s, retrying in %ds",
-                        attempt, max_attempts, p->server_ip_str,
-                        ROUTE_DISCOVER_RETRY_DELAY_SEC);
-                sleep(ROUTE_DISCOVER_RETRY_DELAY_SEC);
-            }
+            if (waited_ms + ROUTE_DISCOVER_POLL_MS > budget_ms) break;
+            if (waited_ms == 0)
+                LOG_WRN("route discovery failed for %s, retrying for up to %d ms",
+                        p->server_ip_str, budget_ms);
+            struct timespec ts = {.tv_sec = 0,
+                                  .tv_nsec = ROUTE_DISCOVER_POLL_MS * 1000000L};
+            while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {}
         }
 
         if (!route_ok) {

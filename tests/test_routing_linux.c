@@ -25,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 
 static int g_pass = 0, g_fail = 0;
 
@@ -451,6 +452,46 @@ test_discovery_failure(fake_cmd_env_t *e)
     fake_cmd_clear_fail();
 }
 
+static int
+count_substr(const char *s, const char *sub)
+{
+    int n = 0;
+    for (const char *q = strstr(s, sub); q; q = strstr(q + 1, sub))
+        n++;
+    return n;
+}
+
+/* ================================================================
+ * 5a. discovery failure on a reconnect: polled every 200 ms for at most
+ *     1 s (6 lookups), not the 5 s first-setup budget
+ * ================================================================ */
+static void
+test_discovery_failure_reconnect_budget(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    set_route_get_output(e, "203.0.113.9 via 203.0.113.1 dev eth0\n");
+    fake_cmd_set_fail_substr("route|get");
+
+    platform_ctx_t p;
+    init_ctx(&p);
+    p.routing_set_up_once = 1;
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = setup_routes(&p);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double secs = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    ASSERT_EQ_INT(rc, -1, "reconnect discovery-failure rc");
+    ASSERT_TRUE(secs >= 0.9 && secs < 2.5, "reconnect discovery waits about 1 s");
+
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_EQ_INT(count_substr(log, "|route|get|"), 6,
+                  "reconnect discovery: 6 lookups (every 200 ms over 1 s)");
+
+    fake_cmd_clear_fail();
+}
+
 /* ================================================================
  * 5b. discovery output without a `dev` token -> parse failure, rc -1
  * ================================================================ */
@@ -626,6 +667,7 @@ main(void)
     test_pin_failure(&e);
     test_high_catchall_failure_rollback(&e);
     test_discovery_failure(&e);
+    test_discovery_failure_reconnect_budget(&e);
     test_discovery_no_dev_token(&e);
     test_discovery_two_writes(&e);
     test_route_via_server(&e);
