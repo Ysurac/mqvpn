@@ -64,6 +64,23 @@ mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr)
         return -1;
     }
 
+    /* A non-aligned base shifts the pool, but every handed-out address must
+     * stay inside the prefix: the server's TUN route covers only the
+     * prefix, so an address past its last host would get no downlink. */
+    uint32_t mask = 0xFFFFFFFFu << host_bits;
+    uint32_t last_host = (base_h & mask) | (~mask - 1u);
+    if (base_h != (base_h & mask)) {
+        uint32_t room = last_host > base_h ? last_host - base_h : 0;
+        if (room < 2) {
+            LOG_ERR("addr_pool: %s leaves no client address inside the prefix", cidr);
+            return -1;
+        }
+        if (room < pool->pool_size) pool->pool_size = room;
+        LOG_WRN("addr_pool: %s is not a network address; the pool starts at it and "
+                "is limited to the prefix",
+                cidr);
+    }
+
     LOG_INF("addr_pool: %s, %u addresses available", cidr, pool->pool_size - 1);
     return 0;
 }

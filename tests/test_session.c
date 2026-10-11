@@ -776,6 +776,20 @@ test_cidr_non_aligned(void)
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc from non-aligned");
     uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
     ASSERT_EQ_INT(off, 2, "first alloc offset is 2");
+
+    /* The shifted pool ends at the prefix's last host (10.0.0.254): base +
+     * pool_size never leaves 10.0.0.0/24, so every client stays routable. */
+    ASSERT_EQ_INT(pool.pool_size, 249, "non-aligned pool clamped to the prefix");
+    uint32_t last = 0;
+    while (mqvpn_addr_pool_alloc(&pool, &ip) == 0)
+        last = ntohl(ip.s_addr);
+    char last_str[INET_ADDRSTRLEN];
+    struct in_addr last_ip = {.s_addr = htonl(last)};
+    inet_ntop(AF_INET, &last_ip, last_str, sizeof(last_str));
+    ASSERT_EQ_STR(last_str, "10.0.0.254", "last non-aligned address inside the prefix");
+
+    /* A base at the prefix's last host leaves no client address. */
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.254/24") != 0, "no room rejected");
 }
 
 /* ── mqvpn_addr_pool_alloc_at tests ──────────────────────────────────────── */
