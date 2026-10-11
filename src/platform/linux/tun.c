@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <linux/if.h>
@@ -386,13 +387,36 @@ mqvpn_tun_read(mqvpn_tun_t *tun, uint8_t *buf, size_t buf_len)
 {
     ssize_t n = read(tun->fd, buf, buf_len);
     if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
             return 0;
         }
-        LOG_ERR("tun read: %s", strerror(errno));
+        /* errno survives the log call: callers report it (tun_fatal_error) */
+        int err = errno;
+        LOG_ERR("tun read: %s", strerror(err));
+        errno = err;
         return -1;
     }
     return (int)n;
+}
+
+/* A write error repeats for every packet routed to a broken device: log the
+ * first one, then at most one line per second with the count it stands for. */
+static void
+tun_log_write_error(int err)
+{
+    static time_t last;
+    static unsigned long suppressed;
+    time_t now = time(NULL);
+    if (now == last) {
+        suppressed++;
+        return;
+    }
+    if (suppressed)
+        LOG_ERR("tun write: %s (%lu more suppressed)", strerror(err), suppressed);
+    else
+        LOG_ERR("tun write: %s", strerror(err));
+    last = now;
+    suppressed = 0;
 }
 
 int
@@ -403,7 +427,9 @@ mqvpn_tun_write(mqvpn_tun_t *tun, const uint8_t *buf, size_t len)
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return MQVPN_TUN_EAGAIN;
         }
-        LOG_ERR("tun write: %s", strerror(errno));
+        int err = errno;
+        tun_log_write_error(err);
+        errno = err;
         return -1;
     }
     return (int)n;

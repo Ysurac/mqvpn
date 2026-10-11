@@ -1167,7 +1167,17 @@ typedef struct server_platform_ctx_s {
      * after set_transport (finalised inside mqvpn_server_destroy). */
     void *bind_ctx;
     int shutting_down;
+    /* The event loop was stopped because the server cannot run (TUN lost
+     * and not rebuildable): exit non-zero. */
+    int fatal_error;
+    /* Copy of the tunnel config, so a TUN that breaks under us can be
+     * rebuilt in place (svr_tun_fatal_error), and the rebuild budget. */
+    mqvpn_tunnel_info_t tunnel_info;
+    int have_tunnel_info;
+    int tun_rebuilds;
+    time_t tun_rebuild_window;
     ctrl_socket_t *ctrl;
+    char tun_name_cfg[IFNAMSIZ]; /* configured TUN name ("" = mqvpn0) */
 
     /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair.
      * Accumulators only: the bind counts inside the transport ctx, so these
@@ -1228,16 +1238,32 @@ svr_cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
     if (sp->tun_up && sp->tun.fd >= 0) mqvpn_tun_write(&sp->tun, pkt, len);
 }
 
+/* Drop the TUN and its read event (half-configured or broken). */
 static void
-svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+svr_tun_teardown(server_platform_ctx_t *sp)
 {
-    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+    if (sp->ev_tun) {
+        event_del(sp->ev_tun);
+        event_free(sp->ev_tun);
+        sp->ev_tun = NULL;
+    }
+    if (sp->tun.fd >= 0) mqvpn_tun_destroy(&sp->tun);
+    sp->tun.fd = -1;
+    sp->tun_up = 0;
+}
 
-    /* Create TUN device */
-    const char *tun_name = sp->tun.name[0] ? sp->tun.name : "mqvpn0";
+/* Build the TUN from the tunnel config. 0, or -1 with nothing left open
+ * (already logged). A server without its TUN cannot forward anything, so
+ * every caller treats -1 as fatal. */
+static int
+svr_tun_build(server_platform_ctx_t *sp, const mqvpn_tunnel_info_t *info)
+{
+    /* Create TUN device from the configured name; sp->tun.name then holds
+     * the kernel-assigned one (differs only for a template like tun%d). */
+    const char *tun_name = sp->tun_name_cfg[0] ? sp->tun_name_cfg : "mqvpn0";
     if (mqvpn_tun_create(&sp->tun, tun_name) < 0) {
         LOG_ERR("TUN create failed");
-        return;
+        return -1;
     }
 
     /* Set IPv4 address — server gets assigned_ip (the .1 address) */
@@ -1247,9 +1273,12 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     snprintf(base_ip, sizeof(base_ip), "%d.%d.%d.%d", info->server_ip[0],
              info->server_ip[1], info->server_ip[2], info->server_ip[3]);
 
-    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip, info->assigned_prefix) < 0) return;
-    if (mqvpn_tun_set_mtu(&sp->tun, info->mtu) < 0) return;
-    if (mqvpn_tun_up(&sp->tun) < 0) return;
+    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip, info->assigned_prefix) < 0 ||
+        mqvpn_tun_set_mtu(&sp->tun, info->mtu) < 0 || mqvpn_tun_up(&sp->tun) < 0) {
+        LOG_ERR("TUN %s setup failed", sp->tun.name);
+        svr_tun_teardown(sp);
+        return -1;
+    }
 
     /* IPv6 if available */
     if (info->has_v6) {
@@ -1263,10 +1292,55 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Register TUN read event */
     sp->ev_tun = event_new(sp->eb, sp->tun.fd, EV_READ | EV_PERSIST, svr_on_tun_read, sp);
-    if (sp->ev_tun) {
-        event_add(sp->ev_tun, NULL);
-        sp->tun_up = 1;
+    if (!sp->ev_tun || event_add(sp->ev_tun, NULL) < 0) {
+        LOG_ERR("failed to create TUN event");
+        svr_tun_teardown(sp);
+        return -1;
     }
+    sp->tun_up = 1;
+    return 0;
+}
+
+static void
+svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+
+    sp->tunnel_info = *info;
+    sp->have_tunnel_info = 1;
+    /* Failure leaves tun_up == 0: linux_platform_run_server checks it right
+     * after mqvpn_server_start() (which runs this callback) and exits. */
+    (void)svr_tun_build(sp, info);
+}
+
+/* The TUN read failed with something other than EAGAIN/EINTR: the device is
+ * gone or broken. The read event is EV_PERSIST on a level-triggered fd that
+ * stays readable, so leaving it armed spins at 100 % CPU logging one line
+ * per pass (the client hit this, see tun_fatal_error). Tear it down and
+ * rebuild it in place from the saved config; past a small budget per minute
+ * stop the server non-zero and let the supervisor restart it. */
+static void
+svr_tun_fatal_error(server_platform_ctx_t *sp)
+{
+    int err = errno;
+    svr_tun_teardown(sp);
+
+    time_t now = time(NULL);
+    if (now - sp->tun_rebuild_window > 60) {
+        sp->tun_rebuild_window = now;
+        sp->tun_rebuilds = 0;
+    }
+    if (sp->have_tunnel_info && ++sp->tun_rebuilds <= 5) {
+        LOG_ERR("tun read failed (%s): device %s lost, rebuilding it in place (%d/5)",
+                strerror(err), sp->tun.name, sp->tun_rebuilds);
+        if (svr_tun_build(sp, &sp->tunnel_info) == 0) return;
+    } else {
+        LOG_ERR("tun read failed (%s): device %s keeps disappearing", strerror(err),
+                sp->tun.name);
+    }
+    LOG_ERR("server cannot run without its TUN, exiting");
+    sp->fatal_error = 1;
+    event_base_loopbreak(sp->eb);
 }
 
 static void
@@ -1291,7 +1365,11 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
 
     for (int i = 0; i < BULK_READ_COUNT; i++) {
         int n = mqvpn_tun_read(&sp->tun, buf, sizeof(buf));
-        if (n <= 0) break;
+        if (n == 0) break; /* EAGAIN: drained */
+        if (n < 0) {
+            svr_tun_fatal_error(sp);
+            break;
+        }
 
         int ret = mqvpn_server_on_tun_packet(sp->server, buf, (size_t)n);
         if (ret == MQVPN_ERR_AGAIN) {
@@ -1529,7 +1607,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.tun.fd = -1;
     sp.udp_fd = -1;
 
-    if (cfg->tun_name) snprintf(sp.tun.name, sizeof(sp.tun.name), "%s", cfg->tun_name);
+    if (cfg->tun_name)
+        snprintf(sp.tun_name_cfg, sizeof(sp.tun_name_cfg), "%s", cfg->tun_name);
 
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();
@@ -1671,6 +1750,12 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         LOG_ERR("server start failed");
         goto cleanup;
     }
+    if (!sp.tun_up) {
+        /* A server without its TUN accepts clients it can never forward
+         * for: exit and let the supervisor (or the operator) see why. */
+        LOG_ERR("server start failed: TUN setup failed");
+        goto cleanup;
+    }
 
     /* Register socket read event */
     sp.ev_socket =
@@ -1709,7 +1794,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
             cfg->subnet);
 
     event_base_dispatch(sp.eb);
-    rc = 0;
+    rc = sp.fatal_error ? 1 : 0;
 
 cleanup:
     /* Teardown contract (same as the client): RX quiesced (dispatch returned),
@@ -1736,6 +1821,13 @@ cleanup:
     if (sp.server) mqvpn_server_destroy(sp.server);
     sp.server = NULL;
     sp.bind_ctx = NULL; /* finalised by destroy */
+    /* The read event goes before its fd: libevent must not hold a closed
+     * (and possibly reused) descriptor. */
+    if (sp.ev_socket) {
+        event_del(sp.ev_socket);
+        event_free(sp.ev_socket);
+        sp.ev_socket = NULL;
+    }
     if (sp.udp_fd >= 0) close(sp.udp_fd);
 
     /* Receive-side offload summary. Same harvest-before-destroy contract as
@@ -1744,17 +1836,7 @@ cleanup:
      * order can change them. */
     LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
-    if (sp.tun_up) {
-        if (sp.ev_tun) {
-            event_del(sp.ev_tun);
-            event_free(sp.ev_tun);
-        }
-        mqvpn_tun_destroy(&sp.tun);
-    }
-    if (sp.ev_socket) {
-        event_del(sp.ev_socket);
-        event_free(sp.ev_socket);
-    }
+    svr_tun_teardown(&sp);
     if (sp.ev_tick) {
         event_del(sp.ev_tick);
         event_free(sp.ev_tick);
