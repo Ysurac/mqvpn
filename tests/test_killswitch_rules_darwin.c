@@ -106,16 +106,30 @@ test_build_pf_rules_truth_table(void)
     char buf[1024];
     platform_ctx_t p;
 
-    /* (is_v6=0, has_v6=0): v4 block only, server pass present (v4 dest),
-     * no v6 block at all. */
+    const char *dhcp4 = "pass out quick inet proto udp from any port 68 to any port 67\n";
+    const char *dhcp6 =
+        "pass out quick inet6 proto udp from any port 546 to any port 547\n";
+    const char *nd6 =
+        "pass out quick inet6 proto icmp6 icmp6-type { 133, 134, 135, 136 }\n";
+
+    /* (is_v6=0, has_v6=0): server pass present (v4 dest); IPv6 is blocked
+     * too even though the tunnel carries none, with no tun6 pass. */
     init_ctx_v4(&p, 0);
     ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), 0, "truth-table(0,0) rc");
     ASSERT_TRUE(strstr(buf, lo4) != NULL, "truth-table(0,0) lo4");
     ASSERT_TRUE(strstr(buf, tun4) != NULL, "truth-table(0,0) tun4");
     ASSERT_TRUE(strstr(buf, srv4) != NULL, "truth-table(0,0) srv4");
     ASSERT_TRUE(strstr(buf, block4) != NULL, "truth-table(0,0) block4");
-    ASSERT_TRUE(strstr(buf, lo6) == NULL, "truth-table(0,0) no lo6");
-    ASSERT_TRUE(strstr(buf, block6) == NULL, "truth-table(0,0) no block6");
+    ASSERT_TRUE(strstr(buf, lo6) != NULL, "truth-table(0,0) lo6");
+    ASSERT_TRUE(strstr(buf, tun6) == NULL, "truth-table(0,0) no tun6");
+    ASSERT_TRUE(strstr(buf, srv6) == NULL, "truth-table(0,0) no srv6");
+    ASSERT_TRUE(strstr(buf, block6) != NULL, "truth-table(0,0) block6");
+    ASSERT_TRUE(strstr(buf, dhcp4) != NULL && strstr(buf, dhcp4) < strstr(buf, block4),
+                "truth-table(0,0) dhcp4 before block4");
+    ASSERT_TRUE(strstr(buf, dhcp6) != NULL && strstr(buf, dhcp6) < strstr(buf, block6),
+                "truth-table(0,0) dhcp6 before block6");
+    ASSERT_TRUE(strstr(buf, nd6) != NULL && strstr(buf, nd6) < strstr(buf, block6),
+                "truth-table(0,0) nd6 before block6");
 
     /* (is_v6=0, has_v6=1): v4 block unchanged; v6 block present with lo6 +
      * tun6 (has_v6-gated) but NO server6 pass (is_v6-gated). */
@@ -163,6 +177,26 @@ test_build_pf_rules_truth_table(void)
         ASSERT_TRUE(p6 != NULL && plo6 != NULL && plo6 < p6,
                     "truth-table: v6 pass precedes v6 block");
     }
+}
+
+/* ================================================================
+ * 1a. no tun pass rule while the utun does not exist (before the first
+ *     connect, and after it is destroyed on RECONNECTING): a stale rule
+ *     would pass whatever reuses the utun name
+ * ================================================================ */
+static void
+test_build_pf_rules_no_tun(void)
+{
+    char buf[1024];
+    platform_ctx_t p;
+
+    init_ctx_v4(&p, 1);
+    p.tun.fd = -1;
+    ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), 0, "no-tun rc");
+    ASSERT_TRUE(strstr(buf, "utun9") == NULL, "no-tun: no tun pass line");
+    ASSERT_TRUE(strstr(buf, "203.0.113.9") != NULL, "no-tun: server pass kept");
+    ASSERT_TRUE(strstr(buf, "block drop out quick inet\n") != NULL, "no-tun: block4");
+    ASSERT_TRUE(strstr(buf, "block drop out quick inet6\n") != NULL, "no-tun: block6");
 }
 
 /* ================================================================
@@ -260,6 +294,61 @@ test_enable_failure(fake_cmd_env_t *e)
 }
 
 /* ================================================================
+ * 3b. setup on an active kill switch reloads the ruleset in place: no
+ *     second -E, no flush; a failed reload keeps it active and loaded
+ * ================================================================ */
+static void
+test_reload_when_active(fake_cmd_env_t *e)
+{
+    fake_cmd_reset(e);
+    char stdin_file[FAKE_CMD_PATH_MAX];
+    snprintf(stdin_file, sizeof(stdin_file), "%s/pf_stdin.txt", e->dir);
+    unlink(stdin_file);
+    setenv("MQVPN_FAKE_STDIN_FILE", stdin_file, 1);
+    setenv("MQVPN_FAKE_TOKEN_LINE", "Token : 77", 1);
+
+    /* Before the first connect: no utun yet. */
+    platform_ctx_t p;
+    init_ctx_v4(&p, 0);
+    p.tun.fd = -1;
+    ASSERT_EQ_INT(setup_killswitch(&p), 0, "reload: initial setup rc");
+    ASSERT_EQ_INT(p.killswitch_active, 1, "reload: active after initial setup");
+
+    /* Tunnel up: the reload adds the utun pass rule. */
+    fake_cmd_reset(e);
+    p.tun.fd = 5;
+    ASSERT_EQ_INT(setup_killswitch(&p), 0, "reload: tunnel-up rc");
+    char log[4096];
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "pfctl|-a|" MQVPN_PF_ANCHOR "|-f|-") != NULL,
+                "reload: ruleset reloaded");
+    ASSERT_TRUE(strstr(log, "pfctl|-E") == NULL, "reload: pf not enabled twice");
+    ASSERT_TRUE(strstr(log, "|-F|") == NULL, "reload: anchor not flushed");
+    ASSERT_EQ_STR(p.ks_pf_token, "77", "reload: token kept");
+    char captured[1024];
+    FILE *fp = fopen(stdin_file, "r");
+    size_t n = fp ? fread(captured, 1, sizeof(captured) - 1, fp) : 0;
+    if (fp) fclose(fp);
+    captured[n] = '\0';
+    ASSERT_TRUE(strstr(captured, "pass out quick on utun9 inet\n") != NULL,
+                "reload: utun pass rule loaded");
+
+    /* A failed reload: still active, nothing flushed. */
+    fake_cmd_reset(e);
+    fake_cmd_set_fail_substr("-f");
+    p.tun.fd = -1;
+    ASSERT_EQ_INT(setup_killswitch(&p), -1, "reload-failure rc");
+    ASSERT_EQ_INT(p.killswitch_active, 1, "reload-failure: still active");
+    fake_cmd_read_log(e, log, sizeof(log));
+    ASSERT_TRUE(strstr(log, "|-F|") == NULL, "reload-failure: anchor not flushed");
+    fake_cmd_clear_fail();
+
+    cleanup_killswitch(&p);
+    ASSERT_EQ_INT(p.killswitch_active, 0, "reload: cleanup clears active");
+    unlink(stdin_file);
+}
+
+/* ================================================================
  * 4. `pfctl -E` succeeds but prints no Token line -> non-fatal
  * ================================================================ */
 static void
@@ -293,6 +382,7 @@ int
 main(void)
 {
     test_build_pf_rules_truth_table();
+    test_build_pf_rules_no_tun();
     test_build_pf_rules_empty_server_ip();
 
     fake_cmd_env_t e;
@@ -318,6 +408,7 @@ main(void)
 
     test_setup_happy(&e);
     test_enable_failure(&e);
+    test_reload_when_active(&e);
     test_enable_no_token(&e);
 
     fake_cmd_env_cleanup(&e);

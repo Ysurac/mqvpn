@@ -173,6 +173,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     } else {
         LOG_INF("manage_routes=off: host routing table left untouched");
     }
+    /* The kill switch has been blocking since before the first connect
+     * (darwin_platform_run_client); this reload adds the pass rule for the
+     * utun just created. */
     if (setup_killswitch(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
         goto fail;
@@ -218,7 +221,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     return;
 
 fail:
-    cleanup_killswitch(p);
+    /* The kill switch stays loaded: this failure ends the process, and the
+     * final cleanup flushes the anchor after the loop exits. */
     if (p->manage_routes) cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
@@ -276,7 +280,6 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->paths[i].recover_failures = 0;
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         if (p->ev_recover) event_del(p->ev_recover);
-        cleanup_killswitch(p);
         if (p->manage_routes) cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
@@ -290,6 +293,13 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
+        /* The kill switch stays loaded through RECONNECTING (nothing leaks
+         * while the tunnel is down); only the utun's pass rule goes, by a
+         * reload now that tun.fd is -1. A failed reload keeps the old
+         * ruleset, whose pass rule names a utun that no longer exists. Not
+         * when shutting down: the final cleanup flushes the anchor anyway. */
+        if (p->killswitch_active && !p->shutting_down && setup_killswitch(p) < 0)
+            LOG_WRN("kill switch: could not drop the pass rule for the closed TUN");
         if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
             event_base_loopbreak(p->eb);
     }
@@ -711,6 +721,15 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
+
+    /* Kill switch BEFORE the first connect, now that the server address is
+     * known (server_ip_str above): loading it only at tunnel-up left the
+     * handshake and every reconnect unprotected. The utun's pass rule is
+     * added by the reload in cb_tunnel_config_ready. */
+    if (setup_killswitch(&ctx) < 0) {
+        LOG_ERR("killswitch setup failed, aborting");
+        goto cleanup;
+    }
 
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
