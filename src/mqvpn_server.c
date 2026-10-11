@@ -2237,6 +2237,73 @@ svr_path_policy_find(mqvpn_server_t *s, const char *username, const char *iface)
     return -1;
 }
 
+/* Answer one ADDRESS_REQUEST capsule (RFC 9484 §4.7.2): one Assigned Address
+ * per Requested Address, same Request ID, of the requested IP version. The
+ * session's own address for that family when it has one (the IPv4 /32 reply
+ * is byte-identical to what 0.16.x servers sent), otherwise the rejection
+ * form: an all-zero address with the maximum prefix length (0.0.0.0/32,
+ * ::/128). Entries with Request ID 0 or an unknown version are skipped, as
+ * before. Returns -1 only when the reply could not be queued on the stream. */
+static int
+svr_answer_address_request(mqvpn_server_t *s, svr_stream_t *stream,
+                           const uint8_t *payload, size_t paylen)
+{
+    svr_conn_t *conn = stream->conn;
+    uint8_t resp_payload[256];
+    size_t resp_len = 0;
+
+    while (paylen > 0) {
+        uint64_t req_id;
+        uint8_t ip_ver, ip_addr[16], prefix;
+        size_t ip_len = sizeof(ip_addr), consumed = 0;
+        if (xqc_h3_ext_connectip_parse_address_assign(payload, paylen, &req_id, &ip_ver,
+                                                      ip_addr, &ip_len, &prefix,
+                                                      &consumed) != XQC_OK ||
+            consumed == 0 || consumed > paylen)
+            break;
+        payload += consumed;
+        paylen -= consumed;
+        if (req_id == 0 || (ip_ver != 4 && ip_ver != 6)) continue;
+
+        LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d (user=%s)", req_id, ip_ver,
+              conn->username);
+        uint8_t resp_ip[16] = {0};
+        uint8_t resp_prefix;
+        if (ip_ver == 4) {
+            memcpy(resp_ip, &conn->assigned_ip.s_addr, 4);
+            resp_prefix = 32;
+        } else {
+            if (conn->has_v6) memcpy(resp_ip, &conn->assigned_ip6, 16);
+            resp_prefix = 128; /* own address, or the ::/128 rejection */
+        }
+        size_t w = 0;
+        if (xqc_h3_ext_connectip_build_address_request(
+                resp_payload + resp_len, sizeof(resp_payload) - resp_len, &w, req_id,
+                ip_ver, resp_ip, resp_prefix) != XQC_OK) {
+            LOG_W(s, "ADDRESS_REQUEST: too many entries, rest unanswered (user=%s)",
+                  conn->username);
+            break;
+        }
+        resp_len += w;
+    }
+    if (resp_len == 0) return 0;
+
+    uint8_t cap_buf[sizeof(resp_payload) + 16];
+    size_t cap_w = 0;
+    if (xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_w,
+                                  XQC_H3_CAPSULE_ADDRESS_ASSIGN, resp_payload,
+                                  resp_len) != XQC_OK) {
+        LOG_W(s, "ADDRESS_REQUEST: reply encode failed (user=%s)", conn->username);
+        return 0;
+    }
+    ssize_t sret = svr_stream_send_capsule(stream, cap_buf, cap_w);
+    if (sret < 0) {
+        LOG_E(s, "send ADDRESS_ASSIGN reply: %zd (user=%s)", sret, conn->username);
+        return -1;
+    }
+    return 0;
+}
+
 /* CONNECT-IP stream body: capsule reassembly + ADDRESS_REQUEST/PATH_LABEL
  * handling. */
 static int
@@ -2290,29 +2357,8 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
 
             if (cap_type == XQC_H3_CAPSULE_ADDRESS_REQUEST && stream->conn &&
                 stream->conn->tunnel_established) {
-                uint64_t req_id;
-                uint8_t ip_ver, ip_addr[16], prefix;
-                size_t ip_len = 16, aa_consumed;
-                xr = xqc_h3_ext_connectip_parse_address_assign(
-                    cap_payload, cap_len, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
-                    &aa_consumed);
-                if (xr == XQC_OK && req_id != 0) {
-                    LOG_I(s, "ADDRESS_REQUEST: req_id=%" PRIu64 " ipv%d (user=%s)",
-                          req_id, ip_ver, stream->conn->username);
-                    uint8_t resp_payload[64];
-                    size_t resp_written = 0;
-                    uint8_t resp_ip[4];
-                    memcpy(resp_ip, &stream->conn->assigned_ip.s_addr, 4);
-                    xqc_h3_ext_connectip_build_address_request(
-                        resp_payload, sizeof(resp_payload), &resp_written, req_id, 4,
-                        resp_ip, 32);
-                    uint8_t cap_buf[128];
-                    size_t cap_w = 0;
-                    xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_w,
-                                              XQC_H3_CAPSULE_ADDRESS_ASSIGN, resp_payload,
-                                              resp_written);
-                    xqc_h3_request_send_body(h3_request, cap_buf, cap_w, 0);
-                }
+                if (svr_answer_address_request(s, stream, cap_payload, cap_len) < 0)
+                    return -1; /* capsule stream can no longer be kept in sync */
             }
 
             if (cap_type == MQVPN_CAPSULE_PATH_LABEL && stream->conn) {
