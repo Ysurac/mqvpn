@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+# Stop the services while their files are still installed, so that the
+# server's ExecStopPost (mqvpn-server-nat.sh teardown) can remove its NAT and
+# FORWARD rules and each client restores its routes and DNS. On removal also
+# disable them, so no dangling enablement symlinks are left behind. An
+# upgrade leaves running services alone.
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ] && command -v systemctl > /dev/null 2>&1; then
+            systemctl stop mqvpn-server.service 'mqvpn-client@*.service' || true
+            if [ "$1" = remove ]; then
+                systemctl disable mqvpn-server.service > /dev/null 2>&1 || true
+                for link in /etc/systemd/system/*.wants/mqvpn-client@?*.service; do
+                    [ -e "$link" ] || [ -L "$link" ] || continue
+                    systemctl disable "$(basename "$link")" > /dev/null 2>&1 || true
+                done
+            fi
+        fi
+        ;;
+esac
+
+exit 0

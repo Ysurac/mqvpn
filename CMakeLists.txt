@@ -1414,7 +1414,7 @@ if(DPKG_CMD)
     set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Multipath QUIC VPN using MASQUE CONNECT-IP (RFC 9484)")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "mp0rta")
     set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
-        "${CMAKE_SOURCE_DIR}/packaging/postinst;${CMAKE_SOURCE_DIR}/packaging/postrm")
+        "${CMAKE_SOURCE_DIR}/packaging/postinst;${CMAKE_SOURCE_DIR}/packaging/prerm;${CMAKE_SOURCE_DIR}/packaging/postrm")
     include(CPack)
 endif()
 
