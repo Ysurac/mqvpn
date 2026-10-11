@@ -3097,6 +3097,28 @@ TEST(headers_any_2xx_accepts_tunnel)
     mqvpn_client_destroy(c);
 }
 
+extern void mqvpn_client_test_guess_server_tunnel_ip(const uint8_t assigned[4],
+                                                     uint8_t server[4]);
+
+TEST(server_tunnel_ip_guess_never_own_address)
+{
+    uint8_t srv[4];
+
+    /* Default /24 pool: the .1 of the client's /24, as with 0.16.0. */
+    const uint8_t a1[4] = {10, 0, 0, 2};
+    mqvpn_client_test_guess_server_tunnel_ip(a1, srv);
+    ASSERT_EQ(memcmp(srv, (const uint8_t[]){10, 0, 0, 1}, 4), 0);
+
+    /* A wider pool can assign x.y.z.1: the peer must differ from it. */
+    const uint8_t a2[4] = {10, 0, 1, 1};
+    mqvpn_client_test_guess_server_tunnel_ip(a2, srv);
+    ASSERT_EQ(memcmp(srv, (const uint8_t[]){10, 0, 0, 1}, 4), 0);
+
+    const uint8_t a3[4] = {10, 1, 0, 1};
+    mqvpn_client_test_guess_server_tunnel_ip(a3, srv);
+    ASSERT_EQ(memcmp(srv, (const uint8_t[]){10, 0, 255, 1}, 4), 0);
+}
+
 TEST(tunnel_setup_watchdog_window)
 {
     mqvpn_client_t *c = make_test_client();
@@ -4400,6 +4422,7 @@ main(void)
     run_request_close_during_local_shutdown_requests_nothing();
     run_headers_any_2xx_accepts_tunnel();
     run_tunnel_setup_watchdog_window();
+    run_server_tunnel_ip_guess_never_own_address();
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     run_client_new_warns_tcp_max_flows_above_pool_bound();
     run_client_new_quiet_tcp_max_flows_at_pool_bound();

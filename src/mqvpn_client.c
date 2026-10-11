@@ -1981,6 +1981,21 @@ stream_append_capsules(cli_stream_t *s, const uint8_t *buf, size_t len)
     return 0;
 }
 
+/* Abort the CONNECT-IP request on a malformed capsule (RFC 9484 §4.7,
+ * RFC 9297 §3.3: the receiver MUST abort the request stream). Drop the
+ * buffered capsules so the bad one is not parsed (and logged) again, and mark
+ * the stream so later body reads are ignored. cb_request_close then closes
+ * the connection (cli_connect_ip_on_request_close). The stream may be freed
+ * by the close: callers return -1 at once without touching it. */
+static int
+cli_connect_ip_abort(cli_stream_t *stream)
+{
+    stream->aborted = 1;
+    stream->capsule_len = 0;
+    xqc_h3_request_close(stream->h3_request);
+    return -1;
+}
+
 /* Returns -1 when the request was aborted (stream must not be touched
  * afterwards by the caller), 0 otherwise. */
 static int
@@ -2009,7 +2024,14 @@ process_capsules(cli_stream_t *stream)
                 xret = xqc_h3_ext_connectip_parse_address_assign(
                     ap, aremain, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
                     &aa_consumed);
-                if (xret != XQC_OK) break;
+                /* RFC 9484 §4.7.1: the prefix length cannot exceed the
+                 * address length; anything unparsable is malformed too. */
+                if (xret != XQC_OK || (ip_ver == 4 && prefix > 32) ||
+                    (ip_ver == 6 && prefix > 128)) {
+                    LOG_E(c, "ADDRESS_ASSIGN malformed (ip_version=%d prefix=%d)",
+                          xret == XQC_OK ? ip_ver : -1, xret == XQC_OK ? prefix : -1);
+                    return cli_connect_ip_abort(stream);
+                }
 
                 if (ip_ver == 4 && !conn->addr_assigned) {
                     memcpy(conn->assigned_ip, ip_addr, 4);
@@ -2036,15 +2058,9 @@ process_capsules(cli_stream_t *stream)
         } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
             xret = xqc_h3_ext_connectip_validate_route_advertisement(payload, cap_len);
             if (xret != XQC_OK) {
-                /* RFC 9484 §4.7.3: MUST abort the request stream. Drop the
-                 * buffered capsules and stop parsing: the bad capsule must
-                 * not be seen (and logged) again on the next body read.
-                 * cb_request_close then closes the connection. */
+                /* RFC 9484 §4.7.3: MUST abort the request stream. */
                 LOG_E(c, "ROUTE_ADVERTISEMENT validation failed");
-                stream->aborted = 1;
-                stream->capsule_len = 0;
-                xqc_h3_request_close(stream->h3_request);
-                return -1;
+                return cli_connect_ip_abort(stream);
             }
             /* Log routes but no action needed */
         } else if (cap_type == MQVPN_CAPSULE_PATH_LABEL_PUSH) {
@@ -2338,6 +2354,38 @@ cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
 static void client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p,
                                           activate_result_t r, uint64_t new_id);
 
+/* The server's own tunnel address, used as the TUN point-to-point peer. The
+ * protocol carries no trace of it: servers (0.16.0 included) assign the
+ * client a /32 and advertise 0.0.0.0-255.255.255.255, while the server
+ * itself takes the first host of its pool subnet. So keep the historical
+ * guess, the .1 of the client's /24 (exact for the default /24 pool), but
+ * never return the client's own address, which a pool wider than /24 can
+ * hand out (10.0.1.1 in 10.0.0.0/23): take the .1 of the /24 below instead,
+ * which is the server for a /23 pool and at least a distinct peer otherwise. */
+static void
+cli_guess_server_tunnel_ip(const uint8_t assigned[4], uint8_t server[4])
+{
+    memcpy(server, assigned, 3);
+    server[3] = 1;
+    if (assigned[3] == 1) {
+        uint32_t a = ((uint32_t)assigned[0] << 24) | ((uint32_t)assigned[1] << 16) |
+                     ((uint32_t)assigned[2] << 8) | assigned[3];
+        a -= 256;
+        server[0] = (uint8_t)(a >> 24);
+        server[1] = (uint8_t)(a >> 16);
+        server[2] = (uint8_t)(a >> 8);
+        server[3] = (uint8_t)a;
+    }
+}
+
+/* Test-only: drive cli_guess_server_tunnel_ip. */
+MQVPN_INTERNAL
+void
+mqvpn_client_test_guess_server_tunnel_ip(const uint8_t assigned[4], uint8_t server[4])
+{
+    cli_guess_server_tunnel_ip(assigned, server);
+}
+
 /* CONNECT-IP tunnel stream: capsule body + ADDRESS_ASSIGN → tunnel_config_ready.
  * Returns -1 on capsule buffer failure. */
 static int
@@ -2466,9 +2514,7 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         info.struct_size = sizeof(info);
         memcpy(info.assigned_ip, conn->assigned_ip, 4);
         info.assigned_prefix = conn->assigned_prefix;
-        /* Server IP is .1 in same subnet */
-        memcpy(info.server_ip, conn->assigned_ip, 3);
-        info.server_ip[3] = 1;
+        cli_guess_server_tunnel_ip(conn->assigned_ip, info.server_ip);
         info.server_prefix = conn->assigned_prefix;
         info.mtu = tun_mtu;
         if (conn->addr6_assigned) {
