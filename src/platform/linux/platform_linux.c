@@ -103,6 +103,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
         LOG_ERR("TUN create failed");
         goto fail;
     }
+    /* From here on the kernel-assigned name (a template such as tun%d gets
+     * its number now, possibly a different one on every rebuild). */
+    snprintf(p->dns.tun_name, sizeof(p->dns.tun_name), "%s", p->tun.name);
 
     /* Set IPv4 address */
     char local_ip[INET_ADDRSTRLEN];
@@ -117,9 +120,10 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     if (mqvpn_tun_set_mtu(&p->tun, info->mtu) < 0) goto fail;
     if (mqvpn_tun_up(&p->tun) < 0) goto fail;
 
-    /* Set IPv6 address if available */
+    /* Set IPv6 address if available. has_v6 follows each tunnel: a
+     * reconnect may come back without IPv6. */
+    p->has_v6 = info->has_v6 ? 1 : 0;
     if (info->has_v6) {
-        p->has_v6 = 1;
         char v6str[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, info->assigned_ip6, v6str, sizeof(v6str));
         if (mqvpn_tun_set_addr6(&p->tun, v6str, info->assigned_prefix6) < 0)
@@ -493,12 +497,12 @@ tun_fatal_error(platform_ctx_t *p)
     }
     if (p->have_tunnel_info && ++p->tun_rebuilds <= 5) {
         LOG_ERR("tun read failed (%s): device %s lost, rebuilding it in place (%d/5)",
-                strerror(err), p->tun_name_cfg, p->tun_rebuilds);
+                strerror(err), p->tun.name, p->tun_rebuilds);
         cb_tunnel_config_ready(&p->last_tunnel_info, p);
         return;
     }
     LOG_ERR("tun read failed (%s): device %s keeps disappearing, disconnecting",
-            strerror(err), p->tun_name_cfg);
+            strerror(err), p->tun.name);
     mqvpn_client_disconnect(p->client);
 }
 
@@ -641,9 +645,20 @@ cli_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
  * pointers are event args, so slots are recycled, never moved); appends
  * otherwise. Returns the slot, or NULL (already logged; nothing is left
  * registered or open). */
+static platform_path_t *find_live_slot(platform_ctx_t *p, const char *iface);
+
 static platform_path_t *
 attach_extra_path(platform_ctx_t *p, const char *iface, uint32_t flags)
 {
+    /* One live slot per interface: a second socket pinned to the same
+     * device is not a second path. A slot dropped by the monitor is still
+     * live (it comes back by itself); one removed through the control API
+     * is not, and is reused below. */
+    if (find_live_slot(p, iface)) {
+        LOG_ERR("path %s: interface already in use", iface);
+        return NULL;
+    }
+
     platform_path_t *s = NULL;
     for (int i = 0; i < p->n_paths; i++) {
         platform_path_t *c = &p->paths[i];
