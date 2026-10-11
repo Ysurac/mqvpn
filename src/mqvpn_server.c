@@ -227,6 +227,10 @@ struct svr_stream_s {
     uint8_t *capsule_buf;
     size_t capsule_len;
     size_t capsule_cap;
+    /* Capsule bytes accepted for this stream but not yet taken by xquic
+     * (svr_stream_send_capsule); flushed from cb_request_write. */
+    uint8_t *tx_pend;
+    size_t tx_pend_len;
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* Per D2, xqc_h3_request_t's user_data slot stays svr_stream_t*
@@ -1166,6 +1170,56 @@ svr_masque_send_409(xqc_h3_request_t *h3_request)
     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
 }
 
+/* Most capsule bytes a stream may have waiting for xquic. Setup and control
+ * capsules are a few dozen bytes; a backlog this large means the peer stopped
+ * reading its stream. */
+#define SVR_TX_PEND_MAX 16384
+
+/* Write capsule bytes on a CONNECT-IP stream, in order.
+ * xqc_h3_request_send_body may take only part of the data (stream flow
+ * control); dropping the rest would cut a capsule in half and desync the
+ * peer's capsule parser, so the remainder is kept in stream->tx_pend, later
+ * capsules queue behind it, and cb_request_write flushes it. Returns 0 when
+ * everything was written or queued, else the negative send error (or -1 when
+ * the backlog would exceed SVR_TX_PEND_MAX or cannot be allocated). */
+static ssize_t
+svr_stream_send_capsule(svr_stream_t *stream, const uint8_t *buf, size_t len)
+{
+    size_t off = 0;
+    if (stream->tx_pend_len == 0) {
+        ssize_t n =
+            xqc_h3_request_send_body(stream->h3_request, (unsigned char *)buf, len, 0);
+        if (n == -XQC_EAGAIN) n = 0;
+        if (n < 0) return n;
+        off = (size_t)n;
+        if (off >= len) return 0;
+    }
+    size_t rest = len - off;
+    if (stream->tx_pend_len + rest > SVR_TX_PEND_MAX) return -1;
+    uint8_t *nb = realloc(stream->tx_pend, stream->tx_pend_len + rest);
+    if (!nb) return -1;
+    memcpy(nb + stream->tx_pend_len, buf + off, rest);
+    stream->tx_pend = nb;
+    stream->tx_pend_len += rest;
+    return 0;
+}
+
+/* Push the stream's capsule backlog (write notify). Returns 0, or the
+ * negative send error. */
+static ssize_t
+svr_stream_flush_capsules(svr_stream_t *stream)
+{
+    if (stream->tx_pend_len == 0) return 0;
+    ssize_t n = xqc_h3_request_send_body(stream->h3_request, stream->tx_pend,
+                                         stream->tx_pend_len, 0);
+    if (n == -XQC_EAGAIN) return 0;
+    if (n < 0) return n;
+    size_t done = (size_t)n > stream->tx_pend_len ? stream->tx_pend_len : (size_t)n;
+    memmove(stream->tx_pend, stream->tx_pend + done, stream->tx_pend_len - done);
+    stream->tx_pend_len -= done;
+    return 0;
+}
+
 /* Address pool exhausted: 503, so the client sees a clean refusal on this
  * stream instead of a 200 followed by a torn-down connection. 0.16.x clients
  * treat it like any other non-200 response. */
@@ -1321,7 +1375,7 @@ ip_assigned:;
         LOG_E(s, "capsule encode ADDRESS_ASSIGN: %d (user=%s)", xret, conn->username);
         goto fail_release_ip;
     }
-    ret = xqc_h3_request_send_body(h3_request, capsule_buf, cap_written, 0);
+    ret = svr_stream_send_capsule(stream, capsule_buf, cap_written);
     if (ret < 0) {
         LOG_E(s, "send ADDRESS_ASSIGN: %zd (user=%s)", ret, conn->username);
         goto fail_release_ip;
@@ -1366,7 +1420,7 @@ ip_assigned:;
                   conn->username);
             goto fail_release_ip;
         }
-        ret = xqc_h3_request_send_body(h3_request, cap6_buf, cap6_written, 0);
+        ret = svr_stream_send_capsule(stream, cap6_buf, cap6_written);
         if (ret < 0) {
             LOG_E(s, "send ADDRESS_ASSIGN (IPv6): %zd (user=%s)", ret, conn->username);
             goto fail_release_ip;
@@ -1400,7 +1454,7 @@ ip_assigned:;
               conn->username);
         goto fail_release_ip;
     }
-    ret = xqc_h3_request_send_body(h3_request, route_capsule, rc_written, 0);
+    ret = svr_stream_send_capsule(stream, route_capsule, rc_written);
     if (ret < 0) {
         LOG_E(s, "send ROUTE_ADVERTISEMENT: %zd (user=%s)", ret, conn->username);
         goto fail_release_ip;
@@ -1428,7 +1482,7 @@ ip_assigned:;
                   conn->username);
             goto fail_release_ip;
         }
-        ret = xqc_h3_request_send_body(h3_request, r6_capsule, r6c_written, 0);
+        ret = svr_stream_send_capsule(stream, r6_capsule, r6c_written);
         if (ret < 0) {
             LOG_E(s, "send ROUTE_ADVERTISEMENT (IPv6): %zd (user=%s)", ret,
                   conn->username);
@@ -1594,6 +1648,7 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
         }
 #endif
         free(stream->capsule_buf);
+        free(stream->tx_pend);
         free(stream);
     }
     return 0;
@@ -2197,11 +2252,17 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
         n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
         if (n <= 0) break;
 
+        /* Overflow or allocation failure: the bytes just read cannot be kept,
+         * and dropping them would desync the capsule parser for good, so the
+         * stream is unusable. -1 makes xquic close the connection (a reset of
+         * just this request cannot be done safely from inside its own read
+         * notify). Only a peer sending a capsule above MAX_CAPSULE_BUF gets
+         * here. */
         size_t need = stream->capsule_len + (size_t)n;
         if (need > MAX_CAPSULE_BUF) {
             LOG_E(s, "server capsule buffer overflow (user=%s)",
                   stream->conn ? stream->conn->username : "");
-            break;
+            return -1;
         }
         if (need > stream->capsule_cap) {
             size_t new_cap = stream->capsule_cap ? stream->capsule_cap * 2 : 4096;
@@ -2213,7 +2274,7 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                 new_cap *= 2;
             }
             uint8_t *nb = realloc(stream->capsule_buf, new_cap);
-            if (!nb) break;
+            if (!nb) return -1;
             stream->capsule_buf = nb;
             stream->capsule_cap = new_cap;
         }
@@ -2504,6 +2565,11 @@ cb_request_write(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     (void)h3_request;
     svr_stream_t *stream = (svr_stream_t *)strm_user_data;
+    /* Capsules a partial write left behind (svr_stream_send_capsule). A send
+     * error here means the capsule stream is broken: -1 closes the
+     * connection, as the read side does. */
+    if (stream && stream->tx_pend_len > 0 && svr_stream_flush_capsules(stream) < 0)
+        return -1;
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     if (stream && stream->role == SVR_STREAM_ROLE_CONNECT_TCP && stream->conn) {
         svr_tcp_egress_on_h3_writable(stream->conn->server, stream);
