@@ -1,4 +1,4 @@
-libmqvpn.so.4 libmqvpn0 #MINVER#
+libmqvpn.so.4 libmqvpn4 #MINVER#
  mqvpn_bind_posix_path_drain@Base 0.16.3
  mqvpn_bind_posix_path_free@Base 0.16.3
  mqvpn_bind_posix_path_get_stats@Base 0.16.3
