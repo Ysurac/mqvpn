@@ -113,6 +113,11 @@ struct platform_win_ctx {
     HANDLE wfp_engine;
     GUID wfp_sublayer_key;
     int n_wfp_filters;
+    /* The TUN permits, the only filters that follow the adapter: added by
+     * win_killswitch_permit_tun() at tunnel-up, deleted by id on teardown.
+     * The rest of the session stays from first connect to final shutdown. */
+    UINT64 wfp_tun_filter_ids[2];
+    int n_wfp_tun_filters;
     int killswitch_active;
     int killswitch_enabled;
     /* FwpmEngineClose0 failed: the dynamic session may still hold its
@@ -146,8 +151,13 @@ struct platform_win_ctx {
 int win_setup_routes(platform_win_ctx_t *p);
 void win_cleanup_routes(platform_win_ctx_t *p);
 
-/* firewall.c */
+/* firewall.c — win_setup_killswitch() installs the base set (block all but
+ * loopback, the server, DHCP/ND) before the first connect; the TUN permits
+ * follow the adapter; win_cleanup_killswitch() closes the whole session and
+ * runs only on final shutdown. */
 int win_setup_killswitch(platform_win_ctx_t *p);
+int win_killswitch_permit_tun(platform_win_ctx_t *p);
+void win_killswitch_revoke_tun(platform_win_ctx_t *p);
 void win_cleanup_killswitch(platform_win_ctx_t *p);
 
 /* dns.c */

@@ -315,7 +315,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     } else {
         LOG_INF("manage_routes=off: host routing table left untouched");
     }
-    if (win_setup_killswitch(p) < 0) {
+    /* The kill switch's base set has been blocking since before the first
+     * connect (win_platform_run_client); only the TUN permit is per tunnel. */
+    if (win_killswitch_permit_tun(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
         goto fail;
     }
@@ -354,7 +356,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     return;
 
 fail:
-    win_cleanup_killswitch(p);
+    /* The kill switch base set stays: this failure ends the process, and the
+     * final cleanup closes the WFP session after the loop exits. */
+    win_killswitch_revoke_tun(p);
     if (p->manage_routes) win_cleanup_routes(p);
     win_cleanup_dns(p);
     if (p->tun.adapter) mqvpn_tun_win_destroy(&p->tun);
@@ -401,7 +405,11 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
         if (p->ev_recover) event_del(p->ev_recover);
         for (int i = 0; i < p->n_paths; i++)
             p->paths[i].recover_failures = 0;
-        win_cleanup_killswitch(p);
+        /* Only the TUN permit follows the tunnel: the kill switch's block
+         * (and its server permit) stays through RECONNECTING, so nothing
+         * leaks while the tunnel is down. The session closes on final
+         * shutdown only (win_platform_run_client cleanup). */
+        win_killswitch_revoke_tun(p);
         if (p->manage_routes) win_cleanup_routes(p);
         win_cleanup_dns(p);
         if (p->tun_up) {
@@ -413,16 +421,6 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             mqvpn_tun_win_destroy(&p->tun);
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
-        }
-        /* A kill switch we could not tear down keeps blocking everything,
-         * and only process exit clears it (BFE runs down the dynamic session
-         * with its owner). Head for the exit instead of reconnecting into
-         * it — win_setup_killswitch() would refuse the new session anyway. */
-        if (p->wfp_close_failed && !p->shutting_down) {
-            LOG_ERR("kill switch teardown failed, aborting");
-            p->fatal_error = PLATFORM_FATAL_TUNNEL_SETUP;
-            p->shutting_down = 1;
-            if (new_state != MQVPN_STATE_CLOSED) mqvpn_client_disconnect(p->client);
         }
 
         if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
@@ -892,6 +890,15 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
+
+    /* Kill switch base set BEFORE the first connect, now that the server
+     * address is known: blocking only from tunnel-up left every byte sent
+     * during the handshake (and any later reconnect) unprotected. The TUN
+     * permit is added when the adapter comes up. */
+    if (win_setup_killswitch(&ctx) < 0) {
+        LOG_ERR("killswitch setup failed, aborting");
+        goto cleanup;
+    }
 
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
