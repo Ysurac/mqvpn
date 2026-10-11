@@ -595,9 +595,12 @@ test_ipv6_pool_init_prefix_boundaries(void)
     /* Reset has_v6 for next test */
     pool.has_v6 = 0;
 
-    /* /126 → accepted (upper bound) */
-    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/126"), 0,
-                  "/126 prefix accepted");
+    /* /126 → accepted (upper bound) when it holds every pool offset: a /30
+     * IPv4 pool hands out offsets up to 2, which fit in its 2 host bits. */
+    mqvpn_addr_pool_t small;
+    mqvpn_addr_pool_init(&small, "10.0.0.0/30");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&small, "fd00:abcd::/126"), 0,
+                  "/126 prefix accepted for a /30 pool");
 
     pool.has_v6 = 0;
 
@@ -605,6 +608,45 @@ test_ipv6_pool_init_prefix_boundaries(void)
     ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0, "/127 prefix rejected");
     /* /128 → rejected */
     ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/128") < 0, "/128 prefix rejected");
+}
+
+/* The IPv6 prefix must hold base6 + every offset of the shared pool: a /24
+ * IPv4 pool (offsets up to 254) needs at least 8 host bits, and a non-aligned
+ * base must not run past the prefix either. get6 refuses an offset that
+ * would leave the prefix instead of wrapping into the network bits. */
+static void
+test_ipv6_pool_prefix_holds_pool(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/126") < 0,
+                "/126 cannot hold a /24 pool");
+    ASSERT_EQ_INT(pool.has_v6, 0, "failed init6 leaves has_v6 clear");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/121") < 0,
+                "/121 (127 hosts) cannot hold a /24 pool");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/120"), 0,
+                  "/120 (255 hosts) holds a /24 pool");
+
+    /* Non-aligned base whose host part + 254 runs past the /120. */
+    mqvpn_addr_pool_t na;
+    mqvpn_addr_pool_init(&na, "10.0.0.0/24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&na, "fd00:abcd::10/120") < 0,
+                "non-aligned base running past the prefix rejected");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&na, "fd00:abcd::10/112"), 0,
+                  "non-aligned base inside a /112 accepted");
+
+    /* get6 does not wrap: on a /120, offset 255 is the last host, 256 is out. */
+    struct in6_addr a;
+    ASSERT_EQ_INT(mqvpn_addr_pool_get6(&pool, 255, &a), 0, "offset 255 in /120");
+    ASSERT_EQ_INT(a.s6_addr[15], 0xff, "offset 255 -> ::ff");
+    ASSERT_TRUE(mqvpn_addr_pool_get6(&pool, 256, &a) < 0, "offset 256 outside /120");
+    ASSERT_EQ_INT(a.s6_addr[14], 0, "failed get6 does not carry into the prefix");
+
+    /* offset6 rejects an address whose low-word network bits differ. */
+    struct in6_addr other;
+    inet_pton(AF_INET6, "fd00:abcd::105", &other);
+    ASSERT_EQ_INT(mqvpn_addr_pool_offset6(&pool, &other), 0,
+                  "address outside the /120 -> offset 0");
 }
 
 static void
@@ -892,6 +934,7 @@ main(void)
     test_ipv6_pool_exhaustion_shared();
     test_ipv6_release_realloc_shared();
     test_ipv6_pool_init_prefix_boundaries();
+    test_ipv6_pool_prefix_holds_pool();
     test_ipv6_pool_init_bad_addr();
     test_ipv6_offset6_below_base();
     test_ipv6_get6_offset_zero();

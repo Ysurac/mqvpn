@@ -1422,11 +1422,11 @@ ip_assigned:;
      * ROUTE_ADV v4 send would also fail. has_v6 is assigned only AFTER the
      * capsule is successfully sent so fail_release_ip doesn't have to
      * reason about half-set v6 state. */
-    if (s->pool.has_v6) {
-        struct in6_addr v6;
-        uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
-        mqvpn_addr_pool_get6(&s->pool, ip_offset, &v6);
-
+    /* get6 cannot fail for a pool offset (init6 checked the prefix holds
+     * them all); a failure would mean no in-prefix address, so no v6. */
+    struct in6_addr v6;
+    uint32_t ip_offset = ntohl(conn->assigned_ip.s_addr) - ntohl(s->pool.base.s_addr);
+    if (s->pool.has_v6 && mqvpn_addr_pool_get6(&s->pool, ip_offset, &v6) == 0) {
         uint8_t a6_payload[32];
         size_t a6_off = 0;
         a6_payload[a6_off++] = 0x00;
