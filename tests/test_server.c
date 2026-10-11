@@ -1919,6 +1919,193 @@ TEST(client_dropped_last_path_abandoned_once_replaced)
     close(cli_fd1);
 }
 
+/* IPv4/UDP packet of len bytes, header checksum set, payload zero. */
+static void
+build_udp4(uint8_t *pkt, size_t len, const uint8_t src[4], const uint8_t dst[4],
+           uint16_t sport, uint16_t dport)
+{
+    memset(pkt, 0, len);
+    pkt[0] = 0x45;
+    pkt[2] = (uint8_t)(len >> 8);
+    pkt[3] = (uint8_t)len;
+    pkt[8] = 64;
+    pkt[9] = 17;
+    memcpy(pkt + 12, src, 4);
+    memcpy(pkt + 16, dst, 4);
+    uint32_t sum = 0;
+    for (int i = 0; i < 20; i += 2)
+        sum += (uint32_t)(pkt[i] << 8 | pkt[i + 1]);
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    pkt[10] = (uint8_t)(~sum >> 8);
+    pkt[11] = (uint8_t)~sum;
+    pkt[20] = (uint8_t)(sport >> 8);
+    pkt[21] = (uint8_t)sport;
+    pkt[22] = (uint8_t)(dport >> 8);
+    pkt[23] = (uint8_t)dport;
+    pkt[24] = (uint8_t)((len - 20) >> 8);
+    pkt[25] = (uint8_t)(len - 20);
+}
+
+static void
+get_path_bytes(mqvpn_client_t *cli, mqvpn_path_handle_t h, uint64_t *tx, uint64_t *rx)
+{
+    mqvpn_path_info_t infos[MQVPN_MAX_PATHS];
+    int n = 0;
+    *tx = *rx = 0;
+    ASSERT_EQ(mqvpn_client_get_paths(cli, infos, MQVPN_MAX_PATHS, &n), MQVPN_OK);
+    for (int i = 0; i < n; i++) {
+        if (infos[i].handle == h) {
+            *tx = infos[i].bytes_tx;
+            *rx = infos[i].bytes_rx;
+        }
+    }
+}
+
+#define BACKUP_IDLE_PKT_LEN 1000
+
+/* Push `bursts` bursts of 10 uplink and 10 downlink UDP packets (several
+ * flows), pumping both engines between bursts and afterwards. */
+static void
+push_traffic_two_paths(loopback_t *lb, void *cli_tctx1, mqvpn_path_handle_t h1,
+                       int drain_primary, int bursts)
+{
+    static const uint8_t remote[4] = {8, 8, 8, 8};
+    uint8_t pkt[BACKUP_IDLE_PKT_LEN];
+    for (int b = 0; b < bursts + 100; b++) {
+        if (b < bursts) {
+            for (int i = 0; i < 10; i++) {
+                uint16_t port = (uint16_t)(40000 + (b * 10 + i) % 16);
+                build_udp4(pkt, sizeof(pkt), g_cli_tunnel_info.assigned_ip, remote, port,
+                           53);
+                mqvpn_client_on_tun_packet(lb->cli, pkt, sizeof(pkt));
+                build_udp4(pkt, sizeof(pkt), remote, g_cli_tunnel_info.assigned_ip, 53,
+                           port);
+                mqvpn_server_on_tun_packet(lb->svr, pkt, sizeof(pkt));
+            }
+        }
+        mqvpn_bind_posix_server_drain(lb->svr_tctx, lb->svr, 64);
+        if (drain_primary)
+            mqvpn_bind_posix_path_drain(lb->cli_tctx, lb->cli, lb->path_h, 64);
+        mqvpn_bind_posix_path_drain(cli_tctx1, lb->cli, h1, 64);
+        mqvpn_server_tick(lb->svr);
+        mqvpn_client_tick(lb->cli);
+        struct pollfd pfds[2] = {
+            {.fd = lb->svr_fd, .events = POLLIN},
+            {.fd = lb->cli_fd, .events = POLLIN},
+        };
+        poll(pfds, 2, 2);
+    }
+}
+
+/* Under the default scheduler (WLB) a backup path in standby carries no data
+ * in either direction while the primary is up: the client's scheduler skips
+ * it, and the server's skips it because the client announced it with
+ * PATH_STATUS_BACKUP. Once the primary is dropped the backup carries the
+ * traffic. */
+TEST(client_backup_path_idle_under_wlb_until_primary_dropped)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_multipath); /* default scheduler: WLB */
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_ESTABLISHED);
+    /* Let the server's spare connection IDs arrive (multipath ready). */
+    loopback_pump_until(&lb, done_never, 1000);
+
+    int cli_fd1 = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(cli_fd1, -1);
+    struct sockaddr_in cli_addr1;
+    memset(&cli_addr1, 0, sizeof(cli_addr1));
+    cli_addr1.sin_family = AF_INET;
+    cli_addr1.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cli_addr1.sin_port = htons(0);
+    ASSERT_EQ(bind(cli_fd1, (struct sockaddr *)&cli_addr1, sizeof(cli_addr1)), 0);
+    socklen_t alen = sizeof(cli_addr1);
+    getsockname(cli_fd1, (struct sockaddr *)&cli_addr1, &alen);
+
+    mqvpn_path_desc_t d1;
+    memset(&d1, 0, sizeof(d1));
+    d1.struct_size = sizeof(d1);
+    memcpy(d1.local_addr, &cli_addr1, sizeof(cli_addr1));
+    d1.local_addr_len = sizeof(cli_addr1);
+    d1.flags = MQVPN_PATH_FLAG_BACKUP;
+    snprintf(d1.iface, sizeof(d1.iface), "lte0");
+    void *cli_tctx1 = NULL;
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = 1;
+    bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(cli_fd1, &bopts, &cli_tctx1), MQVPN_OK);
+    mqvpn_path_handle_t h1 =
+        mqvpn_client_add_path(lb.cli, &d1, mqvpn_bind_posix_path_ops(), cli_tctx1, NULL);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+    for (int elapsed = 0; elapsed < 12000; elapsed++) {
+        drain_and_tick_two_paths(lb.svr, lb.svr_tctx, lb.cli, lb.cli_tctx, lb.path_h,
+                                 cli_tctx1, h1);
+        st = get_path_status_or_invalid(lb.cli, h1);
+        if (st != MQVPN_PATH_PENDING) break;
+        struct pollfd pfds[3] = {
+            {.fd = lb.svr_fd, .events = POLLIN},
+            {.fd = lb.cli_fd, .events = POLLIN},
+            {.fd = cli_fd1, .events = POLLIN},
+        };
+        int w = poll(pfds, 3, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+    ASSERT_EQ(st, MQVPN_PATH_STANDBY);
+    /* let PATH_STATUS_BACKUP reach the server */
+    push_traffic_two_paths(&lb, cli_tctx1, h1, 1, 0);
+
+    /* Phase 1: primary up. */
+    uint64_t p_tx0, p_rx0, b_tx0, b_rx0, p_tx1, p_rx1, b_tx1, b_rx1;
+    get_path_bytes(lb.cli, lb.path_h, &p_tx0, &p_rx0);
+    get_path_bytes(lb.cli, h1, &b_tx0, &b_rx0);
+    int up0 = g_tun_output_called, down0 = g_cli_tun_output_called;
+    push_traffic_two_paths(&lb, cli_tctx1, h1, 1, 40);
+    get_path_bytes(lb.cli, lb.path_h, &p_tx1, &p_rx1);
+    get_path_bytes(lb.cli, h1, &b_tx1, &b_rx1);
+    int up1 = g_tun_output_called, down1 = g_cli_tun_output_called;
+    /* traffic flowed */
+    ASSERT_EQ(up1 - up0 > 200, 1);
+    ASSERT_EQ(down1 - down0 > 200, 1);
+    /* none of it on the backup (a few control bytes at most) */
+    if (b_tx1 - b_tx0 > 4 * BACKUP_IDLE_PKT_LEN ||
+        b_rx1 - b_rx0 > 4 * BACKUP_IDLE_PKT_LEN) {
+        printf("FAIL\n    %s:%d: standby backup path carried data: tx %llu rx %llu "
+               "(primary tx %llu rx %llu)\n",
+               __FILE__, __LINE__, (unsigned long long)(b_tx1 - b_tx0),
+               (unsigned long long)(b_rx1 - b_rx0), (unsigned long long)(p_tx1 - p_tx0),
+               (unsigned long long)(p_rx1 - p_rx0));
+        exit(1);
+    }
+    /* all of it on the primary */
+    ASSERT_EQ(p_tx1 - p_tx0 > 200 * BACKUP_IDLE_PKT_LEN, 1);
+    ASSERT_EQ(p_rx1 - p_rx0 > 200 * BACKUP_IDLE_PKT_LEN, 1);
+
+    /* Phase 2: the platform drops the primary and stops reading its socket;
+     * the backup takes the traffic in both directions. */
+    ASSERT_EQ(mqvpn_client_on_platform_path_dropped(lb.cli, lb.path_h, NULL), MQVPN_OK);
+    push_traffic_two_paths(&lb, cli_tctx1, h1, 0, 0);
+    up0 = g_tun_output_called;
+    down0 = g_cli_tun_output_called;
+    push_traffic_two_paths(&lb, cli_tctx1, h1, 0, 40);
+    get_path_bytes(lb.cli, h1, &b_tx0, &b_rx0);
+    up1 = g_tun_output_called;
+    down1 = g_cli_tun_output_called;
+    ASSERT_EQ(up1 - up0 > 200, 1);
+    ASSERT_EQ(down1 - down0 > 200, 1);
+    ASSERT_EQ(b_tx0 - b_tx1 > 200 * BACKUP_IDLE_PKT_LEN, 1);
+    ASSERT_EQ(b_rx0 - b_rx1 > 200 * BACKUP_IDLE_PKT_LEN, 1);
+
+    mqvpn_client_disconnect(lb.cli);
+    loopback_teardown(&lb); /* finalises cli_tctx1 too */
+    close(cli_fd1);
+}
+
 /* ── test_server_get_status: control API status queries ──
  *
  * Verify mqvpn_server_get_client_info() (used by control socket get_status command)
@@ -2874,6 +3061,7 @@ main(void)
     run_server_runtime_added_path_not_stuck_pending();
     run_client_backup_path_validates_into_standby();
     run_client_dropped_last_path_abandoned_once_replaced();
+    run_client_backup_path_idle_under_wlb_until_primary_dropped();
     run_client_auth_refused_leaves_authenticating();
 
     /* Control API: get_status with and without clients */
