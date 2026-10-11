@@ -3257,9 +3257,10 @@ mqvpn_server_destroy(mqvpn_server_t *s)
     svr_tx_totals(s, &tx_sends, &tx_datagrams);
     LOG_I(s, MQVPN_UDP_TX_LINE_FMT, tx_sends, tx_datagrams, s->config.udp_gso);
 
-    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free */
+    /* Step 1: xqc_engine_destroy triggers h3_conn_close → session free. It
+     * also frees the h3 context (xqc_engine_free_alpn_list), so no
+     * xqc_h3_ctx_destroy() here (DD §10). */
     if (s->engine) {
-        xqc_h3_ctx_destroy(s->engine);
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
     }
