@@ -106,6 +106,10 @@ struct platform_win_ctx {
     /* DNS */
     int dns_configured;
     int dns_method; /* WIN_DNS_METHOD_*: how win_setup_dns applied it, undone alike */
+    /* NRPT "." rule this process installed (dns.c): its key name under
+     * DnsPolicyConfig, valid while nrpt_active. */
+    int nrpt_active;
+    WCHAR nrpt_key[64];
     DWORD dns_if_index;
     int n_dns;
     char dns_servers[4][64];
@@ -167,6 +171,9 @@ void win_cleanup_killswitch(platform_win_ctx_t *p);
 #  define WIN_DNS_METHOD_NETSH 2
 int win_setup_dns(platform_win_ctx_t *p);
 void win_cleanup_dns(platform_win_ctx_t *p);
+/* Remove NRPT rules left by mqvpn processes that no longer run (a crash).
+ * Called once at startup, before this process installs its own. */
+void win_dns_flush_stale_nrpt(void);
 
 /* platform_windows.c (net_mon.c calls win_pin_socket_to_iface and
  * schedule_next_tick; on_socket_read is the read callback

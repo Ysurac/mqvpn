@@ -575,7 +575,7 @@ if(Libevent_FOUND)
         libevent::core libevent::extra
         ${SSL_LIB}
         ${CRYPTO_LIB}
-        ws2_32 iphlpapi fwpuclnt ole32 crypt32
+        ws2_32 iphlpapi fwpuclnt ole32 crypt32 advapi32
     )
 else()
     target_include_directories(mqvpn PRIVATE ${EVENT_INCLUDE_DIR})
@@ -585,7 +585,7 @@ else()
         ${EVENT_LIB}
         ${SSL_LIB}
         ${CRYPTO_LIB}
-        ws2_32 iphlpapi fwpuclnt ole32 crypt32
+        ws2_32 iphlpapi fwpuclnt ole32 crypt32 advapi32
     )
 endif()
 

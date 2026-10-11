@@ -889,6 +889,11 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
 
+    /* NRPT rules a crashed mqvpn left behind would send every DNS query to
+     * servers that are no longer reachable: remove them before anything
+     * else touches DNS. */
+    win_dns_flush_stale_nrpt();
+
     /* Kill switch base set BEFORE the first connect, now that the server
      * address is known: blocking only from tunnel-up left every byte sent
      * during the handshake (and any later reconnect) unprotected. The TUN
