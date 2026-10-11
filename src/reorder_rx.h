@@ -63,6 +63,15 @@ void mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload,
 void mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us);
 
 /*
+ * Earliest armed gap deadline, in the now_us clock the caller passes to
+ * on_packet/tick, or UINT64_MAX when no gap timer is armed (or rx is NULL).
+ * O(1). The value may be earlier than the true deadline (a timer stopped since
+ * the last tick), never later, so a platform that schedules its next tick at
+ * this time never fires a gap timeout late; tick() recomputes it exactly.
+ */
+uint64_t mqvpn_reorder_rx_next_deadline_us(const mqvpn_reorder_rx_t *rx);
+
+/*
  * §17 statistics snapshot. Aggregates lifetime counters across every flow
  * (including flows already evicted) into *out. The §17 accounting identity
  * gap_count == gap_filled + gap_timeout + gap_overflow + gap_demote + gap_reset

@@ -2057,6 +2057,44 @@ test_rx_per_flow_recheck_after_flush(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* next_deadline_us: UINT64_MAX with nothing armed, the armed deadline while a
+ * gap waits (never later than it), recomputed by tick. */
+static void
+test_rx_next_deadline(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_wait_ms = 30;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(NULL) == UINT64_MAX, "NULL rx");
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == UINT64_MAX, "no flows");
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == UINT64_MAX, "in order: none");
+    n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 2000);
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == 2000 + 30000, "gap deadline");
+
+    /* a second flow arming later does not move the earliest deadline */
+    n = build_reorder_dgram(buf, 0, 0, 1, 5001, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 3000);
+    n = build_reorder_dgram(buf, 0, 2, 2, 5001, 443, 10);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 4000);
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == 2000 + 30000, "earliest kept");
+
+    /* tick before any deadline: exact recompute (both still armed) */
+    mqvpn_reorder_rx_tick(rx, 5000);
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == 2000 + 30000, "tick recompute");
+    /* tick at the first deadline: flow 5000 times out, flow 5001 remains */
+    mqvpn_reorder_rx_tick(rx, 2000 + 30000);
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == 4000 + 30000, "next flow's");
+    mqvpn_reorder_rx_tick(rx, 4000 + 30000);
+    ASSERT_TRUE(mqvpn_reorder_rx_next_deadline_us(rx) == UINT64_MAX, "all drained");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -2134,6 +2172,7 @@ main(void)
     test_rx_cap_clamped();
     test_rx_lru_eviction_and_bucket_growth();
     test_rx_per_flow_recheck_after_flush();
+    test_rx_next_deadline();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

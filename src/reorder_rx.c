@@ -348,6 +348,11 @@ struct mqvpn_reorder_rx {
      * counter but no separate allowance. */
     uint64_t ring_bytes_used;
 
+    /* Lower bound on the earliest armed gap deadline (UINT64_MAX = none).
+     * Lowered whenever a packet leaves a timer armed, recomputed exactly by
+     * every tick; it may be early (a stopped timer) but is never late. */
+    uint64_t next_deadline_us;
+
     /* §17 stats of flows that have been destroyed (idle eviction / teardown).
      * Folded in here so mqvpn_reorder_rx_get_stats reports lifetime totals that
      * survive eviction, not just the stats of currently-live flows. */
@@ -1228,6 +1233,7 @@ mqvpn_reorder_rx_new(const mqvpn_reorder_config_t *cfg, uint64_t hash_seed,
     rx->hash_seed = hash_seed;
     rx->deliver = deliver;
     rx->deliver_ctx = deliver_ctx;
+    rx->next_deadline_us = UINT64_MAX;
     rx->max_buckets = rx_pick_max_buckets(rx->cfg.max_flows);
     rx->n_buckets =
         MQVPN_RX_BUCKETS_INIT < rx->max_buckets ? MQVPN_RX_BUCKETS_INIT : rx->max_buckets;
@@ -1240,14 +1246,19 @@ mqvpn_reorder_rx_new(const mqvpn_reorder_config_t *cfg, uint64_t hash_seed,
 }
 
 /* Bookkeeping after a packet was processed: keep the recency list ordered by
- * last_progress_us. Every last_progress_us update writes the current now_us,
- * so "changed" means "most recent". */
+ * last_progress_us, and lower the cached earliest deadline if the flow's gap
+ * timer is armed (a packet is the only thing besides tick that arms one). Every
+ * last_progress_us update writes the current now_us, so "changed" means "most
+ * recent". */
 static void
 rx_after_flow_update(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f,
                      uint64_t progress_before)
 {
     if (f->last_progress_us != progress_before) {
         lru_touch(rx, f);
+    }
+    if (f->gap_timer_active && f->gap_deadline_us < rx->next_deadline_us) {
+        rx->next_deadline_us = f->gap_deadline_us;
     }
 }
 
@@ -1342,6 +1353,7 @@ mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
      * as mqvpn_tcp_lane_tick's n_tcp_flows==0 gate. (No cadence gate here: the
      * gap-timeout sweep has sub-second deadlines, so it must run every tick
      * while flows exist.) */
+    rx->next_deadline_us = UINT64_MAX; /* recomputed exactly by the sweep */
     if (rx->n_flows == 0) {
         return;
     }
@@ -1376,7 +1388,17 @@ mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
             flow_remove(rx, f);
             continue;
         }
+
+        if (f->gap_timer_active && f->gap_deadline_us < rx->next_deadline_us) {
+            rx->next_deadline_us = f->gap_deadline_us;
+        }
     }
+}
+
+uint64_t
+mqvpn_reorder_rx_next_deadline_us(const mqvpn_reorder_rx_t *rx)
+{
+    return rx ? rx->next_deadline_us : UINT64_MAX;
 }
 
 void
