@@ -159,7 +159,7 @@ struct svr_conn_s {
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
 
-    /* Auth identity (set on CONNECT-IP auth success) */
+    /* Wall-clock time the CONNECT-IP request was accepted (control API) */
     uint64_t connected_at_us;
 
     /* ICMP error rate limit for errors this session's traffic causes (both
@@ -1933,7 +1933,6 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
             return 0;
         }
 
-        stream->conn->connected_at_us = wall_us();
         /* A shared-key ("(global)") client may name itself with x-user, but
          * not as a configured user (impersonation) or with an unsafe name. */
         int wants_x_user = strcmp(username, "(global)") == 0 && hdrs->x_user[0] != '\0';
@@ -1957,6 +1956,10 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
     }
+
+    /* Set on every accepted request, auth or not: a server without auth
+     * otherwise reported connected_sec 0 for every client. */
+    stream->conn->connected_at_us = wall_us();
 
     /* Re-establishment: the previous tunnel STREAM closed (cb_request_close
      * cleared tunnel_established) but the conn-scoped session — sessions[]
