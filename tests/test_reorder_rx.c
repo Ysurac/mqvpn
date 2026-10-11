@@ -2027,6 +2027,36 @@ test_rx_lru_eviction_and_bucket_growth(void)
     mqvpn_reorder_rx_free(rx);
 }
 
+/* After an overflow_flush along the per-flow path, a packet that still does not
+ * fit the byte budget is dropped instead of overrunning it. */
+static void
+test_rx_per_flow_recheck_after_flush(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.max_buffer_bytes_per_flow = 300;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+    size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);          /* expected=1 */
+    n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443, 100); /* 128 B */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1001);
+    n = build_reorder_dgram(buf, 0, 4, 3, 5000, 443, 100); /* 128 B → 256 */
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1002);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+
+    /* seq 6, 228 B: over the limit → flush delivers seq2 (expected=3), seq4
+     * stays (128 B); 128 + 228 > 300 still → drop. */
+    n = build_reorder_dgram(buf, 0, 6, 4, 5000, 443, 200);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1003);
+    ASSERT_EQ_INT(f->expected, 3, "flush skipped the head gap only");
+    ASSERT_TRUE(f->buffer.bytes <= c.max_buffer_bytes_per_flow, "byte budget held");
+    ASSERT_EQ_INT(f->stats.per_flow_limit_drop_count, 1, "post-flush recheck dropped");
+    ASSERT_TRUE(!ring_contains(&f->buffer, 6), "seq6 not buffered");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after recheck drop");
+    mqvpn_reorder_rx_free(rx);
+}
+
 int
 main(void)
 {
@@ -2103,6 +2133,7 @@ main(void)
     test_rx_ring_memory_bounded_by_pool();
     test_rx_cap_clamped();
     test_rx_lru_eviction_and_bucket_growth();
+    test_rx_per_flow_recheck_after_flush();
 
     fprintf(stderr, "test_reorder_rx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

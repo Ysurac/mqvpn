@@ -17,6 +17,7 @@
 
 #include "reorder_rx.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -942,16 +943,15 @@ flush_buffer_for_demote(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
  */
 
 /* §13.5 per-flow limit predicate: would admitting `len` more bytes push the flow
- * past its packet-count cap or byte budget? count == cap is the §13.5 packet
- * limit (the window already bounds span via the far-ahead gate; this bounds
- * occupancy). bytes is checked against max_buffer_bytes_per_flow. */
+ * past its byte budget (max_buffer_bytes_per_flow)? The §13.5 packet-count
+ * limit needs no check of its own: every buffered seq lies in
+ * (expected, expected + cap) — the far-ahead gate bounds the span and expected
+ * itself is never buffered — so count <= cap - 1 always holds. */
 static int
 would_exceed_per_flow_limits(const mqvpn_reorder_rx_t *rx, const mqvpn_reorder_flow_t *f,
                              uint16_t len)
 {
-    if (f->buffer.count >= f->buffer.cap) {
-        return 1;
-    }
+    assert(f->buffer.count < f->buffer.cap);
     if (f->buffer.bytes + len > rx->cfg.max_buffer_bytes_per_flow) {
         return 1;
     }
@@ -1054,6 +1054,12 @@ buffer_admit(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
         reorder_process_result r = reclassify_after_flush(rx, f, seq, pkt, len, now_us);
         if (r != REORDER_BUFFERED) {
             return r; /* late / in-order+drain / far-ahead / duplicate resolved it */
+        }
+        /* One flush frees at least one packet but not necessarily `len` bytes:
+         * re-check before falling through, like the pool branch below. */
+        if (would_exceed_per_flow_limits(rx, f, len)) {
+            f->stats.per_flow_limit_drop_count++;
+            return REORDER_DROPPED_LIMIT;
         }
         /* still an in-window ahead packet → fall through to pool + insert below */
     }

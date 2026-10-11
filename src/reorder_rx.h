@@ -56,8 +56,9 @@ void mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload,
                                 size_t len, uint64_t now_us);
 
 /*
- * Periodic driver: fires gap timeouts and idle eviction. STUB in phase-1
- * part A (real timeout/eviction lands in part B). Maintains the §11.1 invariant.
+ * Periodic driver: fires gap timeouts whose deadline is <= now_us (§12.1) and
+ * evicts flows idle longer than ingress_idle_timeout_sec (§14). Maintains the
+ * §11.1 invariant.
  */
 void mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us);
 
