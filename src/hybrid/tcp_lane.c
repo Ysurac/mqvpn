@@ -566,9 +566,8 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * and the xquic-context driver (tcp_lane_downlink_pump_status's
                  * paused branch) only fires on a new READ_BODY/EMPTY_FIN
                  * notify — if the flow's own sndbuf is already empty (no
-                 * more ACKs coming) AND xquic's per-stream flow-control
-                 * window has filled (we stopped consuming recv_body, so
-                 * those notifies stopped too), NEITHER driver ever fires
+                 * more ACKs coming) AND no new response body arrives (the
+                 * server has nothing more to send), NEITHER driver ever fires
                  * again and the flow would stall holding its stash until
                  * idle eviction (or forever with tcp_idle_timeout_sec == 0).
                  * This 1 Hz sweep is the guaranteed third retry driver —
@@ -908,10 +907,17 @@ tcp_lane_downlink_pump_held(mqvpn_tcp_flow_t *f)
         }
         if (f->downlink_paused) {
             /* Still not enough sndbuf room — this xquic-side notify alone
-             * can't force it open; wait for the next lwIP sent-notify. Not
-             * data loss: xquic's own per-stream flow control backpressures
-             * the server the same way the uplink's EAGAIN path does in the
-             * other direction. A FIN cannot be lost across the pause,
+             * can't force it open; wait for the next lwIP sent-notify. No
+             * data loss — the bytes stay in xquic's body_buf — but no
+             * backpressure either. KNOWN LIMITATION: xquic's h3 layer keeps
+             * moving arriving DATA into body_buf and returning stream
+             * flow-control credit while recv_body is not called, so the
+             * server keeps sending and body_buf grows for as long as the
+             * inner receiver is slower than the tunnel. Bounding it without
+             * resetting legitimate downloads to a slow LAN device needs the
+             * xquic fork to stop pulling stream data into body_buf above a
+             * high-water mark; a lane-side cap could only reset the flow.
+             * A FIN cannot be lost across the pause,
              * in either shape: (a) fin still UNREAD in xquic's buffer at
              * pause time — the resumed drain simply reaches it on a later
              * recv call; (b) fin already READ, arriving ON the very chunk
