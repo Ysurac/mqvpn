@@ -492,9 +492,9 @@ test_discovery_two_writes(fake_cmd_env_t *e)
     set_route_get_output(e, "203.0.113.9 via 203.0.113.1 dev eth0 src 192.0.2.5 uid 0 \n"
                             "    cache \n");
     setenv("MQVPN_FAKE_IP_SPLIT_DELAY", "0.2", 1);
-    /* The Linux client runs with the default SIGPIPE disposition, which the
-     * forked `ip` inherits across exec; pin it so the scenario does not
-     * depend on how the test runner was started. */
+    /* The Linux client ignores SIGPIPE and the forked `ip` inherits that,
+     * but a caller that runs with the default disposition must work too:
+     * pin SIG_DFL so the fake dies of SIGPIPE if the pipe is closed early. */
     void (*prev)(int) = signal(SIGPIPE, SIG_DFL);
 
     platform_ctx_t p;

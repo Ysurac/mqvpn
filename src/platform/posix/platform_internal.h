@@ -75,6 +75,7 @@ struct platform_ctx {
     struct event *ev_tun;
     struct event *ev_sigint;
     struct event *ev_sigterm;
+    struct event *ev_sighup;  /* Linux: SIGHUP stops like SIGTERM */
     struct event *ev_status;  /* periodic status log timer */
     struct event *ev_recover; /* periodic dropped-path re-add timer (3s) */
 

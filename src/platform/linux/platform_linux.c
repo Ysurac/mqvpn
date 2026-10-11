@@ -8,7 +8,7 @@
  *   - libevent event loop driving tick()
  *   - TUN device creation and I/O
  *   - UDP path sockets, one slot each (path_table.c)
- *   - Signal handling (SIGINT/SIGTERM)
+ *   - Signal handling (SIGINT/SIGTERM/SIGHUP; SIGPIPE ignored)
  *
  * Routing and killswitch are in separate files (routing.c, killswitch.c).
  */
@@ -567,6 +567,28 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     schedule_next_tick(p);
 }
 
+/* Process-wide signal setup shared by client and server.
+ *
+ * SIGPIPE is ignored: a write to a control-API client that went away, or a
+ * log write to a dead `| tee`, must fail with EPIPE instead of killing the
+ * process before its cleanup (kill switch, routes, DNS) runs. Children
+ * (ip, iptables, resolvectl) inherit the SIG_IGN across exec, as on Darwin
+ * (platform_darwin.c): a diagnostic written to a dead pipe then fails
+ * instead of killing the tool mid-cleanup.
+ *
+ * SIGHUP stops the process like SIGTERM, so the cleanup runs, unless it was
+ * already ignored on entry (`nohup`): that choice is kept. mqvpn has no
+ * reload, so there is no other meaning to preserve. Returns 1 when SIGHUP
+ * should be handled. */
+static int
+platform_signals_init(void)
+{
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa;
+    if (sigaction(SIGHUP, NULL, &sa) == 0 && sa.sa_handler == SIG_IGN) return 0;
+    return 1;
+}
+
 static void
 on_signal(evutil_socket_t sig, short what, void *arg)
 {
@@ -792,6 +814,7 @@ platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_
 int
 linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 {
+    int handle_sighup = platform_signals_init();
     int rc = 1;
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -886,18 +909,6 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_client_set_server_addr(ctx.client, (struct sockaddr *)&ctx.server_addr,
                                  ctx.server_addrlen);
 
-    /* Kill switch: block everything but the server before the first packet
-     * goes out, and keep it up until the process exits — reconnects and TUN
-     * rebuilds only add/remove the TUN ACCEPT. Rules a crashed instance
-     * left behind go first. */
-    if (ctx.killswitch_enabled) {
-        killswitch_flush_stale();
-        if (setup_killswitch(&ctx) < 0) {
-            LOG_ERR("killswitch setup failed, aborting");
-            goto cleanup;
-        }
-    }
-
     /* Create event base */
     ctx.eb = event_base_new();
     if (!ctx.eb) {
@@ -980,6 +991,10 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.ev_sigterm = evsignal_new(ctx.eb, SIGTERM, on_signal, &ctx);
     event_add(ctx.ev_sigint, NULL);
     event_add(ctx.ev_sigterm, NULL);
+    if (handle_sighup) {
+        ctx.ev_sighup = evsignal_new(ctx.eb, SIGHUP, on_signal, &ctx);
+        if (ctx.ev_sighup) event_add(ctx.ev_sighup, NULL);
+    }
 
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
@@ -989,6 +1004,19 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         ctx.ctrl = ctrl_socket_create(ctx.eb, cfg->control_addr, cfg->control_port, NULL,
                                       &ctx, cli_rx_stats, &ctx);
         if (!ctx.ctrl) LOG_WRN("client control API setup failed — continuing without it");
+    }
+
+    /* Kill switch: block everything but the server before the first packet
+     * goes out, and keep it up until the process exits — reconnects and
+     * TUN rebuilds only add/remove the TUN ACCEPT. Rules a crashed instance
+     * left behind go first. Done after the signal handlers are armed, so a
+     * SIGTERM from here on still reaches the cleanup. */
+    if (ctx.killswitch_enabled) {
+        killswitch_flush_stale();
+        if (setup_killswitch(&ctx) < 0) {
+            LOG_ERR("killswitch setup failed, aborting");
+            goto cleanup;
+        }
     }
 
     /* Connect */
@@ -1071,6 +1099,10 @@ cleanup:
         event_del(ctx.ev_sigterm);
         event_free(ctx.ev_sigterm);
     }
+    if (ctx.ev_sighup) {
+        event_del(ctx.ev_sighup);
+        event_free(ctx.ev_sighup);
+    }
     if (ctx.ev_status) {
         event_del(ctx.ev_status);
         event_free(ctx.ev_status);
@@ -1127,6 +1159,7 @@ typedef struct server_platform_ctx_s {
     struct event *ev_socket;
     struct event *ev_sigint;
     struct event *ev_sigterm;
+    struct event *ev_sighup;
     mqvpn_tun_t tun;
     int tun_up;
     int udp_fd;
@@ -1489,6 +1522,7 @@ svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
 int
 linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 {
+    int handle_sighup = platform_signals_init();
     int rc = 1;
     server_platform_ctx_t sp;
     memset(&sp, 0, sizeof(sp));
@@ -1648,6 +1682,10 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.ev_sigterm = evsignal_new(sp.eb, SIGTERM, svr_on_signal, &sp);
     event_add(sp.ev_sigint, NULL);
     event_add(sp.ev_sigterm, NULL);
+    if (handle_sighup) {
+        sp.ev_sighup = evsignal_new(sp.eb, SIGHUP, svr_on_signal, &sp);
+        if (sp.ev_sighup) event_add(sp.ev_sighup, NULL);
+    }
 
     /* Tick timer */
     sp.ev_tick = event_new(sp.eb, -1, 0, svr_on_tick, &sp);
@@ -1728,6 +1766,10 @@ cleanup:
     if (sp.ev_sigterm) {
         event_del(sp.ev_sigterm);
         event_free(sp.ev_sigterm);
+    }
+    if (sp.ev_sighup) {
+        event_del(sp.ev_sighup);
+        event_free(sp.ev_sighup);
     }
     /* After server destroy: teardown may call egress_fd_unregister for any
      * still-open egress fds, which scans this registry — free it only once
