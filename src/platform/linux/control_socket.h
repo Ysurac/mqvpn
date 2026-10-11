@@ -7,7 +7,11 @@
  * Listens on a TCP port (default: 127.0.0.1 only) and accepts JSON commands.
  * All I/O is driven by the same libevent loop as the VPN — no locking needed.
  *
- * Protocol: one JSON object per connection (newline-terminated or EOF).
+ * Protocol: one JSON object per connection. The first non-whitespace byte
+ * must be '{' (anything else, e.g. an HTTP request, gets
+ * {"ok":false,"error":"invalid request"}); the request ends at the object's
+ * matching '}' (or EOF), and only that object is parsed. The whole exchange
+ * must finish within 5 s of accept.
  * Response: one JSON object followed by a newline, then connection closes.
  *
  * Example:

@@ -70,14 +70,18 @@ static int g_all_fec_n = 0;
 static int g_reorder_rc = 0;
 
 /* ── Server API stubs ────────────────────────────────────────────────────── */
+static int g_add_user_calls = 0;
+static int g_set_fixed_ip_calls = 0;
+static int g_remove_user_calls = 0;
+
 int mqvpn_server_add_user(mqvpn_server_t *s, const char *n, const char *k)
-{ (void)s; (void)n; (void)k; return g_add_user_rc; }
+{ (void)s; (void)n; (void)k; g_add_user_calls++; return g_add_user_rc; }
 
 int mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *n, const char *ip)
-{ (void)s; (void)n; (void)ip; return g_set_fixed_ip_rc; }
+{ (void)s; (void)n; (void)ip; g_set_fixed_ip_calls++; return g_set_fixed_ip_rc; }
 
 int mqvpn_server_remove_user(mqvpn_server_t *s, const char *n)
-{ (void)s; (void)n; return g_remove_user_rc; }
+{ (void)s; (void)n; g_remove_user_calls++; return g_remove_user_rc; }
 
 int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
 {
@@ -1426,6 +1430,320 @@ TEST(list_paths_server_mode_rejected)
     ASSERT_CONTAINS(resp, "not supported in server mode");
 }
 
+/* ── Strict numeric arguments ────────────────────────────────────────────── */
+
+TEST(set_path_weight_rejects_non_numbers)
+{
+    const char *bad[] = {
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":\"3\"}",
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":-1}",
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":3abc}",
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":1.5}",
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":true}",
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":99999999999999999999}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char resp[256];
+        call_dispatch_client(bad[i], resp, sizeof(resp));
+        ASSERT_CONTAINS(resp, "weight must be 0-65535");
+    }
+}
+
+TEST(set_path_dscp_mask_rejects_non_numbers)
+{
+    const char *bad[] = {
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":\"3\"}",
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":-1}",
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":7x}",
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":0x}",
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":0x1g}",
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":0x10000000000000000}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char resp[256];
+        call_dispatch_client(bad[i], resp, sizeof(resp));
+        ASSERT_CONTAINS(resp, "\"ok\":false");
+        ASSERT_CONTAINS(resp, "dscp_mask must be a non-negative integer");
+    }
+}
+
+/* ── add_user atomicity ──────────────────────────────────────────────────── */
+
+TEST(add_user_new_user_rolled_back_on_bad_fixed_ip)
+{
+    g_add_user_rc = MQVPN_OK;
+    g_set_fixed_ip_rc = MQVPN_ERR_INVALID_ARG;
+    g_list_users_n = 0;
+    g_remove_user_calls = 0;
+    char resp[256];
+    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"dave\",\"key\":\"k\","
+                  "\"fixed_ip\":\"10.0.0.99\"}",
+                  resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "fixed_ip invalid");
+    if (g_remove_user_calls != 1) {
+        printf("FAIL\n    new user not removed after fixed_ip failure\n");
+        exit(1);
+    }
+    g_set_fixed_ip_rc = MQVPN_OK;
+}
+
+TEST(add_user_existing_user_untouched_on_bad_fixed_ip)
+{
+    g_add_user_rc = MQVPN_OK;
+    g_set_fixed_ip_rc = MQVPN_ERR_INVALID_ARG;
+    g_list_users_n = 1;
+    snprintf(g_list_users_names[0], sizeof(g_list_users_names[0]), "erin");
+    g_add_user_calls = 0;
+    g_remove_user_calls = 0;
+    char resp[256];
+    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"erin\",\"key\":\"newkey\","
+                  "\"fixed_ip\":\"10.0.0.99\"}",
+                  resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "fixed_ip invalid");
+    if (g_add_user_calls != 0 || g_remove_user_calls != 0) {
+        printf("FAIL\n    existing user's key changed or user removed\n");
+        exit(1);
+    }
+    g_list_users_n = 0;
+    g_set_fixed_ip_rc = MQVPN_OK;
+}
+
+TEST(add_user_rejects_overlong_key)
+{
+    char req[600];
+    char key[300];
+    memset(key, 'k', sizeof(key) - 1);
+    key[sizeof(key) - 1] = '\0';
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"a\",\"key\":\"%s\"}", key);
+    g_add_user_calls = 0;
+    char resp[256];
+    call_dispatch(req, resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "name and key required");
+    if (g_add_user_calls != 0) {
+        printf("FAIL\n    over-long key was stored shortened\n");
+        exit(1);
+    }
+}
+
+/* ── Top-level-only key lookup and escaping ──────────────────────────────── */
+
+TEST(nested_cmd_is_not_a_command)
+{
+    char resp[256];
+    call_dispatch("{\"x\":{\"cmd\":\"add_user\",\"name\":\"a\",\"key\":\"b\"}}", resp,
+                  sizeof(resp));
+    ASSERT_CONTAINS(resp, "missing cmd");
+}
+
+TEST(overlong_cmd_is_unknown)
+{
+    char resp[256];
+    call_dispatch("{\"cmd\":\"get_status_with_a_very_long_suffix_appended\"}", resp,
+                  sizeof(resp));
+    ASSERT_CONTAINS(resp, "unknown cmd");
+}
+
+TEST(client_get_status_escapes_username)
+{
+    g_cli_info_rc = 1;
+    memset(&g_cli_info_tmpl, 0, sizeof(g_cli_info_tmpl));
+    snprintf(g_cli_info_tmpl.username, sizeof(g_cli_info_tmpl.username), "a\"b\\c\n");
+    char resp[4096];
+    call_dispatch_client("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
+    ASSERT_CONTAINS(resp, "\"user\":\"a\\\"b\\\\c\\u000a\"");
+    g_cli_info_rc = 0;
+}
+
+/* ── Request framing ─────────────────────────────────────────────────────── */
+
+static int
+frame(const char *s, char *cut_out, size_t cut_len)
+{
+    ctrl_conn_t c;
+    memset(&c, 0, sizeof(c));
+    c.req_len = strlen(s);
+    memcpy(c.req, s, c.req_len + 1);
+    int r = ctrl_frame_request(&c);
+    if (cut_out) snprintf(cut_out, cut_len, "%s", c.req);
+    return r;
+}
+
+TEST(frame_requires_json_object)
+{
+    char cut[128];
+    if (frame("POST / HTTP/1.1\r\n", NULL, 0) != -1 || frame("  x", NULL, 0) != -1 ||
+        frame("\n\n", NULL, 0) != 0 || frame(" {\"cmd\":\"get_", NULL, 0) != 0 ||
+        frame("{\"cmd\":\"get_status\"}\n{\"cmd\":\"add_user\"}", cut, sizeof(cut)) != 1) {
+        printf("FAIL\n    framing verdicts wrong\n");
+        exit(1);
+    }
+    /* Only the first object survives. */
+    ASSERT_STR_EQ(cut, "{\"cmd\":\"get_status\"}");
+    if (frame("{\"a\":\"}\\\"{\",\"b\":{}}", cut, sizeof(cut)) != 1) {
+        printf("FAIL\n    braces in strings miscounted\n");
+        exit(1);
+    }
+}
+
+/* ── Socket I/O: real libevent loop on a loopback listener ──────────────── */
+
+#include <netinet/in.h>
+#include <time.h>
+
+static int
+loopback_listener(int *port)
+{
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (lfd < 0 || bind(lfd, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(lfd, 8) < 0)
+        return -1;
+    socklen_t alen = sizeof(a);
+    getsockname(lfd, (struct sockaddr *)&a, &alen);
+    *port = ntohs(a.sin_port);
+    return lfd;
+}
+
+static int
+loopback_connect(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0) return -1;
+    return fd;
+}
+
+/* A ctrl_socket_t wired to a fresh event base and loopback listener; the
+ * accept event is the real one so the whole read/reply path runs. */
+static ctrl_socket_t *
+io_socket(int *port)
+{
+    ctrl_socket_t *cs = calloc(1, sizeof(*cs));
+    cs->eb = event_base_new();
+    cs->listen_fd = loopback_listener(port);
+    cs->rx_stats = test_rx_stats;
+    cs->ev_accept = event_new(cs->eb, cs->listen_fd, EV_READ | EV_PERSIST, ctrl_on_accept, cs);
+    event_add(cs->ev_accept, NULL);
+    return cs;
+}
+
+static void
+io_socket_free(ctrl_socket_t *cs)
+{
+    struct event_base *eb = cs->eb;
+    ctrl_socket_destroy(cs); /* also frees in-flight connections */
+    event_base_free(eb);
+}
+
+static void
+run_loop_ms(struct event_base *eb, int ms)
+{
+    struct timeval tv = {.tv_sec = ms / 1000, .tv_usec = (ms % 1000) * 1000};
+    event_base_loopexit(eb, &tv);
+    event_base_dispatch(eb);
+}
+
+/* Read everything the server sends until EOF (blocking, bounded). */
+static size_t
+read_all(int fd, char *buf, size_t cap)
+{
+    struct timeval tv = {.tv_sec = 2};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    size_t got = 0;
+    while (got + 1 < cap) {
+        ssize_t n = read(fd, buf + got, cap - 1 - got);
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    return got;
+}
+
+TEST(io_http_request_refused)
+{
+    int port = 0;
+    ctrl_socket_t *cs = io_socket(&port);
+    int fd = loopback_connect(port);
+    const char *http = "POST / HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\n\r\n"
+                       "{\"cmd\":\"add_user\",\"name\":\"evil\",\"key\":\"k\"}";
+    g_add_user_calls = 0;
+    (void)write(fd, http, strlen(http));
+    run_loop_ms(cs->eb, 200);
+    char buf[512];
+    read_all(fd, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "{\"ok\":false,\"error\":\"invalid request\"}\n");
+    if (g_add_user_calls != 0 || cs->n_conns != 0) {
+        printf("FAIL\n    HTTP body was dispatched or connection left open\n");
+        exit(1);
+    }
+    close(fd);
+    io_socket_free(cs);
+}
+
+TEST(io_newline_json_request_answered)
+{
+    int port = 0;
+    ctrl_socket_t *cs = io_socket(&port);
+    int fd = loopback_connect(port);
+    const char *req = "{\"cmd\":\"list_users\"}\n";
+    (void)write(fd, req, strlen(req));
+    run_loop_ms(cs->eb, 200);
+    char buf[512];
+    read_all(fd, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "{\"ok\":true,\"users\":[]}\n");
+    close(fd);
+    io_socket_free(cs);
+}
+
+/* The 5 s limit is absolute: trickling a byte now and then must not keep a
+ * connection (and one of the 8 slots) alive past it. */
+TEST(io_deadline_is_absolute)
+{
+    int port = 0;
+    ctrl_socket_t *cs = io_socket(&port);
+    int fd = loopback_connect(port);
+    /* 25 bytes at one per 400 ms = 10 s of trickle if nothing stops it. */
+    const char *trickle = "{\"cmd\":\"list_users\"     ";
+    time_t start = time(NULL);
+    run_loop_ms(cs->eb, 100); /* accept */
+    for (size_t i = 0; i < strlen(trickle) && cs->n_conns > 0; i++) {
+        (void)send(fd, trickle + i, 1, MSG_NOSIGNAL);
+        run_loop_ms(cs->eb, 400);
+    }
+    if (cs->n_conns != 0 || time(NULL) - start > CTRL_CONN_DEADLINE_SEC + 2) {
+        printf("FAIL\n    trickling client outlived the deadline (n_conns=%d)\n",
+               cs->n_conns);
+        exit(1);
+    }
+    close(fd);
+    io_socket_free(cs);
+}
+
+/* Destroying the socket with connections still open must free them (ASan's
+ * leak check runs at exit). */
+TEST(io_destroy_frees_inflight)
+{
+    int port = 0;
+    ctrl_socket_t *cs = io_socket(&port);
+    int fd1 = loopback_connect(port);
+    int fd2 = loopback_connect(port);
+    (void)write(fd1, "{", 1);
+    run_loop_ms(cs->eb, 200);
+    if (cs->n_conns != 2) {
+        printf("FAIL\n    expected 2 in-flight connections, got %d\n", cs->n_conns);
+        exit(1);
+    }
+    io_socket_free(cs);
+    close(fd1);
+    close(fd2);
+}
+
 int
 main(void)
 {
@@ -1528,6 +1846,21 @@ main(void)
     run_list_paths_empty();
     run_list_paths_two_entries();
     run_list_paths_server_mode_rejected();
+
+    run_set_path_weight_rejects_non_numbers();
+    run_set_path_dscp_mask_rejects_non_numbers();
+    run_add_user_new_user_rolled_back_on_bad_fixed_ip();
+    run_add_user_existing_user_untouched_on_bad_fixed_ip();
+    run_add_user_rejects_overlong_key();
+    run_nested_cmd_is_not_a_command();
+    run_overlong_cmd_is_unknown();
+    run_client_get_status_escapes_username();
+    run_frame_requires_json_object();
+
+    run_io_http_request_refused();
+    run_io_newline_json_request_answered();
+    run_io_deadline_is_absolute();
+    run_io_destroy_frees_inflight();
 
     printf("\n  %d/%d tests passed\n", g_passed, g_run);
     return g_passed == g_run ? 0 : 1;

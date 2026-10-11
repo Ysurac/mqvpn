@@ -102,21 +102,30 @@
 
 #define CTRL_MAX_REQ          4096 /* per-connection request buffer */
 #define CTRL_MAX_CONNS        8    /* max concurrent control connections */
-#define CTRL_READ_TIMEOUT_SEC 5    /* close idle connections after 5s */
+#define CTRL_CONN_DEADLINE_SEC 5   /* whole request+reply must finish within 5s */
 /* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
  * can verify the worst-case JSON size fits. */
+
+#ifndef MSG_NOSIGNAL
+#  define MSG_NOSIGNAL 0 /* platforms without it rely on SO_NOSIGPIPE/SIG_IGN */
+#endif
 
 /* JSON helpers (json_find_key → json_find_key, json_read_string → json_read_string)
  * are provided by json_mini.h */
 
 /* ── Per-connection state ────────────────────────────────────────────────── */
 
-typedef struct {
+typedef struct ctrl_conn_s {
     int fd;
-    struct event *ev;
+    struct event *ev;       /* EV_READ while reading, then EV_WRITE for the reply */
+    struct event *deadline; /* one-shot: absolute per-connection deadline */
     char req[CTRL_MAX_REQ + 1];
     size_t req_len;
+    char *out; /* pending reply (heap), NULL while still reading */
+    size_t out_len;
+    size_t out_off;
     ctrl_socket_t *cs;
+    struct ctrl_conn_s *prev, *next; /* cs->conns list, for destroy */
 } ctrl_conn_t;
 
 /* ── Server handle ───────────────────────────────────────────────────────── */
@@ -132,10 +141,70 @@ struct ctrl_socket_s {
      * mqvpn_stats_t. NULL fn = report 0. */
     ctrl_rx_stats_fn rx_stats;
     void *rx_ctx;
-    int n_conns; /* active control connections */
+    int n_conns;        /* active control connections */
+    ctrl_conn_t *conns; /* the active connections themselves */
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
+
+/* JSON-escape `in` into `out` (always NUL-terminated; cut at a character
+ * boundary if it does not fit). Server-side user names are validated at
+ * intake, so this is a no-op for them; it guards names that come from
+ * elsewhere (a client-mode process echoes its own configured username). */
+static const char *
+ctrl_json_escape(const char *in, char *out, size_t out_len)
+{
+    size_t j = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p; p++) {
+        char tmp[8];
+        size_t n;
+        if (*p == '"' || *p == '\\') {
+            tmp[0] = '\\';
+            tmp[1] = (char)*p;
+            n = 2;
+        } else if (*p < 0x20) {
+            n = (size_t)snprintf(tmp, sizeof(tmp), "\\u%04x", *p);
+        } else {
+            tmp[0] = (char)*p;
+            n = 1;
+        }
+        if (j + n >= out_len) break;
+        memcpy(out + j, tmp, n);
+        j += n;
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/* "weight": a JSON number 0..65535 — no string, sign, fraction or junk. */
+static int
+ctrl_read_weight(const char *v, uint32_t *out)
+{
+    uint64_t w = 0;
+    if (json_read_u64_strict(v, &w) < 0 || w > 65535) return -1;
+    *out = (uint32_t)w;
+    return 0;
+}
+
+/* "dscp_mask": a non-negative JSON number, or a bare 0x-prefixed hex token
+ * (a documented extension: masks built from MQVPN_DSCP_BIT() read more
+ * naturally in hex). No string, sign, overflow or trailing junk. */
+static int
+ctrl_read_dscp_mask(const char *v, uint64_t *out)
+{
+    if (!v) return -1;
+    if (v[0] == '0' && (v[1] == 'x' || v[1] == 'X')) {
+        const char *d = v + 2;
+        if (!isxdigit((unsigned char)*d)) return -1;
+        errno = 0;
+        char *end = NULL;
+        unsigned long long m = strtoull(d, &end, 16);
+        if (errno == ERANGE || !json_value_has_valid_end(end)) return -1;
+        *out = (uint64_t)m;
+        return 0;
+    }
+    return json_read_u64_strict(v, out);
+}
 
 static int
 ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
@@ -150,17 +219,37 @@ ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *c
                         "{\"ok\":false,\"error\":\"name and key required\"}");
 
     const char *fv = json_find_key(req, "fixed_ip");
-    if (fv) json_read_string(fv, fixed_ip, sizeof(fixed_ip));
+    if (fv && json_read_string(fv, fixed_ip, sizeof(fixed_ip)) != 0)
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"fixed_ip invalid or unavailable\"}");
+
+    /* Atomic: with a fixed_ip, nothing is committed unless the address is
+     * accepted. An existing user gets the fixed_ip applied first, so a
+     * refused address leaves its key untouched; a new user is added, and
+     * removed again if the address is refused (it cannot have a session yet:
+     * the loop is single-threaded). */
+    int existed = 0;
+    if (fixed_ip[0]) {
+        char unames[MQVPN_MAX_USERS][64];
+        int n = mqvpn_server_list_users(server, unames, MQVPN_MAX_USERS);
+        for (int i = 0; i < n && !existed; i++)
+            existed = strcmp(unames[i], name) == 0;
+        if (existed && mqvpn_server_set_user_fixed_ip(server, name, fixed_ip) != MQVPN_OK)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"fixed_ip invalid or unavailable\"}");
+    }
 
     int rc = mqvpn_server_add_user(server, name, key);
     if (rc != MQVPN_OK)
         return snprintf(resp, resp_len,
                         "{\"ok\":false,\"error\":\"add_user failed (%d)\"}", rc);
-    if (fixed_ip[0]) {
+    if (fixed_ip[0] && !existed) {
         rc = mqvpn_server_set_user_fixed_ip(server, name, fixed_ip);
-        if (rc != MQVPN_OK)
+        if (rc != MQVPN_OK) {
+            (void)mqvpn_server_remove_user(server, name);
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"fixed_ip invalid or unavailable\"}");
+        }
     }
     return snprintf(resp, resp_len, "{\"ok\":true}");
 }
@@ -175,7 +264,12 @@ ctrl_cmd_set_user_fixed_ip(const char *req, char *resp, size_t resp_len,
     const char *fv = json_find_key(req, "fixed_ip");
     if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"name required\"}");
-    if (fv) json_read_string(fv, fixed_ip, sizeof(fixed_ip));
+    /* A fixed_ip that is not a string or does not fit is refused rather than
+     * applied shortened (absent still means "clear"). */
+    if (fv && json_read_string(fv, fixed_ip, sizeof(fixed_ip)) != 0)
+        return snprintf(resp, resp_len,
+                        "{\"ok\":false,\"error\":\"set_user_fixed_ip failed (%d)\"}",
+                        MQVPN_ERR_INVALID_ARG);
     int rc = mqvpn_server_set_user_fixed_ip(server, name, fixed_ip);
     if (rc != MQVPN_OK)
         return snprintf(resp, resp_len,
@@ -351,12 +445,13 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                                 : 0;
 
         if (i > 0) APPEND(",");
+        char uesc[sizeof(ci->username) * 6];
         APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
                "\"connected_sec\":%" PRIu64 ","
                "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
                "\"n_paths\":%d,\"paths\":[",
-               ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
-               ci->n_paths);
+               ctrl_json_escape(ci->username, uesc, sizeof(uesc)), ci->endpoint, conn_sec,
+               ci->bytes_tx, ci->bytes_rx, ci->n_paths);
 
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];
@@ -463,12 +558,11 @@ ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket
     if (rc == 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"user not found\"}");
 
-    /* `user` is echoed without explicit JSON-escape: mqvpn_server_add_user
-     * and add_user_entry reject quote, backslash, and control bytes at
-     * intake (src/auth.c), so any user that survived to the sessions[]
-     * table cannot produce JSON-unsafe output here. If a future code path
-     * registers users via an unvalidated source (e.g., LDAP bridge), this
-     * point must add a JSON-safe escape pass. */
+    /* Server-side users are validated at intake (no quote, backslash or
+     * control byte), but a client-mode process compares against its own
+     * configured username, so escape the echo either way. */
+    char uesc[sizeof(user) * 6];
+    ctrl_json_escape(user, uesc, sizeof(uesc));
     return snprintf(resp, resp_len,
                     "{\"ok\":true,\"user\":\"%s\","
                     "\"enable_fec\":%u,\"mp_state\":%u,"
@@ -477,7 +571,7 @@ ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket
                     "\"lost_dgram_cnt\":%" PRIu64 ","
                     "\"total_app_bytes\":%" PRIu64 ","
                     "\"standby_app_bytes\":%" PRIu64 "}",
-                    user, (unsigned)fs.enable_fec, (unsigned)fs.mp_state,
+                    uesc, (unsigned)fs.enable_fec, (unsigned)fs.mp_state,
                     fs.mp_state_label ? fs.mp_state_label : "unknown", fs.fec_send_cnt,
                     fs.fec_recover_cnt, fs.lost_dgram_cnt, fs.total_app_bytes,
                     fs.standby_app_bytes);
@@ -542,6 +636,8 @@ ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
     for (int i = 0; i < n; i++) {
         mqvpn_internal_fec_entry_t *e = &entries[i];
         if (i > 0) APPEND(",");
+        char uesc[sizeof(e->user) * 6];
+        ctrl_json_escape(e->user, uesc, sizeof(uesc));
         APPEND("{\"user\":\"%s\","
                "\"enable_fec\":%u,\"mp_state\":%u,"
                "\"mp_state_label\":\"%s\","
@@ -549,7 +645,7 @@ ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
                "\"lost_dgram_cnt\":%" PRIu64 ","
                "\"total_app_bytes\":%" PRIu64 ","
                "\"standby_app_bytes\":%" PRIu64 "}",
-               e->user, (unsigned)e->stats.enable_fec, (unsigned)e->stats.mp_state,
+               uesc, (unsigned)e->stats.enable_fec, (unsigned)e->stats.mp_state,
                e->stats.mp_state_label ? e->stats.mp_state_label : "unknown",
                e->stats.fec_send_cnt, e->stats.fec_recover_cnt, e->stats.lost_dgram_cnt,
                e->stats.total_app_bytes, e->stats.standby_app_bytes);
@@ -645,7 +741,10 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
     platform_ctx_t *cli_ctx = cs->cli_ctx;
     char cmd[32] = {0};
     const char *v = json_find_key(req, "cmd");
-    if (!v || json_read_string(v, cmd, sizeof(cmd)) < 0)
+    int crc = v ? json_read_string(v, cmd, sizeof(cmd)) : JSON_STR_MALFORMED;
+    if (crc == JSON_STR_TRUNCATED) /* longer than any command name */
+        return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
+    if (crc != 0)
         return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"missing cmd\"}");
 
     /* Path management commands require cli_ctx (client mode only) */
@@ -668,8 +767,8 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
         const char *wv = json_find_key(req, "weight");
         if (!wv)
             return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"weight required\"}");
-        long w = strtol(wv, NULL, 10);
-        if (w < 0 || w > 65535)
+        uint32_t w = 0;
+        if (ctrl_read_weight(wv, &w) < 0)
             return snprintf(resp, resp_len,
                             "{\"ok\":false,\"error\":\"weight must be 0-65535\"}");
 
@@ -717,9 +816,13 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
         const char *mv = json_find_key(req, "dscp_mask");
         if (!mv)
             return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"dscp_mask required\"}");
-        /* Base 0: accepts both decimal and 0x-prefixed hex — masks built from
-         * MQVPN_DSCP_BIT() OR'd together read more naturally in hex. */
-        uint64_t m = (uint64_t)strtoull(mv, NULL, 0);
+        /* Decimal or 0x-prefixed hex — masks built from MQVPN_DSCP_BIT()
+         * OR'd together read more naturally in hex. */
+        uint64_t m = 0;
+        if (ctrl_read_dscp_mask(mv, &m) < 0)
+            return snprintf(resp, resp_len,
+                            "{\"ok\":false,\"error\":\"dscp_mask must be a non-negative "
+                            "integer\"}");
 
         if (cli_ctx) {
             /* Client mode: keyed by local interface name. */
@@ -796,72 +899,222 @@ dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
     return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
 }
 
-/* ── Connection read handler ─────────────────────────────────────────────── */
+/* ── Connection handling ─────────────────────────────────────────────────── */
 
-/* Common per-connection teardown: unhook the libevent event, close the fd,
+/* Common per-connection teardown: unhook the libevent events, close the fd,
  * release the connection's slot in the ctrl-socket's active-connection
- * count, and free the connection struct. conn->fd is set once in
- * ctrl_on_accept() and never changes, so it always matches the fd the
- * caller's event fired on. */
+ * count, unlink it from the connection list and free it. conn->fd is set
+ * once in ctrl_on_accept() and never changes. */
 static void
 ctrl_conn_close(ctrl_conn_t *conn)
 {
+    if (conn->ev) {
+        event_del(conn->ev);
+        event_free(conn->ev);
+    }
+    if (conn->deadline) {
+        event_del(conn->deadline);
+        event_free(conn->deadline);
+    }
+    close(conn->fd);
+    if (conn->prev)
+        conn->prev->next = conn->next;
+    else
+        conn->cs->conns = conn->next;
+    if (conn->next) conn->next->prev = conn->prev;
+    conn->cs->n_conns--;
+    free(conn->out);
+    free(conn);
+}
+
+/* Absolute deadline (control-api.md §1): a connection that has not finished
+ * its request and reply within CTRL_CONN_DEADLINE_SEC is closed, however
+ * slowly it trickles bytes in or reads the reply out. */
+static void
+ctrl_on_deadline(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    ctrl_conn_close((ctrl_conn_t *)arg);
+}
+
+/* Push as much of the pending reply as the socket takes. MSG_NOSIGNAL: a
+ * peer that already closed must not raise SIGPIPE. Returns 1 when the whole
+ * reply is out (or the peer is gone), 0 when the rest must wait for EV_WRITE. */
+static int
+ctrl_conn_flush(ctrl_conn_t *conn)
+{
+    while (conn->out_off < conn->out_len) {
+        ssize_t n = send(conn->fd, conn->out + conn->out_off,
+                         conn->out_len - conn->out_off, MSG_NOSIGNAL);
+        if (n > 0) {
+            conn->out_off += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return 0;
+        } else {
+            return 1; /* peer gone: nothing more to deliver */
+        }
+    }
+    return 1;
+}
+
+/* Finish a connection whose reply is fully written: discard whatever request
+ * bytes are still queued (closing with unread data would make the kernel
+ * send RST, which can destroy the reply in flight), then close. */
+static void
+ctrl_conn_finish(ctrl_conn_t *conn)
+{
+    char scratch[512];
+    for (int i = 0; i < 8; i++) {
+        ssize_t n = recv(conn->fd, scratch, sizeof(scratch), 0);
+        if (n <= 0) break;
+    }
+    ctrl_conn_close(conn);
+}
+
+static void
+ctrl_on_write(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    ctrl_conn_t *conn = (ctrl_conn_t *)arg;
+    if (ctrl_conn_flush(conn)) ctrl_conn_finish(conn);
+}
+
+/* Queue `len` bytes of `buf` (taken over by the connection) as the reply and
+ * start writing it: inline if the socket takes it all, else via EV_WRITE. */
+static void
+ctrl_conn_reply(ctrl_conn_t *conn, char *buf, size_t len)
+{
     event_del(conn->ev);
     event_free(conn->ev);
-    close(conn->fd);
-    conn->cs->n_conns--;
-    free(conn);
+    conn->ev = NULL;
+    conn->out = buf;
+    conn->out_len = len;
+    conn->out_off = 0;
+
+    if (ctrl_conn_flush(conn)) {
+        ctrl_conn_finish(conn);
+        return;
+    }
+    conn->ev = event_new(conn->cs->eb, conn->fd, EV_WRITE | EV_PERSIST, ctrl_on_write, conn);
+    if (!conn->ev || event_add(conn->ev, NULL) < 0) ctrl_conn_close(conn);
+}
+
+static void
+ctrl_conn_reply_str(ctrl_conn_t *conn, const char *msg)
+{
+    size_t len = strlen(msg);
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        ctrl_conn_close(conn);
+        return;
+    }
+    memcpy(buf, msg, len + 1);
+    ctrl_conn_reply(conn, buf, len);
+}
+
+/* Request framing. Returns:
+ *   1  a complete request: the first non-whitespace byte is '{' and its
+ *      matching '}' has arrived; the buffer is cut right after that '}' so
+ *      only this object is ever parsed (trailing bytes are ignored);
+ *   0  need more bytes;
+ *  -1  not a JSON object (the first non-whitespace byte is not '{'). */
+static int
+ctrl_frame_request(ctrl_conn_t *conn)
+{
+    size_t i = 0;
+    while (i < conn->req_len && isspace((unsigned char)conn->req[i]))
+        i++;
+    if (i == conn->req_len) return 0;
+    if (conn->req[i] != '{') return -1;
+
+    int depth = 0, in_str = 0;
+    for (; i < conn->req_len; i++) {
+        char c = conn->req[i];
+        if (in_str) {
+            if (c == '\\') {
+                i++;
+                continue;
+            }
+            if (c == '"') in_str = 0;
+        } else if (c == '"') {
+            in_str = 1;
+        } else if (c == '{') {
+            depth++;
+        } else if (c == '}' && --depth == 0) {
+            conn->req[i + 1] = '\0';
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void
+ctrl_conn_dispatch(ctrl_conn_t *conn)
+{
+    char *resp = malloc(CTRL_MAX_RESP_BYTES);
+    if (!resp) {
+        ctrl_conn_close(conn);
+        return;
+    }
+    int rlen = dispatch(conn->req, resp, CTRL_MAX_RESP_BYTES - 2, conn->cs);
+    if (rlen <= 0) {
+        /* dispatch failed to format anything — close silently. */
+        free(resp);
+        ctrl_conn_close(conn);
+        return;
+    }
+    if ((size_t)rlen >= CTRL_MAX_RESP_BYTES - 2) {
+        /* snprintf would have truncated. Send a small error JSON instead so the
+         * client doesn't see a malformed body, and emit a warning. */
+        free(resp);
+        LOG_WRN(
+            "control: dispatch response truncated (would have been %d bytes, max %zu)",
+            rlen, (size_t)CTRL_MAX_RESP_BYTES - 2);
+        ctrl_conn_reply_str(conn, "{\"ok\":false,\"error\":\"response too large\"}\n");
+        return;
+    }
+    resp[rlen] = '\n';
+    resp[rlen + 1] = '\0';
+    char *shrunk = realloc(resp, (size_t)rlen + 2);
+    if (shrunk) resp = shrunk;
+    ctrl_conn_reply(conn, resp, (size_t)rlen + 1);
 }
 
 static void
 ctrl_on_read(evutil_socket_t fd, short what, void *arg)
 {
+    (void)what;
     ctrl_conn_t *conn = (ctrl_conn_t *)arg;
 
-    /* Idle timeout — close without processing */
-    if (what & EV_TIMEOUT) {
-        ctrl_conn_close(conn);
-        return;
-    }
-
-    /* Accumulate data until we have a complete request */
-    while (conn->req_len < CTRL_MAX_REQ) {
-        ssize_t n = read(fd, conn->req + conn->req_len, CTRL_MAX_REQ - conn->req_len);
+    for (;;) {
+        if (conn->req_len >= CTRL_MAX_REQ) {
+            /* Buffer full and still no complete object. */
+            ctrl_conn_reply_str(conn, "{\"ok\":false,\"error\":\"request too large\"}\n");
+            return;
+        }
+        ssize_t n = recv(fd, conn->req + conn->req_len, CTRL_MAX_REQ - conn->req_len, 0);
         if (n > 0) {
             conn->req_len += (size_t)n;
-
-            /* Detect a complete JSON object by brace counting */
-            const char *p = conn->req;
-            while (*p && isspace((unsigned char)*p))
-                p++;
-            if (*p == '{') {
-                int depth = 0, in_str = 0;
-                int complete = 0;
-                for (size_t i = (size_t)(p - conn->req); i < conn->req_len; i++) {
-                    char c = conn->req[i];
-                    if (in_str) {
-                        if (c == '\\') {
-                            i++;
-                            continue;
-                        }
-                        if (c == '"') in_str = 0;
-                    } else {
-                        if (c == '"')
-                            in_str = 1;
-                        else if (c == '{')
-                            depth++;
-                        else if (c == '}' && --depth == 0) {
-                            complete = 1;
-                            break;
-                        }
-                    }
-                }
-                if (!complete) continue;
-            } else if (!memchr(conn->req, '\n', conn->req_len)) {
-                continue; /* newline-terminated form: wait for more */
+            conn->req[conn->req_len] = '\0';
+            int fr = ctrl_frame_request(conn);
+            if (fr < 0) {
+                /* Not a JSON object — e.g. an HTTP request from a browser or
+                 * a cross-site POST. Refuse it before parsing anything. */
+                ctrl_conn_reply_str(conn, "{\"ok\":false,\"error\":\"invalid request\"}\n");
+                return;
             }
+            if (fr > 0) break;
         } else if (n == 0) {
-            break; /* EOF — process whatever we have */
+            /* EOF — process whatever we have: a truncated object still gets a
+             * per-command error ("... required"), as before. */
+            conn->req[conn->req_len] = '\0';
+            break;
+        } else if (errno == EINTR) {
+            continue;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
             return; /* wait for more data */
         } else {
@@ -869,31 +1122,9 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
             ctrl_conn_close(conn);
             return;
         }
-        break;
     }
 
-    conn->req[conn->req_len] = '\0';
-
-    char resp[CTRL_MAX_RESP_BYTES];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs);
-    if (rlen <= 0) {
-        /* dispatch failed to format anything — close silently. */
-    } else if ((size_t)rlen >= sizeof(resp) - 2) {
-        /* snprintf would have truncated. Send a small error JSON instead so the
-         * client doesn't see a malformed body, and emit a warning. */
-        static const char too_large[] =
-            "{\"ok\":false,\"error\":\"response too large\"}\n";
-        (void)write(fd, too_large, sizeof(too_large) - 1);
-        LOG_WRN(
-            "control: dispatch response truncated (would have been %d bytes, max %zu)",
-            rlen, sizeof(resp) - 2);
-    } else {
-        resp[rlen] = '\n';
-        resp[rlen + 1] = '\0';
-        (void)write(fd, resp, (size_t)rlen + 1);
-    }
-
-    ctrl_conn_close(conn);
+    ctrl_conn_dispatch(conn);
 }
 
 /* ── Accept handler ──────────────────────────────────────────────────────── */
@@ -908,7 +1139,7 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
         int cfd = accept(fd, NULL, NULL);
         if (cfd >= 0) {
             const char *msg = "{\"ok\":false,\"error\":\"too many connections\"}\n";
-            (void)write(cfd, msg, strlen(msg));
+            (void)send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
             close(cfd);
         }
         return;
@@ -931,15 +1162,20 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
     conn->fd = cfd;
     conn->cs = cs;
-    conn->ev =
-        event_new(cs->eb, cfd, EV_READ | EV_PERSIST | EV_TIMEOUT, ctrl_on_read, conn);
-    if (!conn->ev) {
+    conn->ev = event_new(cs->eb, cfd, EV_READ | EV_PERSIST, ctrl_on_read, conn);
+    conn->deadline = evtimer_new(cs->eb, ctrl_on_deadline, conn);
+    struct timeval tv = {.tv_sec = CTRL_CONN_DEADLINE_SEC};
+    if (!conn->ev || !conn->deadline || event_add(conn->ev, NULL) < 0 ||
+        evtimer_add(conn->deadline, &tv) < 0) {
+        if (conn->ev) event_free(conn->ev);
+        if (conn->deadline) event_free(conn->deadline);
         free(conn);
         close(cfd);
         return;
     }
-    struct timeval tv = {.tv_sec = CTRL_READ_TIMEOUT_SEC};
-    event_add(conn->ev, &tv);
+    conn->next = cs->conns;
+    if (cs->conns) cs->conns->prev = conn;
+    cs->conns = conn;
     cs->n_conns++;
 }
 
@@ -1045,5 +1281,8 @@ ctrl_socket_destroy(ctrl_socket_t *cs)
         event_free(cs->ev_accept);
     }
     if (cs->listen_fd >= 0) close(cs->listen_fd);
+    /* In-flight connections hold events on cs->eb and a pointer back to cs. */
+    while (cs->conns)
+        ctrl_conn_close(cs->conns);
     free(cs);
 }
