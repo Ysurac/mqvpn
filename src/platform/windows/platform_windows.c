@@ -33,8 +33,14 @@
 /* UDP receive budget per readable event */
 #  define BULK_READ_COUNT 64
 
-/* ── Global for Ctrl+C handler (single-instance) ── */
-static platform_win_ctx_t *g_signal_ctx = NULL;
+/* ── Globals for the Ctrl+C handler (single-instance) ──
+ * The handler runs on an OS thread at any time, cleanup included: it reads
+ * g_signal_ctx with an interlocked op and counts itself in g_ctrl_inflight
+ * BEFORE that read, and cleanup clears g_signal_ctx and then waits for
+ * g_ctrl_inflight to drain. A handler either saw NULL or finishes its send
+ * before cleanup goes on to close the wake socket (or frees ctx). */
+static PVOID volatile g_signal_ctx = NULL; /* platform_win_ctx_t * */
+static volatile LONG g_ctrl_inflight = 0;
 
 /*
  * Pin a UDP socket's egress to a specific NIC by FriendlyName.
@@ -602,8 +608,11 @@ console_ctrl_handler(DWORD ctrl_type)
          * from another thread, and on_shutdown_wake does the real work
          * in-loop. All mutable shutdown state (shutting_down, the log line)
          * is written on the loop thread only. */
-        platform_win_ctx_t *p = g_signal_ctx;
+        InterlockedIncrement(&g_ctrl_inflight);
+        platform_win_ctx_t *p = (platform_win_ctx_t *)InterlockedCompareExchangePointer(
+            &g_signal_ctx, NULL, NULL);
         if (p) (void)send((SOCKET)p->wake_pair[1], "q", 1, 0);
+        InterlockedDecrement(&g_ctrl_inflight);
         return TRUE;
     }
     return FALSE;
@@ -874,7 +883,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.ev_wake =
         event_new(ctx.eb, ctx.wake_pair[0], EV_READ | EV_PERSIST, on_shutdown_wake, &ctx);
     event_add(ctx.ev_wake, NULL);
-    g_signal_ctx = &ctx;
+    InterlockedExchangePointer(&g_signal_ctx, &ctx);
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
     /* Tick timer */
@@ -906,7 +915,11 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
-    g_signal_ctx = NULL;
+    InterlockedExchangePointer(&g_signal_ctx, NULL);
+    /* A handler that read the pointer before it was cleared may still be in
+     * its send(): wait it out before the wake socket closes below. */
+    while (InterlockedCompareExchange(&g_ctrl_inflight, 0, 0) != 0)
+        Sleep(1);
 
     /* Library teardown FIRST, while every callback-owned platform object is
      * still alive — mirror of the Linux cleanup (platform_linux.c): the
