@@ -4,6 +4,15 @@ mqvpn は INI と JSON の両方の設定ファイルに対応しています。
 
 ## INI 形式
 
+書式のルール:
+
+- セクション名とキーは大文字・小文字を区別しません。
+- 最初の空白以外の文字が `#` または `;` の行はコメントです。スペースまたはタブの後に続く `#` / `;` もコメントの開始になるため、`Scheduler = wlb   # default` は `wlb` を設定します。他の文字の直後に書いた `#` / `;` は値の一部として扱われます（`a#b` は `a#b` のまま）。`mqvpn --genkey` が生成する鍵（base64）や通常のパスに「空白 + `#` / `;`」が含まれることはありません。どうしても必要な値は INI では書けないので JSON を使ってください。
+- 真偽値は `true`/`false`、`yes`/`no`、`on`/`off`、`1`/`0` を大文字・小文字を問わず受け付けます。それ以外の値は警告を出し、そのキーはデフォルト値のままになります。
+- 設定できる長さを超える値は警告付きで無視されます（途中で切り詰められることはありません）。未知のキーやセクションは行番号付きで警告されます。
+- 同じスカラーキーが 2 回現れた場合は最後の行が有効です。JSON では最初に現れたキーが有効です。
+- 事前共有鍵（`[Auth] Key` または `User`）を含むファイルを他のユーザーが読める状態だと、起動時に警告が出ます。`chmod 600` で制限してください。
+
 ### サーバー
 
 ```ini
@@ -25,7 +34,7 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|new_reno|copa|unlimited|none)
 
 [Hybrid]
 Enabled = true
@@ -56,7 +65,7 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|new_reno|copa|unlimited|none)
 Path = eth0
 Path = wlan0
 
@@ -147,7 +156,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
-| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。任意のサーバーが認証鍵を受け取れるため、自己署名サーバーには `PinnedPubkey` を推奨。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。Linux/macOS (および custom trust path を使う Windows) では IP アドレス接続時に `ServerName` へ証明書の DNS 名を設定する。Windows の証明書ストアで検証する場合は IP literal が `iPAddress` SAN と直接照合される。Windows では Windows の証明書ストアで検証する。`SSL_CERT_FILE` (PEM バンドル) または `SSL_CERT_DIR` (ハッシュ化した証明書ディレクトリ) が設定されていれば、Linux と同様にそちらを使う。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
+| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。任意のサーバーが認証鍵を受け取れるため、自己署名サーバーには `PinnedPubkey` を推奨。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。Linux/macOS (および custom trust path を使う Windows) では IP アドレス接続時に `ServerName` へ証明書の DNS 名を設定する。Windows の証明書ストアで検証する場合は IP literal が `iPAddress` SAN と直接照合される。Windows では Local Machine の信頼ストアのみで検証する（プライベート CA のルートはそこに入れるか、`SSL_CERT_FILE` を使う）。ローカルの失効キャッシュで失効済みとされた証明書は拒否される。`SSL_CERT_FILE` (PEM バンドル) または `SSL_CERT_DIR` (ハッシュ化した証明書ディレクトリ) が設定されていれば、Linux と同様にそちらを使う。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
 | `PinnedPubkey` | この公開鍵を持つサーバーのみ受け入れる: 証明書の SubjectPublicKeyInfo の SHA-256 を base64 で（`openssl x509 -pubkey -noout \| openssl pkey -pubin -outform der \| openssl dgst -sha256 -binary \| openssl enc -base64`）、`sha256//` 接頭辞は任意、`;` 区切りで最大 4 個。CA・ホスト名・有効期限の検証を置き換え、`Insecure` より優先。認証鍵の送信前に検証 | （なし） |
 
 ### `[Interface]`
@@ -158,12 +167,14 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `Subnet` | クライアント IPv4 プール（サーバーのみ） | `10.0.0.0/24` |
 | `Subnet6` | クライアント IPv6 プール（サーバーのみ） | — |
 | `TunName` | TUN デバイス名 | `mqvpn0` |
-| `DNS` | DNS サーバー（カンマ区切り） | — |
+| `DNS` | DNS サーバー（カンマ区切り、クライアントのみ、最大 4 個）。各エントリは IP アドレス（IPv4、または `%scope` 付きも可の IPv6）である必要があり、それ以外の値は警告付きで無視される | — |
 | `LogLevel` | ログレベル（`debug`、`info`、`warn`、`error`） | `info` |
-| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ）。特定のネットワークアダプタに bind するアプリケーションがトンネルを迂回するのも防ぐ | `false` |
+| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ）。起動時からプロセス終了まで有効で、切断中・再接続中や、接続を諦めた後（`Reconnect = false`）も遮断し続ける。トンネルが IPv4 のみでも、トンネル外の IPv6 は常に遮断する。DHCP と IPv6 近隣探索は許可される。特定のネットワークアダプタに bind するアプリケーションがトンネルを迂回するのも防ぐ。キルスイッチ有効時、再接続でサーバーのホスト名を再解決できるのは、遮断中でも DNS リゾルバに到達できる場合のみで、そうでなければ前回解決したアドレスを使い続ける | `false` |
 | `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
-| `ReconnectInterval` | 再接続の間隔（秒） | `5` |
-| `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定。経路の設定だけでは、ソケットを特定のアダプタに bind するアプリケーションは止められない — 下の注記を参照 | `true` |
+| `ReconnectInterval` | 最初の再接続試行までの待ち時間（秒、クライアントのみ）。失敗するたびに待ち時間が 2 倍になり、上限は 60 秒（60 を超える値は 60 として扱う）。接続に成功すると、次はこの値から数え直す | `5` |
+| `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定し、ログに `manage_routes=off: host routing table left untouched` が出る。`NoRoutes = true` と同じスイッチで、ルートが設定されるのは `ManageRoutes` が true かつ `NoRoutes` が false のときだけ。経路の設定だけでは、ソケットを特定のアダプタに bind するアプリケーションは止められない — 下の注記を参照 | `true` |
+| `NoRoutes` | 自動ルート設定をすべて行わず、ルートを自分で管理する（クライアントのみ、CLI では `--no-routes`）。`ManageRoutes = false` と同等 | `false` |
+| `RouteViaServer` | すべての通信をトンネルインターフェースではなくサーバーのトンネルアドレス経由にする: catch-all ルート `0.0.0.0/1` と `128.0.0.0/1` をサーバーのトンネル IP 経由で設定する（クライアントのみ、CLI では `--route-via-server`）。ホスト自身のデフォルトルートは変更しない | `false` |
 | `MTU` | TUN MTU（1280–9000）。クライアント: 上限指定 — ネゴシエーション値のほうが小さい場合はそちらが使われる。サーバー: TUN MTU を直接設定。 | auto（クライアント ~1382 ネゴシエーション、サーバー 1382） |
 
 > **注記: 経路管理はアダプタに bind するアプリケーションをカバーしない**
@@ -172,30 +183,53 @@ sudo mqvpn --config /etc/mqvpn/server.json
 >
 > これは `ManageRoutes` とは独立した挙動です。こうしたアプリケーションを止めるには `KillSwitch = true` を設定してください。その場合、**トンネル経由になるのではなく遮断される**点に注意してください。
 
-### `[TLS]`（サーバーのみ）
+### `[TLS]`
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Cert` | TLS 証明書パス（PEM） | 必須 |
-| `Key` | TLS 秘密鍵パス（PEM） | 必須 |
+| `Cert` | TLS 証明書パス（PEM、サーバーのみ） | 作業ディレクトリの `server.crt` |
+| `Key` | TLS 秘密鍵パス（PEM、サーバーのみ） | 作業ディレクトリの `server.key` |
+| `Cipher` / `Ciphers` | TLS 暗号スイート、コロン区切り（例: `TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384`）。クライアント・サーバー両方、CLI では `--cipher` | TLS ライブラリのデフォルト |
+
+サーバーでは `Cert` と `Key` を必ず明示してください。デフォルト値は mqvpn を起動したディレクトリからの相対ファイル名です。
 
 ### `[Auth]`
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Key` | 事前共有鍵（base64、`mqvpn --genkey` で生成） | `User` 未設定時は必須 |
-| `User` | ユーザー個別の PSK（`NAME:KEY` 形式、複数指定可） | — |
+| `User` | サーバー: ユーザー個別の PSK（`NAME:KEY` または `NAME:KEY:FIXED_IP` 形式、複数指定可）。クライアント: `NAME:KEY` はその名前と鍵を使い、`NAME` だけの場合は `Username` と同じくクライアントのユーザー名を設定する | — |
+| `Username` | クライアントのみ: サーバーのステータス出力やログでこのクライアントを識別するために送る名前。認証には影響しない | — |
 | `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
 
+ユーザー名は 1〜63 バイトで、`"`、`\`、制御文字は使えません。鍵は最大 255 バイトです。コマンドラインの `--user` が不正な場合は起動がエラーで止まり、設定ファイルの不正な `User` 行は警告付きでスキップされます。
+
 JSON ではクライアント・サーバーとも `auth_key` を使います（上の例のとおり）。
+
+### `[Control]`
+
+[Control API](#control-api) をクライアント・サーバーどちらのモードでも有効にします。ポートが設定されていなければ無効です。
+
+| キー | 説明 | デフォルト |
+|------|------|-----------|
+| `Listen` | アドレスとポートを 1 つの値で指定（`127.0.0.1:9090`、`[::1]:9090`） | — |
+| `Port`（別名 `ControlPort`） | TCP ポート | — |
+| `Addr`（別名 `ControlAddr`） | バインドアドレス | `127.0.0.1` |
+
+`Port` と `Addr` は `Listen` の対応する部分を上書きし、`--control-port` と `--control-addr` はその両方を上書きします。`--control-port 0` で API を無効化できます。
 
 ### `[Multipath]`
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, または `backup_fec`） | `wlb` |
-| `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
-| `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
+| `Scheduler` | スケジューラアルゴリズム: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant`, `dscp` のいずれか | `wlb` |
+| `CC`（別名 `CongestionControl`） | 輻輳制御アルゴリズム: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited`, `none` のいずれか | `bbr2` |
+| `Path` | バインドするネットワークインターフェース（複数指定可、クライアントのみ、最大 8 個） | デフォルトインターフェース |
+| `BackupPath` | フェイルオーバー専用のインターフェース。すべての `Path` が落ちたときだけ使う（複数指定可、クライアントのみ） | — |
+| `Fec` / `FecEnable` | 前方誤り訂正（FEC）を有効化（FEC 有効ビルドが必要） | `false` |
+| `FecScheme` | FEC 方式: `galois_calculation`, `packet_mask`, `reed_solomon`, `xor` のいずれか | `reed_solomon` |
+| `SyncPathLabels` | パスごとの weight / DSCP マスクをクライアントとサーバーで共有する。クライアント: 自分の値をサーバーに通知する。サーバー: クライアントが通知した値を下り方向に採用する。どちらか一方でも `false` にすると共有されない | `true` |
+| `PushPathLabels` | サーバー側で固定した weight / DSCP マスクをクライアントへ送り、クライアントの上り方向にも適用する。サーバー: 送信する。クライアント: 受け入れる。両側で有効にする必要がある | `false` |
 | `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
 | `Reinjection` | 投機的複製モード（`off`, `deadline`, `idle`, または `dgram`） | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
@@ -204,6 +238,8 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 スケジューラの詳細は[マルチパス](./multipath)、Reinjection のモード別ガイドは
 [マルチパスの Reinjection 節](./multipath)を参照してください。
+
+古い設定では `ReinjectionControl = true` と `ReinjectionMode`（別名 `ReinjCtl`、値は `default`、`deadline`、`dgram`）が使われていることがあります。これらは今も読み込まれますが、`Reinjection` が `off` のままのときだけ有効で、`default` は `idle` に対応します。新しい設定では `Reinjection` を使ってください。
 
 > `backup_fec` は実験的機能で、両ピアが mqvpn 0.4.0 以降かつ FEC ビルド
 > (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
@@ -221,7 +257,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 |------|------|-----------|
 | `Enabled` | マスタースイッチ（`on` / `off`） | `off` |
 | `MaxWaitMs` | 欠落データグラムをスキップするまで、ギャップを保持する時間（ms） | `30` |
-| `CapPackets` | フローあたりの最大バッファデータグラム数（2 のべき乗） | `1024` |
+| `CapPackets` | フローあたりの最大バッファデータグラム数（2 のべき乗、最大 `65536`） | `1024` |
 | `MaxBytesPerFlow` | フローあたりの最大バッファバイト数 | `1572864` |
 | `ClassifyWindow` | フローの方向を判定するために観測するデータグラム数（`0` で ACK 方向のデモートを無効化） | `64` |
 | `AckDemoteMaxLarge` | この値以下の大パケット数であればフローを ACK 方向と判定する | `3` |
@@ -229,7 +265,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `ResetMarkPackets` | フロー再開時に送出する FLOW_RESET マーク数 | `8` |
 | `ResetIdleGraceMs` | フローがこの時間以上アイドルだった場合のみ FLOW_RESET を尊重する（ms） | `10000` |
 | `MaxFlows` | 追跡する最大フロー数 | `65536` |
-| `GlobalMaxBytes` | 全フロー共有のバッファバイト予算 | `67108864` |
+| `GlobalMaxBytes` | 全フロー共有のバッファバイト予算。reorder のインデックス用メモリ（使用中のウィンドウスロットあたり最大 32 バイト）も含む | `67108864` |
 | `IngressIdleSec` | 受信側のアイドル退避タイムアウト（`EgressIdleSec` より小さい必要あり） | `30` |
 | `EgressIdleSec` | 送信側のアイドル退避タイムアウト | `300` |
 
@@ -314,7 +350,7 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | `Port` | マッチするポート（送信元または宛先） | — |
 | `Profile` | `cellular_bond`, `fiber_lte`, `quic_bulk`, `low_latency`, または `default_udp` | `quic_bulk` |
 | `MaxWaitMs` | このルールのみの保持時間（ms）のオーバーライド。`0` は警告付きで拒否されます — ポートを素通しさせたい場合は代わりに `Profile = default_udp` を使ってください | プロファイルプリセット |
-| `CapPackets` | このルールのみのフローあたりバッファ上限のオーバーライド。0 以外の 2 のべき乗である必要があり、そうでなければ警告付きで拒否されます | プロファイルプリセット |
+| `CapPackets` | このルールのみのフローあたりバッファ上限のオーバーライド。`65536` 以下で 0 以外の 2 のべき乗である必要があり、そうでなければ警告付きで拒否されます | プロファイルプリセット |
 
 ### `[Hybrid]`
 
@@ -368,6 +404,25 @@ JSON では `"hybrid"` オブジェクトに snake_case キーで指定します
 | `UdpGro` | 高スループット時に受信 UDP パケットをカーネル GRO でまとめて受け取り、CPU 使用率を下げます。非対応カーネル（5.0 未満）では 1 パケットずつの受信に自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前の受信経路に戻ります | `true` |
 
 JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`）。
+
+### JSON のキー名
+
+JSON の設定は（上記の `reorder`、`hybrid`、`advanced` オブジェクトを除き）フラットな構造です。INI との対応は次のとおりです:
+
+| INI | JSON |
+|-----|------|
+| `[Interface]` `TunName`, `Listen`, `Subnet`, `Subnet6`, `LogLevel`, `DNS`, `MTU` | `tun_name`, `listen`, `subnet`, `subnet6`, `log_level`, `dns`（配列）, `mtu` |
+| `[Interface]` `KillSwitch`, `Reconnect`, `ReconnectInterval` | `kill_switch`, `reconnect`, `reconnect_interval` |
+| `[Interface]` `ManageRoutes`, `NoRoutes`, `RouteViaServer` | `manage_routes`, `no_routes`, `route_via_server` |
+| `[Server]` `Address`, `ServerName`, `Insecure`, `PinnedPubkey` | `server_addr`, `tls_server_name`, `insecure`, `pinned_pubkey` |
+| `[TLS]` `Cert`, `Key`, `Cipher` / `Ciphers` | `cert_file`, `key_file`, `cipher` / `ciphers` / `tls_ciphers` |
+| `[Auth]` `Key`, `Username`, `MaxClients`, `User` | `auth_key`, `auth_username`, `max_clients`, `users`（配列） |
+| `[Control]` `Listen`, `Port`, `Addr` | `control_listen`, `control_port`, `control_addr` |
+| `[Multipath]` `Scheduler`, `CC` / `CongestionControl`, `Path`, `BackupPath` | `scheduler`, `cc` / `congestion_control`, `paths`（配列）, `backup_paths`（配列） |
+| `[Multipath]` `InitMaxPathId`, `Reinjection`, `ReinjectionSrttFactorPct`, `ReinjectionHardDeadlineMs`, `ReinjectionDeadlineLowerBoundMs` | `init_max_path_id`, `reinjection`, `reinjection_srtt_factor_pct`, `reinjection_hard_deadline_ms`, `reinjection_deadline_lower_bound_ms` |
+| `[Multipath]` `Fec` / `FecEnable`, `FecScheme`, `SyncPathLabels`, `PushPathLabels` | `fec` / `fec_enable`, `fec_scheme`, `sync_path_labels`, `push_path_labels` |
+
+`mode`（`"client"` または `"server"`）は JSON のみのキーです。指定がなければ `listen` があるとサーバーモードになりますが、`mode` を明示した場合は常にそちらが優先されます。`path_policy`（サーバー側で永続化するパスごとの weight）と `reorder_rules` は JSON のみの配列です。
 
 ## MTU ガイドライン
 
@@ -437,15 +492,23 @@ mqvpn TUN MTU                    1382 bytes
 sudo mqvpn --mode server ... --control-port 9090
 ```
 
-デフォルトでは `127.0.0.1` にバインドされます。認証機能はないため、信頼できるインターフェースのみにバインドしてください。
+デフォルトでは `127.0.0.1` にバインドされます。認証機能はないため、信頼できるインターフェースのみにバインドしてください。クライアントでも同じ方法で有効にでき、パス操作コマンドや統計情報に使えます。
 
 ### 設定ファイルから有効化する
 
-Control API は `/etc/mqvpn/server.conf` からも有効化できます：
+Control API はクライアント・サーバーどちらのモードでも設定ファイルから有効化できます：
 
 ```ini
 [Control]
 Listen = 127.0.0.1:9090
+```
+
+アドレスとポートは別々のキーでも指定できます：
+
+```ini
+[Control]
+Port = 9090
+Addr = 127.0.0.1
 ```
 
 JSON 設定の場合：
@@ -456,7 +519,13 @@ JSON 設定の場合：
 }
 ```
 
-CLI フラグ（`--control-port`, `--control-addr`）は設定ファイルの値を**フィールド単位**で上書きします。`--control-port 0` を指定すると、`[Control] Listen` が設定ファイルに書かれていても明示的に無効化できます。
+（別々のキーは JSON では `"control_port"` / `"control_addr"` です。）
+
+`Port` / `Addr` は `Listen` の対応する部分を上書きします。CLI フラグ（`--control-port`, `--control-addr`）は設定ファイルの値を**フィールド単位**で上書きします。`--control-port 0` を指定すると、設定ファイルでポートが指定されていても明示的に無効化できます。
+
+### リクエストの形式
+
+1 接続につき 1 つの JSON オブジェクトを送ります（例: `echo '{"cmd":"list_users"}' | nc 127.0.0.1 9090`）。最初の空白以外の文字は `{` でなければならず、それ以外（HTTP リクエストなど）には `{"ok":false,"error":"invalid request"}` を返して接続を閉じます。リクエストは最大 4 KB で、やり取り全体を 5 秒以内に終える必要があります。全コマンドは [docs/control-api.md](https://github.com/mp0rta/mqvpn/blob/main/docs/control-api.md) を参照してください。
 
 ### コマンド
 
@@ -530,5 +599,5 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-systemd ユニットは INI 形式の `.conf` ファイルを前提としています。サーバーユニットの NAT ヘルパースクリプトも INI を直接パースするため、標準ユニットのままでは JSON は使用できません。
+systemd ユニットは `.conf` で終わる固定のパス（`/etc/mqvpn/server.conf`、`/etc/mqvpn/client-<インスタンス名>.conf`）を読み込みます。中身は INI でも JSON でも構いません。mqvpn もサーバーユニットの NAT ヘルパーも最初の空白以外の文字で形式を判定するため、JSON の設定もその `.conf` という名前で保存すれば使えます。NAT ヘルパーは `Subnet`、`Subnet6`、`TunName` を簡易的なパーサーで読むため、この 3 行には行末コメントを書かないでください。
 :::

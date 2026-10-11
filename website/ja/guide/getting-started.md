@@ -116,12 +116,14 @@ mqvpn --mode client|server [options]
   --subnet6 CIDR         クライアント IPv6 プール（サーバー）
   --cert PATH            TLS 証明書（サーバー）
   --key PATH             TLS 秘密鍵（サーバー）
-  --scheduler SCHED      マルチパススケジューラ: minrtt|wlb|wlb_udp_pin|backup_fec
+  --scheduler SCHED      マルチパススケジューラ: minrtt|wlb|backup|wlb_udp_pin|backup_fec|
+                         rap|wrtt|wrr|redundant|dscp
                          （デフォルト: wlb）
-  --cc ALGO              輻輳制御アルゴリズム: bbr2|bbr|cubic|none（デフォルト: bbr2）
+  --cc ALGO              輻輳制御アルゴリズム: bbr2|bbr|cubic|new_reno|copa|unlimited|none
+                         （デフォルト: bbr2）
   --mtu N                TUN MTU（1280-9000、デフォルト: auto）
   --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
-  --control-port PORT    Control API の TCP ポート（サーバー）
+  --control-port PORT    Control API の TCP ポート（クライアント・サーバー、0 で無効）
   --control-addr ADDR    Control API のバインドアドレス（デフォルト: 127.0.0.1）
   --status               サーバーの稼働状況を Control API 経由で表示して終了
   --log-level LVL        ログレベル（debug|info|warn|error）

@@ -4,6 +4,15 @@ mqvpn supports both INI and JSON config files. If the file content starts with `
 
 ## INI Format
 
+Syntax rules:
+
+- Section names and keys are case-insensitive.
+- A line whose first non-space character is `#` or `;` is a comment. A `#` or `;` that follows a space or tab also starts a comment, so `Scheduler = wlb   # default` sets `wlb`. A `#` or `;` written directly after other characters stays part of the value (`a#b` is read as `a#b`). Keys from `mqvpn --genkey` (base64) and normal paths never contain a space followed by `#` or `;`; a value that really needs one cannot be written in INI (use JSON).
+- Booleans accept `true`/`false`, `yes`/`no`, `on`/`off` and `1`/`0`, in any case. Any other value logs a warning and the key keeps its default.
+- A value longer than the setting allows is ignored with a warning (it is never cut short). Unknown keys and sections log a warning with the line number.
+- If a scalar key appears twice, the last line wins. In JSON, the first occurrence of a key wins.
+- If the file holds a pre-shared key (`[Auth] Key` or `User`) and other users can read it, mqvpn logs a warning at startup. Restrict it with `chmod 600`.
+
 ### Server
 
 ```ini
@@ -25,7 +34,7 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|new_reno|copa|unlimited|none)
 
 [Hybrid]
 Enabled = true
@@ -61,7 +70,7 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|new_reno|copa|unlimited|none)
 Path = eth0
 Path = wlan0
 
@@ -152,7 +161,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
-| `Insecure` | Skip TLS certificate verification (self-signed test setups only). Any server then receives the auth key; prefer `PinnedPubkey` for a self-signed server. With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); on Linux/macOS (and on Windows with a custom trust path), when connecting by IP address set `ServerName` to the certificate's DNS name; with the Windows certificate store an IP literal matches an `iPAddress` SAN directly. On Windows the certificate is verified against the Windows certificate stores; if `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` (a hashed certificate directory) is set, that custom trust path is used instead, as on Linux. On Android the certificate is verified against the device's CA store and the app's network security config; `tlsServerName` (the SDK counterpart of `ServerName`) is the name it must match, and it must be a bare host name or IP literal (no brackets). | `false` |
+| `Insecure` | Skip TLS certificate verification (self-signed test setups only). Any server then receives the auth key; prefer `PinnedPubkey` for a self-signed server. With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); on Linux/macOS (and on Windows with a custom trust path), when connecting by IP address set `ServerName` to the certificate's DNS name; with the Windows certificate store an IP literal matches an `iPAddress` SAN directly. On Windows the certificate is verified against the Local Machine trust store only (a private CA root must be installed there, or use `SSL_CERT_FILE`), and a certificate the local revocation cache lists as revoked is rejected; if `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` (a hashed certificate directory) is set, that custom trust path is used instead, as on Linux. On Android the certificate is verified against the device's CA store and the app's network security config; `tlsServerName` (the SDK counterpart of `ServerName`) is the name it must match, and it must be a bare host name or IP literal (no brackets). | `false` |
 | `PinnedPubkey` | Accept only a server holding this public key: base64 SHA-256 of the certificate's SubjectPublicKeyInfo (`openssl x509 -pubkey -noout \| openssl pkey -pubin -outform der \| openssl dgst -sha256 -binary \| openssl enc -base64`), `sha256//` prefix optional, up to 4 separated by `;`. Replaces CA, hostname and expiry validation and overrides `Insecure`; checked before the auth key is sent | (none) |
 
 ### `[Interface]`
@@ -163,12 +172,14 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `Subnet` | Client IPv4 pool (server only) | `10.0.0.0/24` |
 | `Subnet6` | Client IPv6 pool (server only) | — |
 | `TunName` | TUN device name | `mqvpn0` |
-| `DNS` | DNS servers (comma-separated) | — |
+| `DNS` | DNS servers (comma-separated, client only, up to 4). Each entry must be an IP address (IPv4, or IPv6 optionally with `%scope`); other values are ignored with a warning. | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
-| `KillSwitch` | Block traffic outside the VPN tunnel (client only). Also stops applications that bind to a specific network adapter from bypassing the tunnel. | `false` |
+| `KillSwitch` | Block traffic outside the VPN tunnel (client only). Active from startup until the process exits, including while disconnected or reconnecting and after the connection is given up (`Reconnect = false`). Always blocks IPv6 outside the tunnel too, even when the tunnel carries IPv4 only; DHCP and IPv6 neighbor discovery stay allowed. Also stops applications that bind to a specific network adapter from bypassing the tunnel. With the kill switch on, re-resolving a server host name during a reconnect only works if the DNS resolver is reachable while blocked; otherwise the previously resolved address is kept. | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
-| `ReconnectInterval` | Seconds between reconnection attempts | `5` |
-| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
+| `ReconnectInterval` | Wait in seconds before the first reconnection attempt (client only). Each further failed attempt doubles the wait, up to 60 seconds; values above 60 act as 60. The wait starts again from this value after a successful connection. | `5` |
+| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself; the log then shows `manage_routes=off: host routing table left untouched`. Same switch as `NoRoutes = true`: routes are installed only when `ManageRoutes` is true and `NoRoutes` is false. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
+| `NoRoutes` | Skip all automatic route setup and manage routes yourself (client only; CLI `--no-routes`). Equivalent to `ManageRoutes = false`. | `false` |
+| `RouteViaServer` | Route all traffic through the server's tunnel address instead of the tunnel interface: installs the catch-all routes `0.0.0.0/1` and `128.0.0.0/1` via the server's tunnel IP (client only; CLI `--route-via-server`). The host's own default route is left untouched. | `false` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
 
 > **Note: route management does not cover interface-bound applications**
@@ -177,30 +188,53 @@ sudo mqvpn --config /etc/mqvpn/server.json
 >
 > This is independent of `ManageRoutes`. To stop such applications, set `KillSwitch = true`. Note that they are then **blocked outright rather than routed through the tunnel**.
 
-### `[TLS]` (server only)
+### `[TLS]`
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Cert` | TLS certificate path (PEM) | Required |
-| `Key` | TLS private key path (PEM) | Required |
+| `Cert` | TLS certificate path (PEM, server only) | `server.crt` in the working directory |
+| `Key` | TLS private key path (PEM, server only) | `server.key` in the working directory |
+| `Cipher` / `Ciphers` | TLS cipher suites, colon-separated (e.g. `TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384`); client and server; CLI `--cipher` | TLS library default |
+
+Always set `Cert` and `Key` explicitly for a server: the defaults are file names relative to the directory mqvpn is started from.
 
 ### `[Auth]`
 
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Key` | Pre-shared key (base64, generate with `mqvpn --genkey`) | Required unless `User` is set |
-| `User` | Per-user PSK in `NAME:KEY` format (repeatable) | — |
+| `User` | Server: per-user PSK in `NAME:KEY` or `NAME:KEY:FIXED_IP` format (repeatable). Client: `NAME:KEY` uses that name and key; a bare `NAME` sets the client username like `Username`. | — |
+| `Username` | Client only: name sent to the server to identify this client in its status output and logs; it does not affect authentication | — |
 | `MaxClients` | Maximum concurrent clients (server only) | `64` |
 
+User names are 1–63 bytes and may not contain `"`, `\` or control characters; keys are at most 255 bytes. An invalid `--user` on the command line stops startup with an error; an invalid `User` line in a file is skipped with a warning.
+
 In JSON, use `auth_key` on both client and server (as in the examples above).
+
+### `[Control]`
+
+Enables the [Control API](#control-api), in both client and server mode. Disabled when no port is set.
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `Listen` | Address and port in one value (`127.0.0.1:9090`, `[::1]:9090`) | — |
+| `Port` (alias `ControlPort`) | TCP port | — |
+| `Addr` (alias `ControlAddr`) | Bind address | `127.0.0.1` |
+
+`Port` and `Addr` override the matching half of `Listen`; `--control-port` and `--control-addr` override both, and `--control-port 0` disables the API.
 
 ### `[Multipath]`
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, or `backup_fec`) | `wlb` |
-| `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
-| `Path` | Network interface to bind (repeatable) | Default interface |
+| `Scheduler` | Scheduler algorithm: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant` or `dscp` | `wlb` |
+| `CC` (alias `CongestionControl`) | Congestion control algorithm: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited` or `none` | `bbr2` |
+| `Path` | Network interface to bind (repeatable, client only, up to 8) | Default interface |
+| `BackupPath` | Failover-only interface, used only when all `Path` interfaces are down (repeatable, client only) | — |
+| `Fec` / `FecEnable` | Enable forward error correction (needs an FEC-enabled build) | `false` |
+| `FecScheme` | FEC scheme: `galois_calculation`, `packet_mask`, `reed_solomon` or `xor` | `reed_solomon` |
+| `SyncPathLabels` | Share per-path weight / DSCP mask between client and server. Client: announce its own values to the server. Server: adopt the values the client announces for its downlink. Either side set to `false` turns the sharing off | `true` |
+| `PushPathLabels` | Push a weight / DSCP mask pinned on the server down to the client, so it also governs the client's uplink. Server: send it. Client: accept it. Both sides must enable it | `false` |
 | `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
 | `Reinjection` | Speculative duplication mode (`off`, `deadline`, `idle`, or `dgram`) | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
@@ -209,6 +243,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 
 See [Multipath](./multipath) for scheduler details and
 [Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.
+
+Older configs may use `ReinjectionControl = true` with `ReinjectionMode` (alias `ReinjCtl`, values `default`, `deadline` or `dgram`). These are still read, but only when `Reinjection` is left at `off`; `default` maps to `idle`. New configs should use `Reinjection`.
 
 > `backup_fec` is experimental and requires both peers to run mqvpn ≥ 0.4.0
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
@@ -226,7 +262,7 @@ A flow-aware reorder buffer for inner UDP traffic. It targets a single inner con
 |-----|-------------|---------|
 | `Enabled` | Master switch (`on` / `off`) | `off` |
 | `MaxWaitMs` | How long to hold a gap before skipping the missing datagram (ms) | `30` |
-| `CapPackets` | Max buffered datagrams per flow (power of two) | `1024` |
+| `CapPackets` | Max buffered datagrams per flow (power of two, at most `65536`) | `1024` |
 | `MaxBytesPerFlow` | Max buffered bytes per flow | `1572864` |
 | `ClassifyWindow` | Datagrams observed to classify a flow's direction (`0` disables ACK-direction demotion) | `64` |
 | `AckDemoteMaxLarge` | Large-packet count at or below which a flow is judged ACK-direction | `3` |
@@ -234,7 +270,7 @@ A flow-aware reorder buffer for inner UDP traffic. It targets a single inner con
 | `ResetMarkPackets` | FLOW_RESET marks emitted when a flow restarts | `8` |
 | `ResetIdleGraceMs` | Honor a FLOW_RESET only after the flow has been idle this long (ms) | `10000` |
 | `MaxFlows` | Max tracked flows | `65536` |
-| `GlobalMaxBytes` | Shared buffer byte budget across all flows | `67108864` |
+| `GlobalMaxBytes` | Shared buffer byte budget across all flows. It also covers the reorder index memory (up to 32 bytes per window slot in use) | `67108864` |
 | `IngressIdleSec` | Receiver idle eviction timeout (must be `< EgressIdleSec`) | `30` |
 | `EgressIdleSec` | Sender idle eviction timeout | `300` |
 
@@ -319,7 +355,7 @@ Reorder is **off by default** and is meant to be opt-in only within its useful r
 | `Port` | Matched port (source or destination) | — |
 | `Profile` | `cellular_bond`, `fiber_lte`, `quic_bulk`, `low_latency`, or `default_udp` | `quic_bulk` |
 | `MaxWaitMs` | Per-rule override of the hold time (ms). `0` is rejected with a warning — to pass a port through untouched use `Profile = default_udp` instead | profile preset |
-| `CapPackets` | Per-rule override of the per-flow buffer cap. Must be a non-zero power of two, or it is rejected with a warning | profile preset |
+| `CapPackets` | Per-rule override of the per-flow buffer cap. Must be a non-zero power of two no larger than `65536`, or it is rejected with a warning | profile preset |
 
 ### `[Hybrid]`
 
@@ -376,6 +412,25 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
 
 In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`).
+
+### JSON key names
+
+JSON configs are flat (except the `reorder`, `hybrid` and `advanced` objects above). The keys map to INI as follows:
+
+| INI | JSON |
+|-----|------|
+| `[Interface]` `TunName`, `Listen`, `Subnet`, `Subnet6`, `LogLevel`, `DNS`, `MTU` | `tun_name`, `listen`, `subnet`, `subnet6`, `log_level`, `dns` (array), `mtu` |
+| `[Interface]` `KillSwitch`, `Reconnect`, `ReconnectInterval` | `kill_switch`, `reconnect`, `reconnect_interval` |
+| `[Interface]` `ManageRoutes`, `NoRoutes`, `RouteViaServer` | `manage_routes`, `no_routes`, `route_via_server` |
+| `[Server]` `Address`, `ServerName`, `Insecure`, `PinnedPubkey` | `server_addr`, `tls_server_name`, `insecure`, `pinned_pubkey` |
+| `[TLS]` `Cert`, `Key`, `Cipher` / `Ciphers` | `cert_file`, `key_file`, `cipher` / `ciphers` / `tls_ciphers` |
+| `[Auth]` `Key`, `Username`, `MaxClients`, `User` | `auth_key`, `auth_username`, `max_clients`, `users` (array) |
+| `[Control]` `Listen`, `Port`, `Addr` | `control_listen`, `control_port`, `control_addr` |
+| `[Multipath]` `Scheduler`, `CC` / `CongestionControl`, `Path`, `BackupPath` | `scheduler`, `cc` / `congestion_control`, `paths` (array), `backup_paths` (array) |
+| `[Multipath]` `InitMaxPathId`, `Reinjection`, `ReinjectionSrttFactorPct`, `ReinjectionHardDeadlineMs`, `ReinjectionDeadlineLowerBoundMs` | `init_max_path_id`, `reinjection`, `reinjection_srtt_factor_pct`, `reinjection_hard_deadline_ms`, `reinjection_deadline_lower_bound_ms` |
+| `[Multipath]` `Fec` / `FecEnable`, `FecScheme`, `SyncPathLabels`, `PushPathLabels` | `fec` / `fec_enable`, `fec_scheme`, `sync_path_labels`, `push_path_labels` |
+
+`mode` (`"client"` or `"server"`) exists only in JSON. Without it, `listen` implies server mode; an explicit `mode` always wins. `path_policy` (server-side persisted per-path weights) and `reorder_rules` are JSON-only arrays.
 
 ## MTU Guidelines
 
@@ -445,18 +500,26 @@ A running server can be managed at runtime over a local TCP socket using JSON co
 sudo mqvpn --mode server ... --control-port 9090
 ```
 
-The control API binds to `127.0.0.1` by default. It has no authentication, so only bind to trusted interfaces.
+The control API binds to `127.0.0.1` by default. It has no authentication, so only bind to trusted interfaces. A client can enable it the same way, for its own path commands and statistics.
 
 ### Enable from config file
 
-The control API can also be enabled from `/etc/mqvpn/server.conf`:
+The control API can also be enabled from the config file, in client or server mode:
 
 ```ini
 [Control]
 Listen = 127.0.0.1:9090
 ```
 
-…or from the JSON equivalent:
+The address and port can also be given as separate keys:
+
+```ini
+[Control]
+Port = 9090
+Addr = 127.0.0.1
+```
+
+…or in JSON:
 
 ```json
 {
@@ -464,7 +527,13 @@ Listen = 127.0.0.1:9090
 }
 ```
 
-CLI flags (`--control-port`, `--control-addr`) override the config-file values per field. `--control-port 0` explicitly disables the API even if `[Control] Listen` is set in the config.
+(`"control_port"` / `"control_addr"` are the JSON form of the separate keys.)
+
+`Port` / `Addr` override the matching half of `Listen`. CLI flags (`--control-port`, `--control-addr`) override the config-file values per field. `--control-port 0` explicitly disables the API even if the config sets a port.
+
+### Request format
+
+Send one JSON object per connection, for example with `echo '{"cmd":"list_users"}' | nc 127.0.0.1 9090`. The first non-space character must be `{`; anything else (an HTTP request, for example) is answered with `{"ok":false,"error":"invalid request"}` and the connection is closed. A request may be at most 4 KB, and the whole exchange must finish within 5 seconds. See [docs/control-api.md](https://github.com/mp0rta/mqvpn/blob/main/docs/control-api.md) for every command.
 
 ### Commands
 
@@ -538,5 +607,5 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-The systemd units expect INI `.conf` files. The server unit's NAT helper scripts also parse the INI config directly, so JSON cannot be used with the standard units as-is.
+The systemd units read fixed paths ending in `.conf` (`/etc/mqvpn/server.conf`, `/etc/mqvpn/client-<instance>.conf`). The content may be INI or JSON: mqvpn and the server unit's NAT helper both detect the format from the first non-space character, so a JSON config works when saved under that `.conf` name. The NAT helper reads `Subnet`, `Subnet6` and `TunName` with a simpler parser, so keep end-of-line comments off those three lines.
 :::

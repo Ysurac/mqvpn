@@ -9,16 +9,27 @@ Prometheus exporter.
 ## 1. Overview
 
 - **Transport:** TCP (plaintext, no TLS)
-- **Framing:** Newline-terminated JSON objects. The server also accepts a bare
-  JSON object terminated by its closing `}` brace, whichever arrives first.
-- **Request:** one JSON object per connection (max 4 KB)
+- **Framing:** one JSON object. The first non-whitespace byte must be `{`;
+  the request ends at the object's matching closing `}` (a trailing newline,
+  as `echo ... | nc` sends, is fine), or at EOF. Only that object is parsed;
+  bytes after it are ignored. Any other input — an HTTP request, for
+  example — is answered with `{"ok":false,"error":"invalid request"}` and
+  the connection is closed without parsing anything.
+- **Request:** one JSON object per connection (max 4 KB). A buffer that
+  fills up without a complete object gets
+  `{"ok":false,"error":"request too large"}`.
 - **Response:** one JSON object, newline-terminated; server closes the
   connection after writing the response.
-- **Idle timeout:** 5 seconds — connections that do not deliver a complete
-  request within 5 seconds are closed without a response.
+- **Deadline:** 5 seconds from accept — a connection that has not completed
+  its request and received its reply within 5 seconds is closed (without a
+  response if the request was incomplete). The limit is absolute: sending
+  bytes slowly does not extend it.
 - **Concurrency:** maximum 8 simultaneous control connections. A 9th connection
   receives `{"ok":false,"error":"too many connections"}` and is immediately
   closed.
+- **Modes:** the same socket is available in server and client mode. User
+  management commands are server-only; `add_path` / `remove_path` /
+  `list_paths` are client-only (§5.11).
 
 ---
 
@@ -41,6 +52,24 @@ sudo mqvpn --mode server ... --control-port 9090
 sudo mqvpn --mode server ... --control-port 9090 --control-addr 127.0.0.1
 ```
 
+From a config file (client or server mode), either form:
+
+```ini
+[Control]
+Listen = 127.0.0.1:9090
+```
+
+```ini
+[Control]
+Port = 9090        ; alias ControlPort
+Addr = 127.0.0.1   ; alias ControlAddr
+```
+
+JSON: `"control_listen": "127.0.0.1:9090"`, or `"control_port"` /
+`"control_addr"`. Precedence per field: `Listen`, then `Port` / `Addr`, then
+`--control-port` / `--control-addr`. `--control-port 0` disables the API
+even when the file sets a port.
+
 ### Security
 
 The control API has **no authentication and no TLS**. If you bind to a
@@ -57,11 +86,20 @@ port beyond localhost.
 
 ## 3. Request Format
 
-A single UTF-8 JSON object, terminated by its closing `}` brace or a newline
-character (`\n`). Maximum size: **4 096 bytes** (`CTRL_MAX_REQ`).
+A single UTF-8 JSON object whose first non-whitespace byte is `{`,
+terminated by its closing `}` brace (or EOF). Maximum size: **4 096 bytes**
+(`CTRL_MAX_REQ`).
 
-All requests must contain a `"cmd"` string field. Unknown commands return an
-error response rather than closing the connection.
+All requests must contain a top-level `"cmd"` string field. Keys are looked
+up among the object's own members only: a `"cmd"` inside a nested object
+does not count. Unknown commands return an error response rather than
+closing the connection.
+
+String values use standard JSON escapes (`\"`, `\\`, `\n`, `\uXXXX`, ...). A
+string longer than the field allows (names 63 bytes, keys 255, interface
+names 15) is rejected, never shortened. Numeric fields must be JSON numbers:
+a quoted number, a sign where none is allowed, a fraction or trailing
+characters are rejected.
 
 ```json
 {"cmd":"<command>", ...}
@@ -84,7 +122,7 @@ connection immediately after writing the response.
 - Additional fields (documented per command) are present only when `ok` is
   `true`, unless noted otherwise.
 
-**Overflow guard:** if an internal response would exceed 128 KB (worst-case
+**Overflow guard:** if an internal response would exceed 256 KB (worst-case
 `get_status` with many clients), the server instead returns:
 
 ```json
@@ -106,10 +144,16 @@ name already exists, the key is updated in place.
 {"cmd":"add_user","name":"alice","key":"alice-secret"}
 ```
 
-| Field  | Type   | Required | Description                          |
-|--------|--------|----------|--------------------------------------|
-| `name` | string | yes      | Username (max 63 chars)              |
-| `key`  | string | yes      | Pre-shared key (max 255 chars)       |
+| Field      | Type   | Required | Description                                          |
+|------------|--------|----------|------------------------------------------------------|
+| `name`     | string | yes      | Username (1–63 bytes, no `"`, `\` or control characters) |
+| `key`      | string | yes      | Pre-shared key (max 255 bytes)                       |
+| `fixed_ip` | string | no       | IPv4 address reserved for this user (see §5.10)      |
+
+With `fixed_ip` the command is atomic: nothing changes unless the address is
+accepted. For an existing user the address is applied first and the key is
+left unchanged if it is refused; a new user is not kept if the address is
+refused.
 
 **Response — success**
 
@@ -122,20 +166,24 @@ name already exists, the key is updated in place.
 ```json
 {"ok":false,"error":"name and key required"}
 {"ok":false,"error":"add_user failed (-N)"}
+{"ok":false,"error":"fixed_ip invalid or unavailable"}
 ```
 
-- `"name and key required"` — one or both fields are missing or cannot be
-  parsed.
+- `"name and key required"` — one or both fields are missing, are not
+  strings, or are too long.
 - `"add_user failed (-N)"` — the underlying library call returned error code
-  `-N`; check server logs for details.
+  `-N` (for example an invalid name, or the user table is full); check server
+  logs for details.
+- `"fixed_ip invalid or unavailable"` — the address is malformed, outside the
+  client pool, or already reserved.
 
 ---
 
 ### 5.2 `remove_user`
 
-Remove a user from the auth table. Does not forcibly disconnect an active
-session; the session expires naturally after authentication fails on the next
-reconnect.
+Remove a user from the auth table. Active sessions authenticated with that
+username are disconnected immediately, and the user's fixed IP reservation
+(if any) is released.
 
 **Request**
 
@@ -580,6 +628,77 @@ A server/client with no reorder-enabled connection returns an all-zero
 
 ---
 
+### 5.10 `set_user_fixed_ip`
+
+Assign, change or clear the fixed (pinned) IPv4 address of an existing user
+at runtime. The address is removed from the dynamic pool and reserved for
+that user from its next connection onward.
+
+**Request**
+
+```json
+{"cmd":"set_user_fixed_ip","name":"carol","fixed_ip":"10.0.0.50"}
+{"cmd":"set_user_fixed_ip","name":"carol","fixed_ip":""}
+```
+
+| Field      | Type   | Required | Description                                         |
+|------------|--------|----------|-----------------------------------------------------|
+| `name`     | string | yes      | Existing username                                   |
+| `fixed_ip` | string | no       | IPv4 address inside the client pool; `""` or absent clears the reservation |
+
+**Response**
+
+```json
+{"ok":true}
+{"ok":false,"error":"name required"}
+{"ok":false,"error":"set_user_fixed_ip failed (-N)"}
+```
+
+`"set_user_fixed_ip failed (-N)"` covers an unknown user, a malformed or
+out-of-pool address, an address already reserved for someone else, and a
+`fixed_ip` that is not a string or is too long.
+
+---
+
+### 5.11 Path commands (client mode, plus a server-mode form)
+
+Keyed by the client's local interface name (`iface`, max 15 bytes).
+`add_path`, `remove_path` and `list_paths` exist only in client mode; a
+server answers `"not supported in server mode"`.
+
+| Request | Success | Errors |
+|---------|---------|--------|
+| `{"cmd":"add_path","iface":"eth0"}` (optional `"backup":true` for a failover-only path) | `{"ok":true}` | `"iface required"`, `"add_path failed"` |
+| `{"cmd":"remove_path","iface":"eth0"}` | `{"ok":true}` | `"iface required"`, `"path not found or last path"` |
+| `{"cmd":"list_paths"}` | `{"ok":true,"paths":["eth0","wlan0"]}` | — |
+| `{"cmd":"set_path_weight","iface":"eth0","weight":10}` | `{"ok":true}` | `"weight required"`, `"weight must be 0-65535"`, `"iface required"`, `"path not found"` |
+| `{"cmd":"set_path_dscp_mask","iface":"eth0","dscp_mask":70368744177664}` | `{"ok":true}` | `"dscp_mask required"`, `"dscp_mask must be a non-negative integer"`, `"iface required"`, `"path not found"` |
+
+- `weight` is a JSON number `0`–`65535` (used by the `wrtt` scheduler; `0`
+  means the default weight). `dscp_mask` is a non-negative JSON number, or
+  a bare `0x`-prefixed hexadecimal token (e.g. `0x400000000000`) as an
+  mqvpn extension; bit *N* allows DSCP class *N* (used by the `dscp`
+  scheduler).
+- By default the client reports its own weight / DSCP mask to the server,
+  which adopts it for its downlink too, so the client-side call is enough
+  for both directions (see `SyncPathLabels` in the configuration guide).
+
+**Server-mode form** of `set_path_weight` / `set_path_dscp_mask`: pins the
+server's downlink value for one client path, overriding what the client
+reports. It needs `user` plus either `iface` (persists across a path
+re-creation and may be sent before the path exists) or `path_id` from
+`get_status` (one-shot); `iface` wins if both are given.
+
+```json
+{"cmd":"set_path_weight","user":"alice","iface":"wlan0","weight":3}
+{"cmd":"set_path_dscp_mask","user":"alice","path_id":2,"dscp_mask":70368744177664}
+```
+
+Additional errors: `"user required"`, `"iface or path_id required"`,
+`"user not found"`, `"path not found"`.
+
+---
+
 ## 6. Error Reference
 
 | Error string             | Returned by                                    |
@@ -591,10 +710,22 @@ A server/client with no reorder-enabled connection returns an all-zero
 | `"name and key required"`| `add_user`                                     |
 | `"add_user failed (-N)"` | `add_user` (N = underlying error code)         |
 | `"name required"`        | `remove_user`                                  |
-| `"user not found"`       | `remove_user`, `get_fec_stats`                 |
-| `"user required"`        | `get_fec_stats`                                |
+| `"user not found"`       | `remove_user`, `get_fec_stats`, server-mode `set_path_weight` / `set_path_dscp_mask` |
+| `"user required"`        | `get_fec_stats`, server-mode `set_path_weight` / `set_path_dscp_mask` |
 | `"fec not built"`        | `get_fec_stats`, `get_all_fec_stats`           |
 | `"internal error"`       | `get_reorder_stats`                            |
+| `"invalid request"`      | any request whose first non-whitespace byte is not `{` |
+| `"request too large"`    | any request that fills the 4 KB buffer without a complete object |
+| `"fixed_ip invalid or unavailable"` | `add_user`                          |
+| `"set_user_fixed_ip failed (-N)"` | `set_user_fixed_ip`                   |
+| `"not supported in server mode"` | `add_path`, `remove_path`, `list_paths` |
+| `"iface required"`       | path commands                                  |
+| `"add_path failed"`      | `add_path`                                     |
+| `"path not found or last path"` | `remove_path`                           |
+| `"path not found"`       | `set_path_weight`, `set_path_dscp_mask`        |
+| `"weight required"`, `"weight must be 0-65535"` | `set_path_weight`       |
+| `"dscp_mask required"`, `"dscp_mask must be a non-negative integer"` | `set_path_dscp_mask` |
+| `"iface or path_id required"` | `set_path_weight`, `set_path_dscp_mask` (server mode) |
 
 ---
 
@@ -610,6 +741,20 @@ mqvpn follows semantic versioning for the control API:
   (future-proofing).
 - **Removing or renaming** a command or a response field is a
   **breaking change** and requires a major version bump.
+- **Request hardening (after v0.17.0):** no command or response field
+  changed, but input that used to be accepted loosely is now refused. A
+  request must start with `{` (an HTTP request, or any text before the
+  object, gets `"invalid request"`; previously such input was dispatched
+  once a newline arrived, which let a browser POST run commands). Keys are
+  matched at the top level only. `weight` / `dscp_mask` must be JSON
+  numbers (`dscp_mask` may also be bare `0x` hex); strings, negatives,
+  fractions and trailing junk are refused instead of parsed leniently.
+  Over-long strings are refused instead of truncated, and an over-long
+  `cmd` is `"unknown cmd"`. A request that fills the 4 KB buffer gets
+  `"request too large"` instead of being dispatched truncated. The 5 s
+  limit is now an absolute deadline rather than an idle timer. `add_user`
+  with `fixed_ip` is atomic. New error strings are listed in §6.
+  `echo '{"cmd":...}' | nc` clients are unaffected.
 - `get_stats` was extended in v0.5.0 with `dgram_sent`, `dgram_recv`,
   `dgram_lost`, `dgram_acked`, and `uptime_sec`. Consumers that only read
   `n_clients`, `bytes_tx`, and `bytes_rx` remain unaffected.
