@@ -11,6 +11,10 @@
 #   - net.ipv4.ip_forward = 1 (+ net.ipv6.conf.all.forwarding if Subnet6 set)
 #   - iptables MASQUERADE + FORWARD rules
 #   - ip6tables FORWARD + NAT66 (MASQUERADE) rules
+#
+# Teardown removes the rules but leaves forwarding enabled: other services on
+# the host (routers, containers, other VPNs) may rely on it, and turning it
+# back off on every stop or restart would cut them off.
 
 set -e
 
@@ -40,7 +44,31 @@ read_config_value() {
     if [ "$config_is_json" -eq 1 ]; then
         value=$(sed -n 's/.*"'"${json_key}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | tail -1 || true)
     else
-        value=$(sed -n 's/^[[:space:]]*'"$ini_key"'[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+        # Like src/config.c: section and key names are case-insensitive and
+        # these keys live in [Interface]. A trailing "# ..." or "; ..."
+        # comment is dropped (no valid value contains either character).
+        value=$(awk -v want="$ini_key" '
+            { line = $0; sub(/\r$/, "", line) }
+            line ~ /^[[:space:]]*\[/ {
+                sec = line
+                sub(/^[[:space:]]*\[/, "", sec)
+                sub(/\].*$/, "", sec)
+                gsub(/[[:space:]]/, "", sec)
+                sec = tolower(sec)
+                next
+            }
+            sec == "interface" {
+                eq = index(line, "=")
+                if (eq == 0) next
+                k = substr(line, 1, eq - 1)
+                gsub(/[[:space:]]/, "", k)
+                if (tolower(k) != tolower(want)) next
+                v = substr(line, eq + 1)
+                sub(/[#;].*$/, "", v)
+                gsub(/[[:space:]]/, "", v)
+                val = v
+            }
+            END { print val }' "$CONFIG")
     fi
 
     echo "${value:-$default}"
@@ -56,47 +84,32 @@ TUN_NAME=$(read_config_value "tun_name" "TunName"  "mqvpn0")
 COMMENT="mqvpn-server-nat"
 STATE_DIR="/run/mqvpn"
 
-# Detect default outbound interface
-detect_iface() {
-    ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' || true
-}
-
 setup() {
-    mkdir -p "$STATE_DIR"
-
-    # Save and enable IP forwarding
-    sysctl -n net.ipv4.ip_forward > "$STATE_DIR/orig_ip_forward.$TUN_NAME"
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-    NAT_IFACE=$(detect_iface)
-    if [ -z "$NAT_IFACE" ]; then
-        echo "Warning: could not detect default interface, skipping IPv4 NAT rules" >&2
-    else
-        echo "mqvpn-server-nat: setup subnet=$SUBNET iface=$NAT_IFACE tun=$TUN_NAME"
+    # MASQUERADE by source subnet on every egress except the tunnel itself,
+    # not on the interface that held the default route at start: that one
+    # goes stale when the route moves (multi-WAN, failover, DHCP), and it
+    # left client traffic to any other uplink un-NATed.
+    echo "mqvpn-server-nat: setup subnet=$SUBNET tun=$TUN_NAME"
 
-        iptables -t nat -A POSTROUTING -s "$SUBNET" -o "$NAT_IFACE" -j MASQUERADE \
-            -m comment --comment "$COMMENT"
-        iptables -I FORWARD -i "$TUN_NAME" -s "$SUBNET" -j ACCEPT \
-            -m comment --comment "$COMMENT"
-        iptables -I FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
-            -m comment --comment "$COMMENT"
-    fi
+    iptables -t nat -A POSTROUTING -s "$SUBNET" ! -o "$TUN_NAME" -j MASQUERADE \
+        -m comment --comment "$COMMENT"
+    iptables -I FORWARD -i "$TUN_NAME" -s "$SUBNET" -j ACCEPT \
+        -m comment --comment "$COMMENT"
+    iptables -I FORWARD -o "$TUN_NAME" -d "$SUBNET" -j ACCEPT \
+        -m comment --comment "$COMMENT"
 
     # IPv6 forwarding + FORWARD + NAT66 rules
     if [ -n "$SUBNET6" ]; then
-        sysctl -n net.ipv6.conf.all.forwarding > "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
         sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
         ip6tables -I FORWARD -i "$TUN_NAME" -s "$SUBNET6" -j ACCEPT \
             -m comment --comment "$COMMENT"
         ip6tables -I FORWARD -o "$TUN_NAME" -d "$SUBNET6" -j ACCEPT \
             -m comment --comment "$COMMENT"
-        NAT6_IFACE=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | grep -oP 'dev \K\S+' || true)
-        if [ -n "$NAT6_IFACE" ]; then
-            ip6tables -t nat -A POSTROUTING -s "$SUBNET6" -o "$NAT6_IFACE" -j MASQUERADE \
-                -m comment --comment "$COMMENT"
-            echo "mqvpn-server-nat: IPv6 NAT66 $SUBNET6 → $NAT6_IFACE"
-        fi
-        echo "mqvpn-server-nat: IPv6 FORWARD rules added for $SUBNET6"
+        ip6tables -t nat -A POSTROUTING -s "$SUBNET6" ! -o "$TUN_NAME" -j MASQUERADE \
+            -m comment --comment "$COMMENT"
+        echo "mqvpn-server-nat: IPv6 FORWARD + NAT66 rules added for $SUBNET6"
     fi
 }
 
@@ -133,15 +146,9 @@ teardown() {
     delete_by_comment_v6 nat POSTROUTING
     delete_by_comment_v6 filter FORWARD
 
-    # Restore forwarding settings
-    if [ -f "$STATE_DIR/orig_ip_forward.$TUN_NAME" ]; then
-        sysctl -w net.ipv4.ip_forward="$(cat "$STATE_DIR/orig_ip_forward.$TUN_NAME")" >/dev/null
-        rm -f "$STATE_DIR/orig_ip_forward.$TUN_NAME"
-    fi
-    if [ -f "$STATE_DIR/orig_ip6_forward.$TUN_NAME" ]; then
-        sysctl -w net.ipv6.conf.all.forwarding="$(cat "$STATE_DIR/orig_ip6_forward.$TUN_NAME")" >/dev/null
-        rm -f "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
-    fi
+    # Forwarding stays enabled (see the header). Drop the saved values an
+    # older version of this script left behind.
+    rm -f "$STATE_DIR/orig_ip_forward.$TUN_NAME" "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
 }
 
 case "$ACTION" in
