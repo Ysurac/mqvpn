@@ -1,4 +1,12 @@
 #!/bin/sh
 set -e
+# /etc/mqvpn holds PSKs and TLS private keys. Enforce 0750 root:root on
+# every configure (an existing directory keeps its old mode otherwise),
+# unless the admin registered a dpkg-statoverride for it.
+if [ "$1" = configure ] && [ -d /etc/mqvpn ] &&
+   ! dpkg-statoverride --list /etc/mqvpn > /dev/null 2>&1; then
+    chown root:root /etc/mqvpn
+    chmod 0750 /etc/mqvpn
+fi
 ldconfig
 systemctl daemon-reload 2>/dev/null || true

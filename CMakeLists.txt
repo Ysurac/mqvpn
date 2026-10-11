@@ -1360,6 +1360,11 @@ configure_file(systemd/mqvpn-client@.service.in
 install(FILES ${CMAKE_BINARY_DIR}/systemd/mqvpn-server.service
               ${CMAKE_BINARY_DIR}/systemd/mqvpn-client@.service
         DESTINATION lib/systemd/system)
+# /etc/mqvpn holds PSKs and TLS private keys: create it 0750, not with the
+# implicit 0755 the FILES rule below would give it (CPack copies the mode).
+install(DIRECTORY DESTINATION /etc/mqvpn
+        DIRECTORY_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                              GROUP_READ GROUP_EXECUTE)
 install(FILES systemd/server.conf.example systemd/client.conf.example
           systemd/server.json.example systemd/client.json.example
     DESTINATION /etc/mqvpn)

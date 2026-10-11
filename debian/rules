@@ -69,6 +69,12 @@ override_dh_auto_install:
 		rmdir --ignore-fail-on-non-empty $(CURDIR)/debian/tmp/usr/etc; \
 	fi
 
+# dh_fixperms resets directories to 0755; /etc/mqvpn holds PSKs and TLS
+# private keys, so ship it 0750 (debian/mqvpn.postinst fixes existing ones).
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0750 debian/mqvpn/etc/mqvpn
+
 override_dh_auto_test:
 	# Unit tests require a build dir; run if available.
 	if [ -d $(B) ]; then cd $(B) && ctest --output-on-failure || true; fi

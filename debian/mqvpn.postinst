@@ -3,10 +3,14 @@ set -e
 
 case "$1" in
     configure)
-        # Create config directory if it doesn't exist
-        if [ ! -d /etc/mqvpn ]; then
+        # /etc/mqvpn holds PSKs and TLS private keys. dpkg creates it (from
+        # mqvpn.dirs / the shipped examples) before this runs and keeps an
+        # existing directory's mode, so enforce 0750 root:root on every
+        # configure, unless the admin registered a dpkg-statoverride for it.
+        if ! dpkg-statoverride --list /etc/mqvpn > /dev/null 2>&1; then
             mkdir -p /etc/mqvpn
-            chmod 750 /etc/mqvpn
+            chown root:root /etc/mqvpn
+            chmod 0750 /etc/mqvpn
         fi
         ;;
 esac
