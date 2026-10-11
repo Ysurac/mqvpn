@@ -403,10 +403,42 @@ test_stream_unsent_cap_both_sides(void)
     return 0;
 }
 
+/* Not conn settings proper, but this is the unit test that links mqvpn_lib
+ * with the internal config layout: a user added into a slot vacated by
+ * mqvpn_config_remove_user() must not inherit the old occupant's fixed IP,
+ * and names/keys that would only fit shortened are refused. */
+static int
+test_config_user_slot_reuse(void)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg != NULL, 1);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "ka"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "kb"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "bob", "10.0.0.7"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "bob"), MQVPN_OK);
+    ASSERT_EQ(cfg->user_fixed_ips[1][0], '\0');
+    ASSERT_EQ(cfg->user_keys[1][0], '\0');
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "carol", "kc"), MQVPN_OK);
+    ASSERT_EQ(strcmp(cfg->user_names[1], "carol"), 0);
+    ASSERT_EQ(cfg->user_fixed_ips[1][0], '\0');
+
+    char longname[80];
+    memset(longname, 'n', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, longname, "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bad\"name", "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_auth_username(cfg, "a\nb"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_auth_username(cfg, "ok-user"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_auth_username(cfg, ""), MQVPN_OK);
+    mqvpn_config_free(cfg);
+    return 0;
+}
+
 int
 main(void)
 {
     int failed = 0;
+    failed += test_config_user_slot_reuse();
     failed += test_asymmetry_server_vs_client();
 #ifdef MQVPN_XQUIC_HAS_DEFER_SEND_FLUSH
     failed += test_defer_flush_tracks_batch_registration();

@@ -35,13 +35,9 @@ json_read_string_array(const char *p, char out[][32], int max_items, int *n_item
             return MQVPN_ERR_INVALID_ARG;
         }
 
-        const char *e = p + 1;
-        while (*e && *e != '"') {
-            if (*e == '\\' && e[1]) e++;
-            e++;
-        }
-        if (*e != '"') return MQVPN_ERR_INVALID_ARG;
-        p = json_skip_ws(e + 1);
+        const char *e = json_string_end(p);
+        if (!e) return MQVPN_ERR_INVALID_ARG;
+        p = json_skip_ws(e);
         n++;
 
         if (*p == ',') {
@@ -54,6 +50,17 @@ json_read_string_array(const char *p, char out[][32], int max_items, int *n_item
     if (*p != ']') return MQVPN_ERR_INVALID_ARG;
     *n_items = n;
     return MQVPN_OK;
+}
+
+/* 1 when `v` is a JSON string that fits `out`; 0 when it is not a string
+ * (ignored, as before) or does not fit, in which case *too_long is set so
+ * the caller fails the load instead of silently using a shortened value. */
+static int
+json_str_field(const char *v, char *out, size_t out_len, int *too_long)
+{
+    int rc = json_read_string(v, out, out_len);
+    if (rc == JSON_STR_TRUNCATED) *too_long = 1;
+    return rc == 0;
 }
 
 static int
@@ -215,6 +222,11 @@ mqvpn_config_set_auth_username(mqvpn_config_t *cfg, const char *username)
 {
     if (!cfg || !username) return MQVPN_ERR_INVALID_ARG;
 
+    /* "" clears the username; anything else follows the user-name rule (it
+     * is sent as a request header and echoed by the control API). */
+    if (username[0] != '\0' && !mqvpn_user_name_ok(username, sizeof(cfg->auth_username)))
+        return MQVPN_ERR_INVALID_ARG;
+
     snprintf(cfg->auth_username, sizeof(cfg->auth_username), "%s", username);
     return MQVPN_OK;
 }
@@ -226,11 +238,11 @@ mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key
         return MQVPN_ERR_INVALID_ARG;
     }
 
-    /* Reject characters that would break JSON serialization in control API */
-    for (const char *p = username; *p; p++) {
-        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
-            return MQVPN_ERR_INVALID_ARG;
-    }
+    /* Reject characters that would break JSON serialization in control API,
+     * and names/keys that would only fit shortened. */
+    if (!mqvpn_user_name_ok(username, sizeof(cfg->user_names[0])) ||
+        strlen(key) >= sizeof(cfg->user_keys[0]))
+        return MQVPN_ERR_INVALID_ARG;
 
     for (int i = 0; i < cfg->n_users; i++) {
         if (strcmp(cfg->user_names[i], username) == 0) {
@@ -247,6 +259,8 @@ mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username, const char *key
              username);
     snprintf(cfg->user_keys[cfg->n_users], sizeof(cfg->user_keys[cfg->n_users]), "%s",
              key);
+    /* A new user starts dynamic, whatever a previous occupant of the slot had. */
+    cfg->user_fixed_ips[cfg->n_users][0] = '\0';
     cfg->n_users++;
     return MQVPN_OK;
 }
@@ -269,6 +283,11 @@ mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username)
                        sizeof(cfg->user_fixed_ips[j - 1]));
             }
             cfg->n_users--;
+            /* Clear the vacated last slot (key included) so nothing of the
+             * old occupant survives into the next add. */
+            memset(cfg->user_names[cfg->n_users], 0, sizeof(cfg->user_names[0]));
+            memset(cfg->user_keys[cfg->n_users], 0, sizeof(cfg->user_keys[0]));
+            memset(cfg->user_fixed_ips[cfg->n_users], 0, sizeof(cfg->user_fixed_ips[0]));
             return MQVPN_OK;
         }
     }
@@ -339,8 +358,14 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     char tmp[256];
     int iv = 0;
 
+    /* A string value too long for tmp is an error for the whole load (never
+     * stored shortened); checked once at the end, since earlier keys may
+     * already be applied either way (same as the other error returns). */
+    int str_too_long = 0;
+#define JSON_STR_OK(val) json_str_field((val), tmp, sizeof(tmp), &str_too_long)
+
     v = json_find_key(json_text, "server_host");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->server_host, sizeof(cfg->server_host), tmp);
     }
 
@@ -350,17 +375,17 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "tls_server_name");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->tls_server_name, sizeof(cfg->tls_server_name), tmp);
     }
 
     v = json_find_key(json_text, "auth_key");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->auth_key, sizeof(cfg->auth_key), tmp);
     }
 
     v = json_find_key(json_text, "listen_addr");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->listen_addr, sizeof(cfg->listen_addr), tmp);
     }
 
@@ -370,37 +395,37 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "subnet");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->subnet, sizeof(cfg->subnet), tmp);
     }
 
     v = json_find_key(json_text, "subnet6");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->subnet6, sizeof(cfg->subnet6), tmp);
     }
 
     v = json_find_key(json_text, "tls_cert");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->tls_cert, sizeof(cfg->tls_cert), tmp);
     }
 
     v = json_find_key(json_text, "tls_key");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->tls_key, sizeof(cfg->tls_key), tmp);
     }
 
     v = json_find_key(json_text, "tls_ciphers");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), tmp);
     }
 
     v = json_find_key(json_text, "ciphers");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), tmp);
     }
 
     v = json_find_key(json_text, "cipher");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_copy_str(cfg->tls_ciphers, sizeof(cfg->tls_ciphers), tmp);
     }
 
@@ -429,7 +454,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "scheduler");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_scheduler_t sched = MQVPN_SCHED_WLB;
         if (parse_scheduler_name(tmp, &sched) != MQVPN_OK) {
             return MQVPN_ERR_INVALID_ARG;
@@ -438,7 +463,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "cc");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_cc_t cc = MQVPN_CC_BBR2;
         if (parse_cc_name(tmp, &cc) != MQVPN_OK) {
             return MQVPN_ERR_INVALID_ARG;
@@ -452,7 +477,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
      * "scheduler"/"cc" above). Absent keys keep the off/110/500/20 defaults. */
     int reinjection_set = 0;
     v = json_find_key(json_text, "reinjection");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         mqvpn_reinjection_t reinj = MQVPN_REINJ_OFF;
         if (parse_reinj_name(tmp, &reinj) != MQVPN_OK) {
             return MQVPN_ERR_INVALID_ARG;
@@ -504,7 +529,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
 
         const char *mode_key = json_find_key(json_text, "reinj_ctl");
         if (!mode_key) mode_key = json_find_key(json_text, "reinjection_mode");
-        if (legacy_enable && mode_key && json_read_string(mode_key, tmp, sizeof(tmp)) == MQVPN_OK) {
+        if (legacy_enable && mode_key && JSON_STR_OK(mode_key)) {
             if (strcmp(tmp, "deadline") == 0) {
                 cfg->reinjection = MQVPN_REINJ_DEADLINE;
             } else if (strcmp(tmp, "dgram") == 0) {
@@ -528,7 +553,7 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "fec_scheme");
-    if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
+    if (v && JSON_STR_OK(v)) {
         if (strcmp(tmp, "xor") == 0) {
             cfg->fec_scheme = MQVPN_FEC_SCHEME_XOR;
         } else if (strcmp(tmp, "packet_mask") == 0 || strcmp(tmp, "packet_maskn") == 0) {
@@ -592,7 +617,8 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         return MQVPN_ERR_INVALID_ARG;
     }
 
-    return MQVPN_OK;
+#undef JSON_STR_OK
+    return str_too_long ? MQVPN_ERR_INVALID_ARG : MQVPN_OK;
 }
 
 int
