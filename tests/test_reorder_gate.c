@@ -305,6 +305,8 @@ test_send_ptb_v6_sends(void)
     pkt[0] = 0x60;
     pkt[6] = 17; /* next header UDP */
     pkt[7] = 64; /* hop limit */
+    pkt[8] = 0xfd; /* source fd00::9: an unspecified source draws no ICMPv6 error */
+    pkt[23] = 9;
     size_t n = 48;
     uint8_t src6[16] = {0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 

@@ -2516,7 +2516,7 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
         }
         memcpy(fwd_pkt, pkt, len);
         if (fwd_pkt[8] <= 1) {
-            if (svr_conn_icmp_allow(conn)) {
+            if (mqvpn_icmp_error_allowed_v4(pkt, len) && svr_conn_icmp_allow(conn)) {
                 struct in_addr srv;
                 mqvpn_addr_pool_server_addr(&s->pool, &srv);
                 mqvpn_icmp_send_v4(send_icmp_via_datagram, conn,
@@ -2538,7 +2538,8 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
         }
         memcpy(fwd_pkt, pkt, len);
         if (fwd_pkt[7] <= 1) {
-            if (s->pool.has_v6 && svr_conn_icmp_allow(conn)) {
+            if (s->pool.has_v6 && mqvpn_icmp_error_allowed_v6(pkt, len, 3, 0) &&
+                svr_conn_icmp_allow(conn)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
                 mqvpn_icmp_send_v6(send_icmp_via_datagram, conn, srv6.s6_addr, 3, 0, 0,
@@ -3249,7 +3250,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (!target || !target->tunnel_established) {
         /* §7.3: ICMP Dest Unreachable for unknown destination (rate limited) */
         if (ip_ver == 4) {
-            if (ptb_rate_allow(s)) {
+            if (mqvpn_icmp_error_allowed_v4(pkt, len) && ptb_rate_allow(s)) {
                 struct in_addr srv;
                 mqvpn_addr_pool_server_addr(&s->pool, &srv);
                 mqvpn_icmp_send_v4(s->cbs.tun_output, s->user_ctx,
@@ -3257,7 +3258,8 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
                 LOG_D(s, "sent ICMP Dest Unreachable to TUN");
             }
         } else {
-            if (s->pool.has_v6 && ptb_rate_allow(s)) {
+            if (s->pool.has_v6 && mqvpn_icmp_error_allowed_v6(pkt, len, 1, 3) &&
+                ptb_rate_allow(s)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
                 mqvpn_icmp_send_v6(s->cbs.tun_output, s->user_ctx, srv6.s6_addr, 1, 3, 0,
@@ -3284,20 +3286,23 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         len, now_us(), (uint32_t)udp_mss, &peek, &ptb_mtu);
     int do_stamp = (rv == MQVPN_RGATE_STAMP);
     if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
+        /* addr_ok also carries the RFC 1122 / 4443 eligibility check, so a
+         * suppressed error neither uses a token nor logs as sent. */
         int sent;
         if (ip_ver == 4) {
             struct in_addr srv;
             mqvpn_addr_pool_server_addr(&s->pool, &srv);
-            sent =
-                mqvpn_rgate_send_ptb(&target->icmp_bucket, now_ms_mono(), 4,
-                                     /*addr_ok=*/1, (const uint8_t *)&srv.s_addr, ptb_mtu,
-                                     s->cbs.tun_output, s->user_ctx, pkt, len);
+            sent = mqvpn_rgate_send_ptb(&target->icmp_bucket, now_ms_mono(), 4,
+                                        mqvpn_icmp_error_allowed_v4(pkt, len),
+                                        (const uint8_t *)&srv.s_addr, ptb_mtu,
+                                        s->cbs.tun_output, s->user_ctx, pkt, len);
         } else {
             struct in6_addr srv6;
             mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
-            sent = mqvpn_rgate_send_ptb(&target->icmp_bucket, now_ms_mono(), 6,
-                                        s->pool.has_v6, srv6.s6_addr, ptb_mtu,
-                                        s->cbs.tun_output, s->user_ctx, pkt, len);
+            sent = mqvpn_rgate_send_ptb(
+                &target->icmp_bucket, now_ms_mono(), 6,
+                s->pool.has_v6 && mqvpn_icmp_error_allowed_v6(pkt, len, 2, 0),
+                srv6.s6_addr, ptb_mtu, s->cbs.tun_output, s->user_ctx, pkt, len);
         }
         if (sent) {
             if (rv == MQVPN_RGATE_DROP_REORDER_MTU) {
@@ -3327,7 +3332,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (ip_ver == 4) {
         if (fwd_pkt[8] <= 1) {
             /* DL: source is on TUN side → ICMP goes via tun_output */
-            if (svr_conn_icmp_allow(target)) {
+            if (mqvpn_icmp_error_allowed_v4(pkt, len) && svr_conn_icmp_allow(target)) {
                 struct in_addr srv;
                 mqvpn_addr_pool_server_addr(&s->pool, &srv);
                 mqvpn_icmp_send_v4(s->cbs.tun_output, s->user_ctx,
@@ -3343,7 +3348,8 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         fwd_pkt[11] = sum & 0xFF;
     } else {
         if (fwd_pkt[7] <= 1) {
-            if (s->pool.has_v6 && svr_conn_icmp_allow(target)) {
+            if (s->pool.has_v6 && mqvpn_icmp_error_allowed_v6(pkt, len, 3, 0) &&
+                svr_conn_icmp_allow(target)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
                 mqvpn_icmp_send_v6(s->cbs.tun_output, s->user_ctx, srv6.s6_addr, 3, 0, 0,
