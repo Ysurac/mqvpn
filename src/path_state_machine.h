@@ -67,8 +67,10 @@ typedef enum {
  *   XQUIC_REMOVED / PLATFORM_DROP / REMOVE_API / ADD / TRANSPORT_RELEASED / CONN_RESET:
  *     now_us only
  *
- * Caller MUST always populate now_us (FSM does not call client_now_us()
- * internally so the clock stays injectable for tests). */
+ * Caller MUST always populate now_us: handlers arm their timers from it.
+ * The one clock read inside the FSM is the transition timestamp
+ * (state_entered_at_us), taken by set_path_state_with_log() through
+ * client_now_us(), which honors the injected clock as well. */
 typedef struct {
     activate_result_t result;
     uint64_t new_xqc_path_id;
@@ -207,11 +209,13 @@ MQVPN_INTERNAL void path_fsm_fire_path_event(struct mqvpn_client_s *c,
                                              const path_entry_t *p);
 
 /* G-P15 (draft-21 §3.3 ¶6): mirror local lifecycle demotions onto the
- * xquic conn via xqc_conn_mark_path_{standby,available,frozen}. The
- * caller passes the xquic app_status int (XQC_APP_PATH_STATUS_STANDBY=1,
- * AVAILABLE=2, FROZEN=3); the accessor dispatches to the right xquic
- * API. Implementation in mqvpn_client.c (needs the full client struct
- * for c->engine and c->conn->cid). No-op when engine/conn missing. */
+ * xquic conn via xqc_conn_mark_path_{standby,available}. The caller passes
+ * the app_status relay code (STANDBY=1, AVAILABLE=2, FROZEN=3); the
+ * accessor dispatches to the right xquic API for a live path. FROZEN is
+ * never forwarded (no draft-21 frame; its only trigger is a path xquic
+ * already removed). Implementation in mqvpn_client.c (needs the full
+ * client struct for c->engine and c->conn->cid). No-op when engine/conn
+ * missing. */
 MQVPN_INTERNAL void client_notify_xqc_path_state(struct mqvpn_client_s *c,
                                                  const path_entry_t *p, int app_status);
 

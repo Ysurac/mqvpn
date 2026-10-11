@@ -315,13 +315,16 @@ path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
  * the state field would update but no transition log fires and
  * path_mark_state_entry never re-anchors the residence timer. */
 /* G-P15 (draft-21 §3.3 ¶6): when local lifecycle demotes ACTIVE↔STANDBY
- * or ACTIVE/STANDBY→DEGRADED, mirror the new path class onto the xquic
- * conn so the peer is informed via PATH_STATUS frames. Closing
- * transitions (→ CLOSED_*) use xquic's path-abandon path, not mark; we
- * only fire on operational class changes.
+ * or ACTIVE/STANDBY→DEGRADED, hand the new path class to the client
+ * (client_notify_xqc_path_state), which mirrors it onto the xquic conn for
+ * a live path. Closing transitions (→ CLOSED_*) use xquic's path-abandon
+ * path, not mark; we only fire on operational class changes.
  *   1 = XQC_APP_PATH_STATUS_STANDBY
  *   2 = XQC_APP_PATH_STATUS_AVAILABLE
- *   3 = XQC_APP_PATH_STATUS_FROZEN */
+ *   3 = XQC_APP_PATH_STATUS_FROZEN
+ * Only 3 is reachable, on XQUIC_REMOVED, after apply_failure_with_retry_check
+ * has cleared the slot: the client treats it as a no-op (see there). The
+ * call itself is part of the FSM contract checked by the formal oracle. */
 static int
 g_p15_xqc_app_status_for(path_lifecycle_t from, path_lifecycle_t to)
 {
