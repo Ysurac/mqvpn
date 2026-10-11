@@ -186,13 +186,79 @@ TEST(jfind_missing)
 
 TEST(jfind_nested_value)
 {
-    /* json_find_key does flat search, so it finds "key" inside nested obj too */
+    /* json_find_key matches the object's own members only: the "key" inside
+     * the nested object is skipped. */
     const char *json = "{\"user\":{\"key\":\"val\"},\"key\":\"top\"}";
     const char *v = json_find_key(json, "key");
     char out[32];
     ASSERT_EQ(json_read_string(v, out, sizeof(out)), 0);
-    /* Flat search finds first occurrence */
-    ASSERT_STR_EQ(out, "val");
+    ASSERT_STR_EQ(out, "top");
+
+    /* Nested-only key: not found at top level; inside arrays too. */
+    assert(json_find_key("{\"a\":{\"cmd\":\"x\"}}", "cmd") == NULL);
+    assert(json_find_key("{\"a\":[{\"cmd\":\"x\"}]}", "cmd") == NULL);
+    /* Not an object at all: no keys. */
+    assert(json_find_key("POST / HTTP/1.1\r\n\r\n{\"cmd\":\"x\"}", "cmd") == NULL);
+    /* Truncated object: searched to its end. */
+    assert(json_find_key("{\"cmd\":\"add_user\"", "cmd") != NULL);
+}
+
+TEST(jstr_escapes)
+{
+    char out[32];
+    ASSERT_EQ(json_read_string("\"a\\\"b\\\\c\\/d\\n\\t\"", out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "a\"b\\c/d\n\t");
+    ASSERT_EQ(json_read_string("\"\\u0041\\u00e9\"", out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "A\xc3\xa9");
+    ASSERT_EQ(json_read_string("\"\\ud83d\\ude00\"", out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "\xf0\x9f\x98\x80");
+    /* Malformed: bad escape, lone surrogate, NUL, unterminated. */
+    ASSERT_EQ(json_read_string("\"\\q\"", out, sizeof(out)), JSON_STR_MALFORMED);
+    ASSERT_EQ(json_read_string("\"\\ud800x\"", out, sizeof(out)), JSON_STR_MALFORMED);
+    ASSERT_EQ(json_read_string("\"\\u0000\"", out, sizeof(out)), JSON_STR_MALFORMED);
+    ASSERT_EQ(json_read_string("\"abc", out, sizeof(out)), JSON_STR_MALFORMED);
+}
+
+TEST(jstr_truncation_reported)
+{
+    char out[4];
+    ASSERT_EQ(json_read_string("\"abcdef\"", out, sizeof(out)), JSON_STR_TRUNCATED);
+    ASSERT_STR_EQ(out, "abc"); /* prefix kept for display-only callers */
+    ASSERT_EQ(json_read_string("\"abc\"", out, sizeof(out)), 0);
+}
+
+TEST(jint_strict)
+{
+    int v = 0;
+    ASSERT_EQ(json_read_int("42", &v), 0);
+    ASSERT_EQ(v, 42);
+    ASSERT_EQ(json_read_int("-7}", &v), 0);
+    ASSERT_EQ(v, -7);
+    ASSERT_EQ(json_read_int("12abc", &v), -1);
+    ASSERT_EQ(json_read_int("1.5", &v), -1);
+    ASSERT_EQ(json_read_int("4294967296", &v), -1); /* > INT_MAX, not truncated */
+    ASSERT_EQ(json_read_int("\"5\"", &v), -1);
+    int64_t w = 0;
+    ASSERT_EQ(json_read_int64_strict("99999999999,", &w), 0);
+    ASSERT_EQ(w, 99999999999LL);
+    ASSERT_EQ(json_read_int64_strict("99999999999999999999", &w), -1);
+    ASSERT_EQ(json_read_int64("12x"), 0);
+    int b = 0;
+    ASSERT_EQ(json_read_bool("true,", &b), 0);
+    ASSERT_EQ(b, 1);
+    ASSERT_EQ(json_read_bool("truex", &b), -1);
+}
+
+/* --status used to spin forever on a "clients"/"paths" element that is not
+ * an object; it must step over it (or stop) and still print the rest. */
+TEST(status_reply_non_object_elements)
+{
+    ASSERT_EQ(print_status_reply("{\"ok\":true,\"n_clients\":2,\"clients\":"
+                                 "[1,\"x\",null,{\"user\":\"a\",\"paths\":"
+                                 "[7,{\"srtt_ms\":1},[2],true]}]}"),
+              0);
+    ASSERT_EQ(print_status_reply("{\"ok\":true,\"n_clients\":0,\"clients\":[,]}"), 0);
+    ASSERT_EQ(print_status_reply("{\"ok\":false,\"error\":\"nope\"}"), 1);
 }
 
 TEST(jstr_null)
@@ -399,6 +465,10 @@ main(void)
     run_jfind_int();
     run_jfind_missing();
     run_jfind_nested_value();
+    run_jstr_escapes();
+    run_jstr_truncation_reported();
+    run_jint_strict();
+    run_status_reply_non_object_elements();
     run_jstr_null();
     run_jint_null();
 

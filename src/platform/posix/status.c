@@ -155,7 +155,8 @@ print_client(const char *obj)
             size_t plen = (size_t)(end - p);
             char path_obj[512];
             if (plen >= sizeof(path_obj)) {
-                p = end;
+                p = json_skip_ws(end);
+                if (*p == ',') p = json_skip_ws(p + 1);
                 continue;
             }
             memcpy(path_obj, p, plen);
@@ -181,7 +182,13 @@ print_client(const char *obj)
 
             p = end;
             idx++;
+        } else {
+            /* Not an object: step over it, or stop on garbage — never spin. */
+            const char *end = skip_json_value(p);
+            if (!end || end == p) break;
+            p = end;
         }
+        p = json_skip_ws(p);
         if (*p == ',') p++;
         p = json_skip_ws(p);
     }
@@ -344,34 +351,21 @@ print_offload_summary(const char *buf)
            rx_r ? (double)rx_d / (double)rx_r : 0.0);
 }
 
-/* ── Main entry point ── */
+/* ── Print a get_status reply ── */
 
-int
-run_status(const char *addr, int port)
+/* Returns 0 after printing the client list, 1 if the server answered with an
+ * error (message printed to stderr). Elements of "clients" / "paths" that
+ * are not objects are skipped, never looped on. */
+static int
+print_status_reply(const char *buf)
 {
-    if (!addr) addr = "127.0.0.1";
-
-    int rc = 1;
-
-    /* Control API handles one command per connection: get_stats first (lane
-     * summary), then get_status (per-client listing). */
-    char *stats_buf = ctrl_query(addr, port, "{\"cmd\":\"get_stats\"}\n");
-    if (!stats_buf) return 1; /* server unreachable — error already printed */
-    print_stats_summary(stats_buf);
-    print_offload_summary(stats_buf);
-    free(stats_buf);
-
-    char *buf = ctrl_query(addr, port, "{\"cmd\":\"get_status\"}\n");
-    if (!buf) return 1;
-
-    /* Parse and display */
     const char *ok = json_find_key(buf, "ok");
     if (!ok || strncmp(ok, "true", 4) != 0) {
         const char *err = json_find_key(buf, "error");
         char errmsg[128] = "unknown error";
         if (err) json_read_string(err, errmsg, sizeof(errmsg));
         fprintf(stderr, "error: %s\n", errmsg);
-        goto cleanup;
+        return 1;
     }
 
     int n_clients = (int)json_read_int64(json_find_key(buf, "n_clients"));
@@ -394,7 +388,13 @@ run_status(const char *addr, int port)
                     free(client_obj);
                 }
                 p = end;
+            } else {
+                /* Not an object: step over it, or stop on garbage. */
+                const char *end = skip_json_value(p);
+                if (!end || end == p) break;
+                p = end;
             }
+            p = json_skip_ws(p);
             if (*p == ',') p++;
             p = json_skip_ws(p);
         }
@@ -402,9 +402,30 @@ run_status(const char *addr, int port)
 
     if (n_clients == 0) printf("\n  (no connected clients)\n");
 
-    rc = 0;
+    return 0;
+}
 
-cleanup:
+/* ── Main entry point ── */
+
+int
+run_status(const char *addr, int port)
+{
+    if (!addr) addr = "127.0.0.1";
+
+    int rc;
+
+    /* Control API handles one command per connection: get_stats first (lane
+     * summary), then get_status (per-client listing). */
+    char *stats_buf = ctrl_query(addr, port, "{\"cmd\":\"get_stats\"}\n");
+    if (!stats_buf) return 1; /* server unreachable — error already printed */
+    print_stats_summary(stats_buf);
+    print_offload_summary(stats_buf);
+    free(stats_buf);
+
+    char *buf = ctrl_query(addr, port, "{\"cmd\":\"get_status\"}\n");
+    if (!buf) return 1;
+
+    rc = print_status_reply(buf);
     free(buf);
     return rc;
 }
