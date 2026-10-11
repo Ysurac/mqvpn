@@ -65,6 +65,20 @@ mqvpn (0.17.0-1) UNRELEASED; urgency=medium
   * Merge upstream mqvpn main (0.17.0): shared-library SOVERSION bumped to
     4 (callback ABI 3 removed mqvpn_client_add_path_fd and friends);
     Windows arm64 release built with the VS 2026 generator; docs fixes.
+  * packaging: the library package is now libmqvpn4, named after its
+    soname (Replaces/Breaks/Provides libmqvpn0 >= 0.16.3~, which already
+    carried libmqvpn.so.4), and ships the libxquic.so that libmqvpn.so.4
+    needs; libmqvpn.so exports only its API (lwIP and BoringSSL symbols are
+    hidden); a prerm stops mqvpn-server and mqvpn-client@ instances on
+    removal so the NAT teardown still runs; /etc/mqvpn is 0750 root:root;
+    debian/rules builds like build.sh, applies the hardening flags to
+    BoringSSL, xquic and mqvpn, and fails on unit test failures.
+  * systemd: mqvpn-client@.service starts again under ProtectSystem=strict
+    (it failed with 226/NAMESPACE when no resolv.conf backup existed) and
+    is bounded to CAP_NET_ADMIN and CAP_NET_RAW. The server NAT helper
+    reads Subnet/Subnet6/TunName like the server does (case-insensitive,
+    trailing comment allowed), masquerades on every egress but the tunnel,
+    and no longer switches IP forwarding off on stop.
 
  -- mqvpn maintainers <maintainers@example.com>  Fri, 09 Oct 2026 11:32:04 +0200
 
