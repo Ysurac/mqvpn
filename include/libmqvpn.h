@@ -586,9 +586,13 @@ typedef struct {
 } mqvpn_path_desc_t;
 
 /* Path descriptor flags */
-#define MQVPN_PATH_FLAG_BACKUP  (1u << 0)  /* standby/failover path: only used when all
-                                             * primary paths are unavailable, then put
-                                             * back to standby when a primary recovers */
+/* Backup (failover) path: created and validated like any other path but held
+ * in STANDBY (status MQVPN_PATH_STANDBY, PATH_STATUS_BACKUP sent to the
+ * peer), so it stays probed. The backup and backup_fec schedulers send on a
+ * standby path only while no primary path is usable, and return to the
+ * primaries when one recovers. Other schedulers do not distinguish standby
+ * paths from primary ones. */
+#define MQVPN_PATH_FLAG_BACKUP (1u << 0)
 
 /* ─── Callback function types ─── */
 

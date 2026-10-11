@@ -1707,6 +1707,77 @@ TEST(server_runtime_added_path_not_stuck_pending)
     close(cli_fd1);
 }
 
+/* A backup path (MQVPN_PATH_FLAG_BACKUP) is created STANDBY in xquic and
+ * validates into MQVPN_PATH_STANDBY, not ACTIVE: it stays probed but the
+ * backup scheduler only sends on it while no primary path is usable. */
+static void
+tweak_multipath_backup_sched(mqvpn_config_t *cfg)
+{
+    mqvpn_config_set_multipath(cfg, 1);
+    ASSERT_EQ(mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_BACKUP), MQVPN_OK);
+}
+
+TEST(client_backup_path_validates_into_standby)
+{
+    loopback_t lb;
+    loopback_setup(&lb, tweak_multipath_backup_sched);
+    loopback_pump_until(&lb, done_established, 10000);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 1);
+    mqvpn_client_set_tun_active(lb.cli, 1, -1);
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_ESTABLISHED);
+
+    int cli_fd1 = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+    ASSERT_NE(cli_fd1, -1);
+    struct sockaddr_in cli_addr1;
+    memset(&cli_addr1, 0, sizeof(cli_addr1));
+    cli_addr1.sin_family = AF_INET;
+    cli_addr1.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    cli_addr1.sin_port = htons(0);
+    ASSERT_EQ(bind(cli_fd1, (struct sockaddr *)&cli_addr1, sizeof(cli_addr1)), 0);
+    socklen_t alen = sizeof(cli_addr1);
+    getsockname(cli_fd1, (struct sockaddr *)&cli_addr1, &alen);
+
+    mqvpn_path_desc_t d1;
+    memset(&d1, 0, sizeof(d1));
+    d1.struct_size = sizeof(d1);
+    memcpy(d1.local_addr, &cli_addr1, sizeof(cli_addr1));
+    d1.local_addr_len = sizeof(cli_addr1);
+    d1.flags = MQVPN_PATH_FLAG_BACKUP;
+    snprintf(d1.iface, sizeof(d1.iface), "lte0");
+    void *cli_tctx1 = NULL;
+    mqvpn_bind_posix_opts_t bopts = {0};
+    bopts.struct_size = sizeof(bopts);
+    bopts.udp_gso = 1;
+    bopts.socket_buf_bytes = -1;
+    ASSERT_EQ(mqvpn_bind_posix_path_new(cli_fd1, &bopts, &cli_tctx1), MQVPN_OK);
+    mqvpn_path_handle_t h1 =
+        mqvpn_client_add_path(lb.cli, &d1, mqvpn_bind_posix_path_ops(), cli_tctx1, NULL);
+    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
+
+    mqvpn_path_status_t st = MQVPN_PATH_PENDING;
+    for (int elapsed = 0; elapsed < 12000; elapsed++) {
+        drain_and_tick_two_paths(lb.svr, lb.svr_tctx, lb.cli, lb.cli_tctx, lb.path_h,
+                                 cli_tctx1, h1);
+        st = get_path_status_or_invalid(lb.cli, h1);
+        if (st != MQVPN_PATH_PENDING) break;
+
+        struct pollfd pfds[3] = {
+            {.fd = lb.svr_fd, .events = POLLIN},
+            {.fd = lb.cli_fd, .events = POLLIN},
+            {.fd = cli_fd1, .events = POLLIN},
+        };
+        int w = poll(pfds, 3, 10);
+        elapsed += (w == 0) ? 10 : 1;
+    }
+    ASSERT_EQ(st, MQVPN_PATH_STANDBY);
+    /* the primary path is untouched */
+    ASSERT_EQ(get_path_status_or_invalid(lb.cli, lb.path_h), MQVPN_PATH_ACTIVE);
+
+    mqvpn_client_disconnect(lb.cli);
+    loopback_teardown(&lb); /* finalises cli_tctx1 too */
+    close(cli_fd1);
+}
+
 /* ── test_server_get_status: control API status queries ──
  *
  * Verify mqvpn_server_get_client_info() (used by control socket get_status command)
@@ -2660,6 +2731,7 @@ main(void)
     /* QUIC loopback integration test (test_server_session per impl_plan) */
     run_server_session_quic_loopback();
     run_server_runtime_added_path_not_stuck_pending();
+    run_client_backup_path_validates_into_standby();
 
     /* Control API: get_status with and without clients */
     run_server_get_status_no_clients();

@@ -1144,37 +1144,6 @@ client_arm_reconnect_timer(mqvpn_client_t *c)
     return delay;
 }
 
-/*
- * xquic path budget is connection-scoped (XQC_MAX_PATHS_COUNT).
- * When exhausted, additional path creation cannot recover in-place; force a
- * clean reconnect so counters/CIDs are reinitialized.
- */
-static void
-client_force_reconnect_on_path_budget_exhausted(mqvpn_client_t *c, path_entry_t *p,
-                                                int idx, int ret)
-{
-    if (!c || !c->engine || !c->conn) return;
-    if (c->shutting_down || c->state == MQVPN_STATE_RECONNECTING ||
-        c->state == MQVPN_STATE_CLOSED)
-        return;
-
-    if (!c->config.reconnect_enable) {
-        LOG_W(c,
-              "path[%d] create-path budget exhausted on %s (ret=%d), "
-              "auto-reconnect disabled",
-              idx, p ? p->name : "?", ret);
-        return;
-    }
-
-    LOG_W(c,
-          "path[%d] create-path budget exhausted on %s (ret=%d), forcing "
-          "connection reconnect",
-          idx, p ? p->name : "?", ret);
-
-    xqc_conn_close(c->engine, &c->conn->cid);
-    xqc_engine_main_logic(c->engine);
-}
-
 /* ================================================================
  *  xquic engine callbacks
  * ================================================================ */
@@ -2726,29 +2695,38 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 
 /* ─── Multipath helpers ─── */
 
+/* A secondary path is created (and, once validated, held) in STANDBY when it
+ * is a backup path (MQVPN_PATH_FLAG_BACKUP) or when the scheduler is
+ * backup_fec (spec §10.1.1). xquic then signals PATH_STATUS_BACKUP to the
+ * peer, and its backup / backup_fec schedulers send on a standby path only
+ * while no available path is usable, which is the failover. The initial
+ * path (path_id 0) is created with the connection as AVAILABLE and never
+ * passes through here. */
+static int
+client_path_starts_standby(const mqvpn_client_t *c, const path_entry_t *p)
+{
+    return c->config.scheduler == MQVPN_SCHED_BACKUP_FEC ||
+           (p->flags & MQVPN_PATH_FLAG_BACKUP) != 0;
+}
+
 /* PR4 — Call xqc_conn_create_path() and classify per spec §6.6.
  * On OK, *out_path_id receives the new xqc-side path_id; on fail it is 0.
  * The caller passes the classification + path_id into path_on_event()'s
  * ctx (ACTIVATE_REQUESTED / RETRY_TIMER / MANUAL_REACTIVATE). */
 static activate_result_t
-activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
+activate_via_xquic_classify(mqvpn_client_t *c, const path_entry_t *p,
+                            uint64_t *out_path_id)
 {
-    int path_status = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) ? 1 : 0;
+    int path_status = client_path_starts_standby(c, p) ? 1 : 0;
     *out_path_id = 0;
     xqc_int_t ret =
         xqc_conn_create_path(c->engine, &c->conn->cid, out_path_id, path_status);
     if (ret == 0) return ACTIVATE_OK;
-    if (ret == -XQC_EMP_CREATE_PATH) return ACTIVATE_PERMANENT_FAIL;
+    if (mqvpn_path_error_is_create_budget_exhausted((int)ret))
+        return ACTIVATE_PERMANENT_FAIL;
     return ACTIVATE_TRANSIENT_FAIL;
 }
 
-/* Create an xquic path for a secondary path entry. Thin caller — all state
- * mutation happens inside path_on_event(ACTIVATE_REQUESTED) per spec §6.6.
- *
- * For MQVPN_SCHED_BACKUP_FEC the secondary path is created in STANDBY
- * (path_status=1) so that xquic's backup_fec scheduler routes only FEC repair
- * symbols to it, while the primary path stays AVAILABLE. Per xquic's public
- * API: 1 = STANDBY, anything else = AVAILABLE (xquic.h L2210). */
 /* Tell the server "path_id N is my iface I, with this weight/dscp_mask"
  * via a PATH_LABEL capsule (RFC 9297) on the CONNECT-IP request stream —
  * see mqvpn_path_label.h for why. Carrying weight/dscp_mask (not just the
@@ -2807,8 +2785,7 @@ client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *ifac
  * slot gets an xquic path_id calls it: client_activate_path() (first
  * activation attempt), tick_drive_retry_timer() (retry after a
  * failed/timed-out validation), mqvpn_client_reactivate_path() (platform
- * reactivation), client_create_standby_path() (backup path) and
- * cli_connect_ip_on_body() for the primary path, path_id 0, which is
+ * reactivation) and cli_connect_ip_on_body() for the primary path, path_id 0, which is
  * created with the connection. Each of these gets its OWN path_id, so it
  * needs the exact same treatment. Missing it on one of them was a real bug
  * every time: the path silently lost its weight/dscp_mask/label
@@ -2830,13 +2807,18 @@ client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p, activate_resul
     }
 }
 
+/* Create an xquic path for a secondary path entry. Thin caller — all state
+ * mutation happens inside path_on_event(ACTIVATE_REQUESTED) per spec §6.6.
+ * Backup paths, and every secondary under backup_fec (whose scheduler then
+ * routes only FEC repair symbols to it), are created STANDBY: see
+ * client_path_starts_standby(). */
 static void
 client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
     if (p->xquic_path_live) return;
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
     LOG_I(c, "path[%d] activate: result=%s id=%llu", idx,
           r == ACTIVATE_OK               ? "OK"
           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
@@ -2886,131 +2868,6 @@ activate_pending_paths(mqvpn_client_t *c)
         path_entry_t *p = &c->paths[i];
         if (p->state != PATH_LC_PENDING) continue;
         client_activate_path(c, p, i);
-    }
-}
-
-/*
- * Create an xquic path for a backup entry and immediately mark it standby in
- * the xquic scheduler.  The path participates in probing (keeping RTT fresh)
- * but carries no data until client_check_failover promotes it.
- *
- * xqc_conn_mark_path_standby() handles the case where the path has not
- * completed validation yet (path_state < ACTIVE) by setting a deferred flag,
- * so it is safe to call right after xqc_conn_create_path().
- */
-static void
-client_create_standby_path(mqvpn_client_t *c, path_entry_t *p, int idx)
-{
-    uint64_t new_id = 0;
-    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
-    if (ret < 0) {
-        LOG_W(c, "xqc_conn_create_path (backup)[%d]: %d", idx, ret);
-        if (mqvpn_path_error_is_create_budget_exhausted((int)ret)) {
-            client_force_reconnect_on_path_budget_exhausted(c, p, idx, (int)ret);
-        }
-        return;
-    }
-    p->xqc_path_id = new_id;   /* LINT-ALLOW: standby backup path create */
-    p->xquic_path_live = 1;    /* LINT-ALLOW: standby backup path create */
-    p->status = MQVPN_PATH_STANDBY;
-    xqc_conn_mark_path_standby(c->engine, &c->conn->cid, new_id);
-    LOG_I(c, "backup path[%d] standby: path_id=%" PRIu64 " iface=%s", idx, new_id,
-          p->name);
-    /* After the slot owns new_id (sends resolve it through find_path_by_xqc_id). */
-    client_apply_path_assignments(c, p, ACTIVATE_OK, new_id);
-    if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
-}
-
-/* Returns 1 if the configured scheduler natively understands
- * XQC_APP_PATH_STATUS_STANDBY and will not send data on standby paths while
- * an available path exists.  Only the backup and backup_fec schedulers do
- * this.  All others (wlb, minrtt, rap) only check FROZEN, so the xquic
- * standby API has no effect on them.
- */
-static int
-client_scheduler_supports_standby(const mqvpn_client_t *c)
-{
-    return c->config.scheduler == MQVPN_SCHED_BACKUP ||
-           c->config.scheduler == MQVPN_SCHED_BACKUP_FEC;
-}
-
-/* Count primary (non-backup) paths that are currently active in xquic. */
-static int
-client_count_active_primaries(mqvpn_client_t *c)
-{
-    int n = 0;
-    for (int i = 0; i < c->n_paths; i++) {
-        path_entry_t *p = &c->paths[i];
-        if (!(p->flags & MQVPN_PATH_FLAG_BACKUP) && p->xquic_path_live) n++;
-    }
-    return n;
-}
-
-/*
- * Promote/demote backup paths on failover/recovery.
- *
- * Two strategies depending on the scheduler:
- *
- *  xquic-standby (backup / backup_fec):
- *    The xquic path exists from connection time.  We flip app_path_status
- *    between AVAILABLE and STANDBY so the scheduler handles it natively.
- *    Backup paths that temporarily lost their xquic path (in_use == 0) are
- *    skipped — the tick recreation timer will re-call this after rebuilding.
- *
- *  create-on-demand (all other schedulers):
- *    Other schedulers do not check STANDBY, so the xquic path must not exist
- *    at all while the backup is idle.  We create it on failover and close it
- *    on recovery, same as the original behaviour.
- *
- * Must be called after any path status change.
- */
-static void
-client_check_failover(mqvpn_client_t *c)
-{
-    if (!c->multipath_ready || !c->config.multipath || !c->conn) return;
-
-    int use_standby_api = client_scheduler_supports_standby(c);
-
-    if (client_count_active_primaries(c) == 0) {
-        /* No active primary — promote all eligible backup paths */
-        for (int i = 0; i < c->n_paths; i++) {
-            path_entry_t *p = &c->paths[i];
-            if (!(p->flags & MQVPN_PATH_FLAG_BACKUP)) continue;
-            if (p->status == MQVPN_PATH_ACTIVE) continue; /* already promoted */
-
-            if (use_standby_api) {
-                if (!p->xquic_path_live) continue; /* xquic path not ready yet */
-                LOG_I(c, "failover: promoting backup path[%d] iface=%s", i, p->name);
-                xqc_conn_mark_path_available(c->engine, &c->conn->cid, p->xqc_path_id);
-                p->status = MQVPN_PATH_ACTIVE;
-                if (c->cbs.path_event)
-                    c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
-            } else {
-                if (!p->transport_attached || p->xquic_path_live) continue;
-                LOG_I(c, "failover: activating backup path[%d] iface=%s", i, p->name);
-                client_activate_path(c, p, i);
-            }
-        }
-    } else {
-        /* Primary paths are up — stand backup paths down */
-        for (int i = 0; i < c->n_paths; i++) {
-            path_entry_t *p = &c->paths[i];
-            if (!(p->flags & MQVPN_PATH_FLAG_BACKUP)) continue;
-            if (!p->xquic_path_live || p->status != MQVPN_PATH_ACTIVE) continue;
-
-            if (use_standby_api) {
-                LOG_I(c, "failover: standing down backup path[%d] iface=%s", i, p->name);
-                xqc_conn_mark_path_standby(c->engine, &c->conn->cid, p->xqc_path_id);
-                p->status = MQVPN_PATH_STANDBY;
-                if (c->cbs.path_event)
-                    c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
-            } else {
-                LOG_I(c, "failover: primary restored, closing backup path[%d] iface=%s",
-                      i, p->name);
-                p->status = MQVPN_PATH_STANDBY; /* guard re-entry */
-                xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
-            }
-        }
     }
 }
 
@@ -4216,7 +4073,7 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
           path_lifecycle_name(p->state));
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
     path_event_ctx_t ctx = {
         .result = r,
         .new_xqc_path_id = new_id,
@@ -4648,7 +4505,7 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
     if (p->recreate_after_us == 0 || now < p->recreate_after_us) return;
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
     LOG_I(c, "path[%d] retry: result=%s retries=%d/%d", idx,
           r == ACTIVATE_OK               ? "OK"
           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
@@ -4713,15 +4570,16 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
          * value is pinned to xquic's enum by tests/test_xquic_abi_pin.c. */
         if (pm->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
 
-        /* Branch on connection-scoped scheduler config — secondary paths
-         * created under backup_fec are STANDBY (spec §10.1.1). Scheduler
-         * is immutable per-connection so the result is stable for the
-         * lifetime of this path. Dispatched via VALIDATION_OK; the
-         * handler sets path_stable_since_us = now and transitions to
-         * the carried target. */
-        path_lifecycle_t target = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
-                                      ? PATH_LC_STANDBY
-                                      : PATH_LC_ACTIVE;
+        /* Secondary paths created STANDBY (backup paths, and every
+         * secondary under backup_fec, spec §10.1.1 — see
+         * client_path_starts_standby) validate into STANDBY. The initial
+         * path (path_id 0) was created AVAILABLE with the connection, so it
+         * validates into ACTIVE even on a backup slot. Dispatched via
+         * VALIDATION_OK; the handler sets path_stable_since_us = now and
+         * transitions to the carried target. */
+        path_lifecycle_t target =
+            (p->xqc_path_id != 0 && client_path_starts_standby(c, p)) ? PATH_LC_STANDBY
+                                                                      : PATH_LC_ACTIVE;
         path_event_ctx_t v_ctx = {.validated_target = target, .now_us = now};
         path_on_event(c, p, PATH_EVENT_VALIDATION_OK, &v_ctx);
         LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s state=%s", i,
