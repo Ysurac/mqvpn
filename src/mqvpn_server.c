@@ -3344,6 +3344,23 @@ mqvpn_server_destroy(mqvpn_server_t *s)
 {
     if (!s) return;
 
+    /* Tell connected clients the server is going away: xqc_engine_destroy
+     * frees connections silently, so without a CONNECTION_CLOSE a client
+     * only notices through its idle timeout (or a lucky ICMP error) and a
+     * restarted server sits unused until then. xqc_h3_conn_close only queues
+     * the close; the engine run below puts it on the wire while the
+     * platform's sockets are still open (destroy precedes their close). */
+    if (s->engine) {
+        int closing = 0;
+        for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+            svr_conn_t *conn = s->sessions[i];
+            if (!conn) continue;
+            xqc_h3_conn_close(s->engine, &conn->cid);
+            closing++;
+        }
+        if (closing > 0) xqc_engine_main_logic(s->engine);
+    }
+
     /* Flush before the engine teardown when the deferred flush is engaged:
      * xqc_engine_destroy tears down queued connections without processing
      * them, so datagrams mqvpn_server_on_tun_packet already accepted would
