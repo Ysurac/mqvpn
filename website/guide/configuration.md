@@ -182,6 +182,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `RouteViaServer` | Route all traffic through the server's tunnel address instead of the tunnel interface: installs the catch-all routes `0.0.0.0/1` and `128.0.0.0/1` via the server's tunnel IP (client only; CLI `--route-via-server`). The host's own default route is left untouched. | `false` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
 
+Give `Subnet` and `Subnet6` as network addresses (`10.0.0.0/24`, `2001:db8:1::/112`). An address that is not the start of its network is used as given, not rounded down: the server takes the next address and clients the ones after it, so the whole pool is shifted. For IPv6, a shifted pool that no longer fits in the prefix is refused at startup; for IPv4 it is accepted, and its last addresses then fall outside the prefix.
+
 > **Note: route management does not cover interface-bound applications**
 >
 > mqvpn adds a split default route (`0.0.0.0/1` + `128.0.0.0/1`) instead of replacing the system default route, so the original default route stays in place. Applications that pick a network adapter by looking up the *system default route* — rather than the route to the destination — keep using the physical adapter and bypass the tunnel. Tailscale on Windows does this for its own sockets.
