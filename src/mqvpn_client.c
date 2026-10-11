@@ -1140,7 +1140,8 @@ static void
 client_destroy_engine(mqvpn_client_t *c)
 {
     if (!c || !c->engine) return;
-    xqc_h3_ctx_destroy(c->engine);
+    /* xqc_engine_destroy frees the h3 contexts with the ALPN registrations
+     * (xqc_engine_free_alpn_list); no xqc_h3_ctx_destroy() (DD §10). */
     xqc_engine_destroy(c->engine);
     c->engine = NULL;
 }
