@@ -56,6 +56,15 @@ mqvpn_path_label_decode(const uint8_t *payload, size_t payload_len, uint64_t *pa
     if (iface_len == 0 || iface_len > MQVPN_PATH_LABEL_IFACE_MAX) return -1;
     if (payload_len < off + (size_t)iface_len + 4 + 8) return -1;
 
+    /* The name comes from the peer and ends up in log lines and control-API
+     * JSON: refuse control bytes (incl. DEL), quotes and backslashes rather
+     * than let a peer forge log lines or break JSON. Real interface names
+     * (Linux, Windows friendly names with spaces, UTF-8) pass unchanged. */
+    for (size_t i = 0; i < iface_len; i++) {
+        uint8_t c = payload[off + i];
+        if (c < 0x20 || c == 0x7f || c == '"' || c == '\\') return -1;
+    }
+
     memcpy(iface_out, payload + off, iface_len);
     iface_out[iface_len] = '\0';
     off += iface_len;

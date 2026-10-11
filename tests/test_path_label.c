@@ -414,10 +414,50 @@ test_push_direction_roundtrip_via_shared_codec(void)
     PASS();
 }
 
+/* The decoded name is logged and echoed into JSON: control bytes, DEL,
+ * quotes and backslashes are refused; spaces and UTF-8 pass. */
+static void
+test_decode_rejects_unsafe_iface_bytes(void)
+{
+    TEST(decode rejects control / quote / backslash in iface);
+
+    const char *bad[] = {"eth0\n", "a\"b", "a\\b", "x\x1b[2J", "del\x7f"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        uint8_t buf[MQVPN_PATH_LABEL_PAYLOAD_MAX];
+        int n = mqvpn_path_label_encode(buf, sizeof(buf), 1, bad[i], 1, 0);
+        ASSERT_EQ(n > 0, 1);
+        uint64_t path_id = 0, dscp_mask = 0;
+        uint32_t weight = 0;
+        char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+        ASSERT_EQ(mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                          &weight, &dscp_mask),
+                  -1);
+    }
+
+    const char *good[] = {"Ethernet 2", "wlan0", "eth0.100", "wg@x:1", "r\xc3\xa9seau"};
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        uint8_t buf[MQVPN_PATH_LABEL_PAYLOAD_MAX];
+        int n = mqvpn_path_label_encode(buf, sizeof(buf), 1, good[i], 1, 0);
+        uint64_t path_id = 0, dscp_mask = 0;
+        uint32_t weight = 0;
+        char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+        ASSERT_EQ(mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                          &weight, &dscp_mask),
+                  0);
+        if (strcmp(iface, good[i]) != 0) {
+            FAIL("safe iface altered");
+            return;
+        }
+    }
+
+    PASS();
+}
+
 int
 main(void)
 {
     printf("=== mqvpn_path_label unit tests ===\n\n");
+    test_decode_rejects_unsafe_iface_bytes();
 
     test_roundtrip_basic();
     test_roundtrip_zero_weight_and_mask();
