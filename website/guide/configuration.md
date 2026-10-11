@@ -393,6 +393,8 @@ the cap is hit, both differ.
 | Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first, but size the RAM too: worst case `TcpMaxGlobalFlows` × 32 KiB (≈ 128 MiB at 4096) once every admitted flow has paused once in each direction |
 | Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
 
+On both sides, a flow whose receiver has stopped reading (a slow LAN device on the client, a slow target on the server) also holds data inside the QUIC stack: at most 256 KiB of unread data plus that stream's QUIC receive window (sized to the flow's throughput, up to 16 MiB). Past that, QUIC flow control stops the sender, so memory stays bounded.
+
 **Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —
 `4096` on desktop/router builds (Linux, Windows, macOS), `256` on Android, `64`
 with the [iOS lwIP profile](./hybrid-mode#ios-builds).

@@ -386,6 +386,8 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される。ただし RAM も見積もっておくこと: worst case は `TcpMaxGlobalFlows` × 32 KiB (4096 で約 128 MiB、全フローが両方向で一度ずつ pause した場合) |
 | 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
 
+どちら側でも、受信側が読み取りを止めたフロー（クライアントでは遅い LAN 機器、サーバーでは遅い接続先）は QUIC スタック内にもデータを保持します。上限は未読データ 256 KiB と、そのストリームの QUIC 受信ウィンドウ（フローのスループットに合わせて最大 16 MiB）です。それを超えると QUIC のフロー制御が送信側を止めるため、メモリ使用量は有界のままです。
+
 **client の clamp:** 実効値は lwIP TCP pcb プールの半分に制限されます。
 最大値は、desktop/router ビルド (Linux / Windows / macOS) で `4096`、Android で `256`、
 [iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)で `64`になります。
