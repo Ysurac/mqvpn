@@ -8,12 +8,27 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStartPre=-/usr/bin/touch /etc/resolv.conf.mqvpn.bak
+# ProtectSystem=strict leaves /etc and /run read-only, and ReadWritePaths= can
+# only open up files that already exist. "+" runs these outside the sandbox
+# to create, without altering an existing file, the three files the client
+# writes: the resolv.conf backup, the cross-instance DNS lock and the
+# iptables-legacy lock used by the kill switch.
+ExecStartPre=+/usr/bin/touch /etc/resolv.conf.mqvpn.bak /run/mqvpn-dns.lock /run/xtables.lock
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/mqvpn --config /etc/mqvpn/client-%i.conf
+# The sandboxed client cannot unlink the bind-mounted backup after restoring
+# resolv.conf. Remove it here when it holds nothing to restore: empty (DNS
+# override unused) or identical to resolv.conf (restored). A backup that
+# differs, left by a crash, is kept.
+ExecStopPost=+/bin/sh -c 'if [ ! -s /etc/resolv.conf.mqvpn.bak ] || cmp -s /etc/resolv.conf.mqvpn.bak /etc/resolv.conf; then rm -f /etc/resolv.conf.mqvpn.bak; fi'
 Restart=on-failure
 RestartSec=5
 
 # Security hardening
+# The client needs CAP_NET_ADMIN for its TUN device, routes, iptables kill
+# switch rules and SO_SNDBUFFORCE/SO_RCVBUFFORCE, and CAP_NET_RAW for
+# iptables-legacy and for SO_BINDTODEVICE on kernels before 5.7. It runs as
+# root, so the bounding set alone limits it.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
@@ -24,7 +39,8 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadOnlyPaths=/etc/mqvpn
-ReadWritePaths=/dev/net/tun /etc/resolv.conf /etc/resolv.conf.mqvpn.bak
+# "-": a missing path is skipped instead of failing the unit (226/NAMESPACE).
+ReadWritePaths=/dev/net/tun -/etc/resolv.conf -/etc/resolv.conf.mqvpn.bak -/run/mqvpn-dns.lock -/run/xtables.lock
 
 [Install]
 WantedBy=multi-user.target

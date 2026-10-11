@@ -210,10 +210,11 @@ cat > /run/systemd/system/mqvpn-client@test1.service.d/override.conf <<'DROPIN'
 StartLimitBurst=10
 
 [Service]
-ExecStart=
-ExecStart=/usr/bin/ip netns exec sd-client /usr/local/bin/mqvpn --config /etc/mqvpn/client-%i.conf
-ReadWritePaths=
-ReadWritePaths=/dev/net/tun /run/netns
+# NetworkNamespacePath, not `ip netns exec`: setns() needs CAP_SYS_ADMIN,
+# which the unit's capability bounding set does not grant. The shipped
+# ReadWritePaths= are kept (appended to, not reset) so the test exercises them.
+NetworkNamespacePath=/run/netns/sd-client
+ReadWritePaths=/run/netns
 DROPIN
 
 systemctl daemon-reload
@@ -282,6 +283,15 @@ if ! systemctl is-active --quiet mqvpn-client@test1; then
 fi
 echo "OK: mqvpn-client@test1 is active"
 
+# CAP_NET_ADMIN (12) + CAP_NET_RAW (13) = 0x3000.
+CLI_PID=$(systemctl show -p MainPID --value mqvpn-client@test1)
+CLI_CAPBND=$(awk '/^CapBnd:/ {print $2}' "/proc/${CLI_PID}/status" 2>/dev/null || true)
+if [ "$CLI_CAPBND" != "0000000000003000" ]; then
+    echo "FAIL: mqvpn-client@test1 CapBnd is '${CLI_CAPBND}', expected 0000000000003000"
+    fail "Phase 4 (client capabilities)"
+fi
+echo "OK: mqvpn-client@test1 bounded to CAP_NET_ADMIN + CAP_NET_RAW"
+
 # Verify TUN device in client namespace
 if ! ip netns exec sd-client ip link show mqvpn0 >/dev/null 2>&1; then
     echo "FAIL: mqvpn0 TUN not found in sd-client namespace"
@@ -328,6 +338,14 @@ if systemctl is-active --quiet mqvpn-client@test1; then
     fail "Phase 5 (client stop)"
 fi
 echo "OK: mqvpn-client@test1 stopped"
+
+# No DNS override in this config, so ExecStopPost must remove the empty
+# resolv.conf backup placeholder that ExecStartPre created.
+if [ -e /etc/resolv.conf.mqvpn.bak ]; then
+    echo "FAIL: /etc/resolv.conf.mqvpn.bak left behind after stop"
+    fail "Phase 5 (client backup cleanup)"
+fi
+echo "OK: resolv.conf backup placeholder removed"
 
 # Verify ExecStopPost cleaned up NAT rules
 NAT_AFTER=$(ip netns exec sd-server iptables -t nat -L POSTROUTING -n 2>/dev/null \
