@@ -200,6 +200,50 @@ test_build_pf_rules_no_tun(void)
 }
 
 /* ================================================================
+ * 1a. the whole ruleset, line for line. Each line was checked against
+ *     pf.conf(5): action, "out", "quick", "on <if>", af, "proto",
+ *     hosts ("from any port N to any port M" / "to <addr> port = N", or
+ *     none), then filter options ("icmp6-type { list }"); pass rules
+ *     keep state by default. Pinning the full text keeps any other line
+ *     from slipping in unreviewed.
+ * ================================================================ */
+static void
+test_build_pf_rules_exact(void)
+{
+    char buf[1024];
+    platform_ctx_t p;
+
+    init_ctx_v4(&p, 1); /* v4 server, utun up, tunnel carries IPv6 */
+    ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), 0, "exact v4 rc");
+    ASSERT_EQ_STR(buf,
+                  "pass out quick on lo0 inet\n"
+                  "pass out quick on utun9 inet\n"
+                  "pass out quick inet proto udp from any port 68 to any port 67\n"
+                  "pass out quick inet proto udp to 203.0.113.9 port = 51820\n"
+                  "block drop out quick inet\n"
+                  "pass out quick on lo0 inet6\n"
+                  "pass out quick on utun9 inet6\n"
+                  "pass out quick inet6 proto udp from any port 546 to any port 547\n"
+                  "pass out quick inet6 proto icmp6 icmp6-type { 133, 134, 135, 136 }\n"
+                  "block drop out quick inet6\n",
+                  "exact v4 ruleset");
+
+    init_ctx_v6(&p, 0); /* v6 server, no utun yet */
+    p.tun.fd = -1;
+    ASSERT_EQ_INT(build_pf_rules(&p, buf, sizeof(buf)), 0, "exact v6 rc");
+    ASSERT_EQ_STR(buf,
+                  "pass out quick on lo0 inet\n"
+                  "pass out quick inet proto udp from any port 68 to any port 67\n"
+                  "block drop out quick inet\n"
+                  "pass out quick on lo0 inet6\n"
+                  "pass out quick inet6 proto udp from any port 546 to any port 547\n"
+                  "pass out quick inet6 proto icmp6 icmp6-type { 133, 134, 135, 136 }\n"
+                  "pass out quick inet6 proto udp to 2001:db8::9 port = 51820\n"
+                  "block drop out quick inet6\n",
+                  "exact v6 ruleset");
+}
+
+/* ================================================================
  * 1b. build_pf_rules() fails closed on an empty server IP string
  *     (pf accepts "to  port = N" with no host and matches ANY
  *     destination — emitting it would be a silent kill-switch bypass)
@@ -383,6 +427,7 @@ main(void)
 {
     test_build_pf_rules_truth_table();
     test_build_pf_rules_no_tun();
+    test_build_pf_rules_exact();
     test_build_pf_rules_empty_server_ip();
 
     fake_cmd_env_t e;
