@@ -449,8 +449,12 @@ if(MQVPN_ENABLE_FUZZING)
         $<$<CONFIG:Release>:LWIP_NOASSERT>
         CHECKSUM_CHECK_IP=0
         CHECKSUM_CHECK_TCP=0)
+    # UBSan's null check is left out for lwIP only: its ip_2_ip6(NULL) idiom
+    # (ip6_output_if) takes a member address through a null pointer without
+    # dereferencing it, which aborts the first fuzz run in seconds.
     target_compile_options(lwip_core_fuzz PRIVATE
-        -Wno-error -fsanitize=fuzzer-no-link,address)
+        -Wno-error -fsanitize=fuzzer-no-link,address,undefined
+        -fno-sanitize=null -fno-sanitize-recover=undefined)
 
     add_executable(fuzz_tcp_lane
         fuzz/fuzz_tcp_lane.c
@@ -458,8 +462,9 @@ if(MQVPN_ENABLE_FUZZING)
         src/hybrid/lwip_glue.c
         src/log.c
     )
-    target_compile_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
-    target_link_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address)
+    target_compile_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address,undefined
+                           -fno-sanitize-recover=undefined)
+    target_link_options(fuzz_tcp_lane PRIVATE -fsanitize=fuzzer,address,undefined)
     target_link_libraries(fuzz_tcp_lane PRIVATE lwip_core_fuzz)
     target_include_directories(fuzz_tcp_lane PRIVATE
         ${CMAKE_SOURCE_DIR}/src
@@ -939,8 +944,9 @@ if(MQVPN_ENABLE_FUZZING)
     # reached: the harness runs dispatch() in server mode).
     add_executable(fuzz_control_dispatch fuzz/fuzz_control_dispatch.c
                    fuzz/fuzz_control_dispatch_platform.c)
-    target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
-    target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address)
+    target_compile_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address,undefined
+                           -fno-sanitize-recover=undefined)
+    target_link_options(fuzz_control_dispatch PRIVATE -fsanitize=fuzzer,address,undefined)
     target_link_libraries(fuzz_control_dispatch PRIVATE
         mqvpn_lib ${XQUIC_LIB} ${EVENT_LIB} ${SSL_LIB} ${CRYPTO_LIB}
         pthread dl m stdc++)
