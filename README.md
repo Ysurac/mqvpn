@@ -314,7 +314,7 @@ Scheduler = wlb
                                # can't adopt it regardless of its own SyncPathLabels setting
 Path = eth0
 Path = wlan0
-# BackupPath = lte0   # failover-only: used only when all primary paths are down
+# BackupPath = lte0   # standby path; Scheduler = backup / backup_fec use it only when all primary paths are down
 
 # [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
 # Enabled = true
@@ -1173,7 +1173,7 @@ mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
-  --backup-path IFACE    Failover-only interface; used only when all primary paths are down (repeatable)
+  --backup-path IFACE    Standby interface; the backup/backup_fec schedulers use it only when all primary paths are down (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)

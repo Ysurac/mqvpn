@@ -52,7 +52,7 @@ Tcp = auto        # stream | raw | auto (default)
 
 ## Server-side egress ACL
 
-Relayed TCP leaves the server as a normal outbound `connect()`, so the server enforces a **default-deny egress ACL for private ranges** — RFC1918, loopback, and link-local targets are refused even with nothing configured. This is a safety default against a compromised or misconfigured client using the VPN server as a pivot into its internal network.
+Relayed TCP leaves the server as a normal outbound `connect()`, so the server enforces a **default-deny egress ACL for private ranges** — RFC1918, loopback, and link-local targets are refused even with nothing configured, and so are the server's own interface addresses, Teredo (`2001::/32`) and NAT64 local-use (`64:ff9b:1::/48`) targets. NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) targets are judged by the IPv4 address they embed. `EgressAllow` overrides all of these. This is a safety default against a compromised or misconfigured client using the VPN server as a pivot into its internal network.
 
 If relayed TCP legitimately needs to reach a private target, punch an explicit hole:
 

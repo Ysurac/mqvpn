@@ -170,7 +170,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Listen` | Listen address (`HOST:PORT`, server only) | `0.0.0.0:443` |
 | `Subnet` | Client IPv4 pool (server only) | `10.0.0.0/24` |
-| `Subnet6` | Client IPv6 pool (server only) | — |
+| `Subnet6` | Client IPv6 pool (server only). Must be large enough for the IPv4 pool: each client gets the IPv6 address at the same offset as its IPv4 one, so a prefix too small for `Subnet` is refused at startup | — |
 | `TunName` | TUN device name | `mqvpn0` |
 | `DNS` | DNS servers (comma-separated, client only, up to 4). Each entry must be an IP address (IPv4, or IPv6 optionally with `%scope`); other values are ignored with a warning. | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
@@ -230,7 +230,7 @@ Enables the [Control API](#control-api), in both client and server mode. Disable
 | `Scheduler` | Scheduler algorithm: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant` or `dscp` | `wlb` |
 | `CC` (alias `CongestionControl`) | Congestion control algorithm: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited` or `none` | `bbr2` |
 | `Path` | Network interface to bind (repeatable, client only, up to 8) | Default interface |
-| `BackupPath` | Failover-only interface, used only when all `Path` interfaces are down (repeatable, client only) | — |
+| `BackupPath` | Failover interface (repeatable, client only). It is brought up in standby: the `backup` and `backup_fec` schedulers use it only when no `Path` interface is usable; the other schedulers (including the default `wlb`) currently still send on it | — |
 | `Fec` / `FecEnable` | Enable forward error correction (needs an FEC-enabled build) | `false` |
 | `FecScheme` | FEC scheme: `galois_calculation`, `packet_mask`, `reed_solomon` or `xor` | `reed_solomon` |
 | `SyncPathLabels` | Share per-path weight / DSCP mask between client and server. Client: announce its own values to the server. Server: adopt the values the client announces for its downlink. Either side set to `false` turns the sharing off | `true` |

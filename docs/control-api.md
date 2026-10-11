@@ -185,6 +185,11 @@ Remove a user from the auth table. Active sessions authenticated with that
 username are disconnected immediately, and the user's fixed IP reservation
 (if any) is released.
 
+Removing the last credential does not turn authentication off: a server that
+started with any key or user keeps requiring one, so with no key and no user
+left every new connection is refused (403) until `add_user` adds one. The
+server logs a warning when that happens.
+
 **Request**
 
 ```json

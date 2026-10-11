@@ -471,3 +471,19 @@ isolation (the shipped profile, §5c, applies both together):
 - **Inbound demultiplexing is O(active flows)** — lwIP's `tcp_input` scans `tcp_active_pcbs`
   linearly with no hash. See §3a: this is the practical scaling wall at high flow counts,
   ahead of both the memory bound and the flow cap.
+- **Uplink queue accounting counts memory, not payload.** Each queued delivery is charged
+  its payload plus per-node overhead, and deliveries of 256 bytes or less are coalesced into
+  shared 4 KiB buffers, so a peer streaming 1-byte segments can no longer queue ~100x more
+  memory than the watermarks admit. `lwipopts.h` also caps the out-of-sequence queue
+  (`TCP_OOSEQ_MAX_BYTES = TCP_WND`, `TCP_OOSEQ_MAX_PBUFS = TCP_WND / 1024`).
+- **Server stash for CONNECTING flows: at most 256 KiB.** Body bytes a client sends before
+  the server's egress `connect()` completes are held by mqvpn (up to 256 KiB per flow, sent
+  first once connected); past that the flow is reset. A rejected connect-tcp request's body
+  is read and discarded, never buffered.
+- **A paused ACTIVE flow is not backpressured (open).** Stopping `recv_body` does not stop
+  the peer: xquic's HTTP/3 layer keeps reading stream data into its own body buffer and
+  returns flow-control credit. A target (server uplink) or LAN device (client downlink)
+  slower than the tunnel therefore lets that buffer grow. Capping it on the mqvpn side could
+  only reset the flow, which would break ordinary slow-receiver transfers, so it is left
+  open pending an h3 body-buffer high-water mark in the xquic fork that stops pulling stream
+  data and lets QUIC stream flow control push back.

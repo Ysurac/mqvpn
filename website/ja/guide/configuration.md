@@ -165,7 +165,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Listen` | リッスンアドレス（サーバーのみ） | `0.0.0.0:443` |
 | `Subnet` | クライアント IPv4 プール（サーバーのみ） | `10.0.0.0/24` |
-| `Subnet6` | クライアント IPv6 プール（サーバーのみ） | — |
+| `Subnet6` | クライアント IPv6 プール（サーバーのみ）。IPv4 プールを収容できる大きさが必要です。各クライアントには IPv4 と同じオフセットの IPv6 アドレスが割り当てられるため、`Subnet` に対して小さすぎるプレフィックスは起動時に拒否されます | — |
 | `TunName` | TUN デバイス名 | `mqvpn0` |
 | `DNS` | DNS サーバー（カンマ区切り、クライアントのみ、最大 4 個）。各エントリは IP アドレス（IPv4、または `%scope` 付きも可の IPv6）である必要があり、それ以外の値は警告付きで無視される | — |
 | `LogLevel` | ログレベル（`debug`、`info`、`warn`、`error`） | `info` |
@@ -225,7 +225,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `Scheduler` | スケジューラアルゴリズム: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant`, `dscp` のいずれか | `wlb` |
 | `CC`（別名 `CongestionControl`） | 輻輳制御アルゴリズム: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited`, `none` のいずれか | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可、クライアントのみ、最大 8 個） | デフォルトインターフェース |
-| `BackupPath` | フェイルオーバー専用のインターフェース。すべての `Path` が落ちたときだけ使う（複数指定可、クライアントのみ） | — |
+| `BackupPath` | フェイルオーバー用のインターフェース（複数指定可、クライアントのみ）。スタンバイ状態で接続されます。`backup` と `backup_fec` スケジューラは使える `Path` がないときだけ使用します。それ以外のスケジューラ（デフォルトの `wlb` を含む）は現状このインターフェースにも送信します | — |
 | `Fec` / `FecEnable` | 前方誤り訂正（FEC）を有効化（FEC 有効ビルドが必要） | `false` |
 | `FecScheme` | FEC 方式: `galois_calculation`, `packet_mask`, `reed_solomon`, `xor` のいずれか | `reed_solomon` |
 | `SyncPathLabels` | パスごとの weight / DSCP マスクをクライアントとサーバーで共有する。クライアント: 自分の値をサーバーに通知する。サーバー: クライアントが通知した値を下り方向に採用する。どちらか一方でも `false` にすると共有されない | `true` |
