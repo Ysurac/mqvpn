@@ -819,7 +819,9 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_dns_init(&ctx.dns);
     snprintf(ctx.dns.tun_name, sizeof(ctx.dns.tun_name), "%s", ctx.tun_name_cfg);
     for (int i = 0; i < cfg->n_dns; i++)
-        mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]);
+        mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]); /* skips non-addresses */
+    /* Undo a resolv.conf a crashed run left behind (no-op otherwise). */
+    mqvpn_dns_restore_stale(&ctx.dns);
 
     /* Resolve server address. The original host string is kept around so
      * cb_reconnect_scheduled() can re-resolve it before each reconnect

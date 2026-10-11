@@ -20,6 +20,7 @@ typedef struct {
     int active;              /* 1 if DNS is currently overridden */
     int lock_fd;             /* flock fd, -1 if not held */
     int use_resolvectl;      /* 1 = use resolvectl, 0 = resolv.conf */
+    int resolvectl_probe;    /* Linux: 0 = not probed yet, 1 = present, -1 = absent */
     char tun_name[16];       /* TUN interface name for resolvectl */
     const char *resolv_path; /* default: /etc/resolv.conf */
     const char *backup_path; /* default: /etc/resolv.conf.mqvpn.bak */
@@ -29,7 +30,8 @@ typedef struct {
 /* Initialize with defaults */
 void mqvpn_dns_init(mqvpn_dns_t *dns);
 
-/* Add a DNS server address. Returns 0 on success, -1 if full. */
+/* Add a DNS server address: an IPv4 or IPv6 literal (an IPv6 one may carry
+ * a %scope). Returns 0 on success, -1 (logged) if full or not an address. */
 int mqvpn_dns_add_server(mqvpn_dns_t *dns, const char *addr);
 
 /* Apply DNS override: backup resolv.conf, write new one. Returns 0 on success. */

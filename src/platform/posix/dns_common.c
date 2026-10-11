@@ -92,11 +92,35 @@ mqvpn_sa_host_prefix(const struct sockaddr_storage *ss)
     return 0;
 }
 
+/* 1 when addr is an IPv4 or IPv6 literal (IPv6 with an optional %scope)
+ * that fits a servers[] slot: anything else would be written verbatim into
+ * resolv.conf or handed to resolvectl/networksetup. */
+static int
+dns_server_is_literal(const char *addr)
+{
+    if (!addr || strlen(addr) >= sizeof(((mqvpn_dns_t *)0)->servers[0])) return 0;
+    struct in_addr a4;
+    if (inet_pton(AF_INET, addr, &a4) == 1) return 1;
+    char host[INET6_ADDRSTRLEN];
+    const char *pct = strchr(addr, '%');
+    size_t n = pct ? (size_t)(pct - addr) : strlen(addr);
+    if (n >= sizeof(host) || (pct && pct[1] == '\0')) return 0;
+    memcpy(host, addr, n);
+    host[n] = '\0';
+    struct in6_addr a6;
+    return inet_pton(AF_INET6, host, &a6) == 1;
+}
+
 int
 mqvpn_dns_add_server(mqvpn_dns_t *dns, const char *addr)
 {
     if (dns->n_servers >= MQVPN_DNS_MAX_SERVERS) {
         LOG_WRN("dns: max %d servers supported", MQVPN_DNS_MAX_SERVERS);
+        return -1;
+    }
+    if (!dns_server_is_literal(addr)) {
+        LOG_WRN("dns: ignoring DNS server '%s': not an IPv4 or IPv6 address",
+                addr ? addr : "(null)");
         return -1;
     }
     snprintf(dns->servers[dns->n_servers], sizeof(dns->servers[0]), "%s", addr);
