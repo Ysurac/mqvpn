@@ -18,6 +18,7 @@
 #include "cert_pin.h"
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
+#include <limits.h>   /* INT_MAX */
 #include <stddef.h>   /* offsetof for the struct_size-guarded field copies */
 #include <stdlib.h>
 #include <string.h>
@@ -5332,6 +5333,19 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         if (lwip_ms >= 0 && ms > 0 && lwip_ms < ms) ms = lwip_ms;
     }
 #endif
+
+    /* Reorder RX gap deadline: no platform runs a periodic tick, so without
+     * this a packet held behind a gap waits for an unrelated xquic timer or
+     * I/O event instead of MaxWaitMs. Shorten-only, like the blocks above. */
+    if (c->conn && c->conn->reorder_rx) {
+        uint64_t d = mqvpn_reorder_rx_next_deadline_us(c->conn->reorder_rx);
+        if (d != UINT64_MAX) {
+            uint64_t now_val = client_now_us(c);
+            uint64_t dms = d > now_val ? (d - now_val + 999) / 1000 : 1;
+            int rms = dms > INT_MAX ? INT_MAX : (int)dms;
+            if (ms > 0 && rms < ms) ms = rms;
+        }
+    }
 
     out->next_timer_ms = ms > 0 ? ms : 1;
     out->tun_readable = (c->tun_active && !c->backpressure) ? 1 : 0;
