@@ -160,6 +160,13 @@ struct svr_conn_s {
     /* Auth identity (set on CONNECT-IP auth success) */
     uint64_t connected_at_us;
 
+    /* ICMP error rate limit for errors this session's traffic causes (both
+     * directions), so one client cannot use up the budget, and with it the
+     * PTB / Frag-Needed signals, of every other client. The server-wide
+     * s->ptb_bucket now only covers errors no session can be charged with
+     * (destination not assigned to anyone). */
+    mqvpn_ptb_bucket_t icmp_bucket;
+
     /* Transport scope, issued in cb_accept, released exactly once in
      * svr_conn_free. Lets the transport keep per-destination sticky state
      * (GSO fallback) with a lifetime equal to this QUIC connection. */
@@ -299,7 +306,8 @@ struct mqvpn_server_s {
     /* Actual TUN device MTU (set at startup) */
     int tun_mtu;
 
-    /* ICMP PTB rate limit */
+    /* ICMP error rate limit for errors no session can be charged with
+     * (destination not assigned); per-session errors use conn->icmp_bucket. */
     mqvpn_ptb_bucket_t ptb_bucket;
 
     /* Stats */
@@ -532,6 +540,13 @@ ptb_rate_allow(mqvpn_server_t *s)
     return mqvpn_ptb_bucket_allow(&s->ptb_bucket, now_ms_mono());
 }
 
+/* Per-session counterpart: errors caused by one session's traffic. */
+static int
+svr_conn_icmp_allow(svr_conn_t *conn)
+{
+    return mqvpn_ptb_bucket_allow(&conn->icmp_bucket, now_ms_mono());
+}
+
 /* ─── Thin wrapper: send ICMP packet via MASQUE datagram to client ─── */
 
 static void
@@ -744,6 +759,7 @@ cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
     }
     conn_ctx->tag = SVR_CONN_TAG;
     conn_ctx->server = s;
+    mqvpn_ptb_bucket_init(&conn_ctx->icmp_bucket);
     /* Issue the transport scope before xquic switches this connection's
      * sends to cb_write_socket (which happens as soon as we return 0).
      * Monotonic, never reused; wrap is treated as exhaustion. */
@@ -2500,7 +2516,7 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
         }
         memcpy(fwd_pkt, pkt, len);
         if (fwd_pkt[8] <= 1) {
-            if (ptb_rate_allow(s)) {
+            if (svr_conn_icmp_allow(conn)) {
                 struct in_addr srv;
                 mqvpn_addr_pool_server_addr(&s->pool, &srv);
                 mqvpn_icmp_send_v4(send_icmp_via_datagram, conn,
@@ -2522,7 +2538,7 @@ forward_inner_ip(svr_conn_t *conn, const uint8_t *pkt, size_t len)
         }
         memcpy(fwd_pkt, pkt, len);
         if (fwd_pkt[7] <= 1) {
-            if (s->pool.has_v6 && ptb_rate_allow(s)) {
+            if (s->pool.has_v6 && svr_conn_icmp_allow(conn)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
                 mqvpn_icmp_send_v6(send_icmp_via_datagram, conn, srv6.s6_addr, 3, 0, 0,
@@ -3272,15 +3288,16 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         if (ip_ver == 4) {
             struct in_addr srv;
             mqvpn_addr_pool_server_addr(&s->pool, &srv);
-            sent = mqvpn_rgate_send_ptb(&s->ptb_bucket, now_ms_mono(), 4, /*addr_ok=*/1,
-                                        (const uint8_t *)&srv.s_addr, ptb_mtu,
-                                        s->cbs.tun_output, s->user_ctx, pkt, len);
+            sent =
+                mqvpn_rgate_send_ptb(&target->icmp_bucket, now_ms_mono(), 4,
+                                     /*addr_ok=*/1, (const uint8_t *)&srv.s_addr, ptb_mtu,
+                                     s->cbs.tun_output, s->user_ctx, pkt, len);
         } else {
             struct in6_addr srv6;
             mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
-            sent = mqvpn_rgate_send_ptb(&s->ptb_bucket, now_ms_mono(), 6, s->pool.has_v6,
-                                        srv6.s6_addr, ptb_mtu, s->cbs.tun_output,
-                                        s->user_ctx, pkt, len);
+            sent = mqvpn_rgate_send_ptb(&target->icmp_bucket, now_ms_mono(), 6,
+                                        s->pool.has_v6, srv6.s6_addr, ptb_mtu,
+                                        s->cbs.tun_output, s->user_ctx, pkt, len);
         }
         if (sent) {
             if (rv == MQVPN_RGATE_DROP_REORDER_MTU) {
@@ -3310,7 +3327,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (ip_ver == 4) {
         if (fwd_pkt[8] <= 1) {
             /* DL: source is on TUN side → ICMP goes via tun_output */
-            if (ptb_rate_allow(s)) {
+            if (svr_conn_icmp_allow(target)) {
                 struct in_addr srv;
                 mqvpn_addr_pool_server_addr(&s->pool, &srv);
                 mqvpn_icmp_send_v4(s->cbs.tun_output, s->user_ctx,
@@ -3326,7 +3343,7 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
         fwd_pkt[11] = sum & 0xFF;
     } else {
         if (fwd_pkt[7] <= 1) {
-            if (s->pool.has_v6 && ptb_rate_allow(s)) {
+            if (s->pool.has_v6 && svr_conn_icmp_allow(target)) {
                 struct in6_addr srv6;
                 mqvpn_addr_pool_server_addr6(&s->pool, &srv6);
                 mqvpn_icmp_send_v6(s->cbs.tun_output, s->user_ctx, srv6.s6_addr, 3, 0, 0,
