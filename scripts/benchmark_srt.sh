@@ -7,8 +7,14 @@
 # stays clean when mqvpn bonds the two links.
 #
 # Arms  : direct-A, direct-B (no VPN), mqvpn-2path, mqvpn-1path
-#         (mqvpn scheduler: minrtt by default — see SCHEDULER below)
-# Conds : C1 bandwidth-starved, C2 +RTT-asym, C3 burst loss, C4 jitter
+#         (mqvpn scheduler: SCHEDULER below)
+# Conds : P1/P2 practical, C3 burst loss, C4 jitter, C5 dual-cellular
+#
+# SRT_BENCH_SUITE=redundant instead compares redundant (duplicate every
+# datagram on both paths) configurations at a rate that fits the slower
+# path: arms mq-<scheduler>-<reinjection>, default
+# "mq-wlb-off mq-wlb-dgram mq-minrtt-dgram" (override with SRT_BENCH_ARMS),
+# conditions R1-R4 (see the end of main).
 # Metric: unique stream loss = (pktSentUnique - pktRecvUnique) / pktSentUnique
 #         Receiver-side drop alone is NOT arm-comparable: loss can migrate
 #         to sender-side TLPKTDROP (pktSndDrop), and a bufferbloated arm can
@@ -23,7 +29,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MQVPN="${1:-${SCRIPT_DIR}/../build/mqvpn}"
 DURATION="${SRT_BENCH_DURATION:-60}"
-OUT_DIR="${SRT_BENCH_OUT:-${SCRIPT_DIR}/../bench_results/srt}"
+SUITE="${SRT_BENCH_SUITE:-default}"
+case "$SUITE" in
+    default)   OUT_DIR="${SRT_BENCH_OUT:-${SCRIPT_DIR}/../bench_results/srt}" ;;
+    redundant) OUT_DIR="${SRT_BENCH_OUT:-${SCRIPT_DIR}/../bench_results/srt_redundant}" ;;
+    *) echo "error: SRT_BENCH_SUITE must be 'default' or 'redundant'" >&2; exit 1 ;;
+esac
 SRT_PORT=4200
 # Unified recommended config, settled by the diagnostic rounds (2026-08-01):
 # mqvpn defaults (scheduler=wlb, reorder shim OFF) + SRT receiver
@@ -72,10 +83,14 @@ source "${SCRIPT_DIR}/benchmark_srt_common.sh"
 PSK=$("$MQVPN" --genkey 2>/dev/null)
 
 RECEIVER_PID=""
+FLAP_PID=""
 BENCH_HAD_FAILURE=0
 cleanup() {
     echo ""
     echo "Cleaning up..."
+    if [ -n "$FLAP_PID" ]; then
+        kill "$FLAP_PID" 2>/dev/null || true
+    fi
     if [ -n "$RECEIVER_PID" ]; then
         kill "$RECEIVER_PID" 2>/dev/null || true
         sleep 1
@@ -138,6 +153,17 @@ run_srt() {
         return 1
     fi
 
+    # FLAP="<down-s> <period-s>" (set per condition) blackholes path A
+    # periodically while the sender runs.
+    if [ -n "${FLAP:-}" ]; then
+        # shellcheck disable=SC2086  # FLAP is two words by design
+        flap_path_a $FLAP "$COND_RATE_A" "$COND_NETEM_A" &
+        FLAP_PID=$!
+    fi
+    local rxa0 rxb0
+    rxa0=$(rx_bytes bench-a1)
+    rxb0=$(rx_bytes bench-b1)
+
     # Bounded sender: a hung SRT connection must not stall the whole matrix.
     # --kill-after covers a child that ignores TERM. srt-xtransmit exits 0 on
     # several runtime connection failures, so success is judged from the
@@ -148,6 +174,15 @@ run_srt() {
         --sendrate "${rate_mbps}Mbps" --duration "${DURATION}s" \
         --statsfile "${raw}/${run_id}.snd.csv" --statsfreq 100ms \
         > "${WORK_DIR}/${run_id}.snd.log" 2>&1 || true
+
+    if [ -n "$FLAP_PID" ]; then
+        kill "$FLAP_PID" 2>/dev/null || true
+        wait "$FLAP_PID" 2>/dev/null || true
+        FLAP_PID=""
+        set_path_a "$COND_RATE_A" "$COND_NETEM_A"
+    fi
+    RUN_RXA_MB=$(( ($(rx_bytes bench-a1) - rxa0) / 1000000 ))
+    RUN_RXB_MB=$(( ($(rx_bytes bench-b1) - rxb0) / 1000000 ))
 
     sleep 2   # let late packets land and final stats flush
     # INT → poll → KILL, same as kill_vpn/video_run: a wedged receiver with
@@ -190,7 +225,7 @@ arm_target() {
     case "$1" in
         direct-A)    echo "$PATH_A_SERVER_IP" ;;
         direct-B)    echo "$PATH_B_SERVER_IP" ;;
-        mqvpn-*)     echo "$TUN_SERVER_IP" ;;
+        mqvpn-*|mq-*) echo "$TUN_SERVER_IP" ;;
     esac
 }
 
@@ -200,17 +235,22 @@ arm_setup() {
         direct-*)    return 0 ;;
         mqvpn-2path) run_vpn "$SCHEDULER" bench-a0 bench-b0 ;;
         mqvpn-1path) run_vpn "$SCHEDULER" bench-a0 ;;
+        mq-*)
+            # mq-<scheduler>-<reinjection>; scheduler names contain no '-'
+            local spec="${1#mq-}"
+            VPN_REINJ="${spec#*-}" run_vpn "${spec%%-*}" bench-a0 bench-b0
+            ;;
     esac
 }
 
 arm_teardown() {
     case "$1" in
-        mqvpn-*) kill_vpn ;;
+        mqvpn-*|mq-*) kill_vpn ;;
     esac
 }
 
 # ---- result storage ----------------------------------------------------
-declare -A R_LOSS R_SENT R_RCVDROP R_SNDDROP R_RETRANS R_RTT R_RATE R_BELATED
+declare -A R_LOSS R_SENT R_RCVDROP R_SNDDROP R_RETRANS R_RTT R_RATE R_BELATED R_RXA R_RXB
 RUNS=()   # ordered "<cond>_<latency>_<arm>_rN" keys
 
 # run_arm <cond> <latency> <rate-mbps> <arm> <rep>
@@ -264,6 +304,7 @@ run_arm() {
     R_SENT[$key]="$sent"; R_RCVDROP[$key]="$rcvdrop"; R_SNDDROP[$key]="$snddrop"
     R_RETRANS[$key]="$retrans"; R_RTT[$key]="$rtt"; R_RATE[$key]="$rate"
     R_BELATED[$key]="$belated"
+    R_RXA[$key]="$RUN_RXA_MB"; R_RXB[$key]="$RUN_RXB_MB"
     if [[ "$sent" =~ ^[0-9]+$ ]] && [ "$sent" -gt 0 ] && [[ "$recvu" =~ ^[0-9]+$ ]]; then
         # Clamp at 0: timing edges can make recvUnique exceed sentUnique
         # by a few packets on a clean run.
@@ -275,7 +316,7 @@ run_arm() {
         BENCH_HAD_FAILURE=1
         R_LOSS[$key]="NA"
     fi
-    echo "      loss=${R_LOSS[$key]}% sentUnique=${sent} rcvDrop=${rcvdrop} sndDrop=${snddrop} rtt=${rtt}ms"
+    echo "      loss=${R_LOSS[$key]}% sentUnique=${sent} rcvDrop=${rcvdrop} sndDrop=${snddrop} rtt=${rtt}ms rxA/B=${RUN_RXA_MB}/${RUN_RXB_MB}MB"
 }
 
 declare -A COND_LOSS_NOTE
@@ -322,8 +363,9 @@ run_condition() {
 
     echo ""
     echo "== [${cond}] ${label} (repeats=${repeats})"
-    echo "   A: ${rate_a}/${netem_a}   B: ${rate_b}/${netem_b}   latency=${latency}ms rate=${sendrate}Mbps"
+    echo "   A: ${rate_a}/${netem_a}   B: ${rate_b}/${netem_b}   latency=${latency}ms rate=${sendrate}Mbps${FLAP:+   flap A: ${FLAP}}"
     apply_tc_full "$rate_a" "$netem_a" "$rate_b" "$netem_b"
+    COND_RATE_A="$rate_a"; COND_NETEM_A="$netem_a"   # for FLAP's restore
     case "$netem_a$netem_b" in *gemodel*) measure_path_loss "$cond" ;; esac
 
     local arm rep
@@ -339,6 +381,7 @@ run_condition() {
 echo "================================================================"
 echo "  SRT single-path vs mqvpn multipath benchmark (tier 1)"
 echo "  binary:   $MQVPN"
+echo "  suite:    ${SUITE}"
 echo "  duration: ${DURATION}s/run   scheduler: ${SCHEDULER}   reorder: ${SRT_BENCH_REORDER:-off}   lossmaxttl: ${SRT_BENCH_LOSSMAXTTL:-32}"
 echo "  date:     $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
@@ -360,6 +403,7 @@ generate_cert
 # C3/C4 use a higher base delay (RTT ≈ 100ms vs budget 120ms) so SRT gets
 # roughly one retransmission chance — severity is tuned at smoke.
 
+if [ "$SUITE" = "default" ]; then
 # NOTE: P1/P2 の direct-B は direct-A と同一条件 — 行が一致するのは正常。
 run_condition P1 "practical quality (fits one link)" \
     "100mbit" "delay 20ms limit 1150" "100mbit" "delay 20ms limit 1150" 120 25 1
@@ -381,6 +425,32 @@ run_condition C4 "heavy jitter on path A" \
 run_condition C5 "dual-cellular bonding (asym jitter)" \
     "40mbit" "delay 40ms 20ms limit 750 loss 0.2%" \
     "30mbit" "delay 60ms 30ms limit 600 loss 0.4%" 250 42 3
+fi
+
+if [ "$SUITE" = "redundant" ]; then
+# Redundant mode: every datagram on both paths, so the send rate must fit
+# the slower path (30M in the C5 shape); 10 Mbps is a typical phone uplink
+# stream. The question is which scheduler to pair with Reinjection=dgram,
+# with the plain default (wlb, off) as the reference. Low-latency budgets
+# (120ms) leave SRT little or no time to retransmit, so the second copy is
+# the only recovery.
+read -ra RED_ARMS <<< "${SRT_BENCH_ARMS:-mq-wlb-off mq-wlb-dgram mq-minrtt-dgram}"
+RED_RATE="${SRT_BENCH_RED_RATE:-10}"
+C5_A="delay 40ms 20ms limit 750 loss 0.2%"
+C5_B="delay 60ms 30ms limit 600 loss 0.4%"
+run_condition R1 "dual-cellular, relaxed budget" \
+    "40mbit" "$C5_A" "30mbit" "$C5_B" 250 "$RED_RATE" 3 "${RED_ARMS[@]}"
+run_condition R2 "dual-cellular, low-latency budget" \
+    "40mbit" "$C5_A" "30mbit" "$C5_B" 120 "$RED_RATE" 3 "${RED_ARMS[@]}"
+# R3: the lower-RTT path is the lossy one (Wi-Fi + cellular shape), so
+# MinRTT puts originals on the path that loses them. C3h burst severity.
+run_condition R3 "fast path with burst loss, low-latency budget" \
+    "100mbit" "delay 30ms limit 1250 loss gemodel 4% 30% 80% 0.5%" \
+    "100mbit" "delay 50ms limit 1450" 120 "$RED_RATE" 3 "${RED_ARMS[@]}"
+# R4: the lower-RTT carrier drops out for 2s every 10s (handover, tunnel).
+FLAP="2 10" run_condition R4 "dual-cellular, path A outages, low-latency budget" \
+    "40mbit" "$C5_A" "30mbit" "$C5_B" 120 "$RED_RATE" 3 "${RED_ARMS[@]}"
+fi
 
 # ---- summary -----------------------------------------------------------
 SUMMARY="${OUT_DIR}/summary.md"
@@ -392,16 +462,21 @@ SUMMARY="${OUT_DIR}/summary.md"
     echo "- srt-xtransmit: ${SRT_XTRANSMIT} ($("$SRT_XTRANSMIT" --version 2>/dev/null | head -1 || echo unknown))"
     echo "- mqvpn: $(git -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- duration: ${DURATION}s/run, scheduler ${SCHEDULER}, reorder ${SRT_BENCH_REORDER:-off}, lossmaxttl ${SRT_BENCH_LOSSMAXTTL:-32}, cc ${SRT_BENCH_CC:-bbr2}"
-    echo "- send rates: P1/C3/C4 = 25 Mbps, P2 = 120 Mbps (sender maxbw=0, inputbw=rate, oheadbw=25)"
-    echo "- C3 gemodel: ${GEMODEL}"
+    if [ "$SUITE" = "default" ]; then
+        echo "- send rates: P1/C3/C4 = 25 Mbps, P2 = 120 Mbps (sender maxbw=0, inputbw=rate, oheadbw=25)"
+        echo "- C3 gemodel: ${GEMODEL}"
+    else
+        echo "- suite redundant: send rate ${RED_RATE} Mbps (sender maxbw=0, inputbw=rate, oheadbw=25), reinjection on the client only"
+        echo "- rxA/rxB: MB the server received per path during the send (uplink wire bytes, all traffic)"
+    fi
     for c in "${!COND_LOSS_NOTE[@]}"; do
         echo "- measured loss [${c}]: ${COND_LOSS_NOTE[$c]}"
     done
     echo ""
-    echo "| run | stream loss % | pktSentUnique | rcvDrop | sndDrop | rcvBelated | rcvRetrans | msRTT | recvRate(Mbps) |"
-    echo "|---|---|---|---|---|---|---|---|---|"
+    echo "| run | stream loss % | pktSentUnique | rcvDrop | sndDrop | rcvBelated | rcvRetrans | msRTT | recvRate(Mbps) | rxA MB | rxB MB |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|"
     for key in "${RUNS[@]}"; do
-        echo "| ${key} | ${R_LOSS[$key]} | ${R_SENT[$key]} | ${R_RCVDROP[$key]:-NA} | ${R_SNDDROP[$key]:-NA} | ${R_BELATED[$key]:-NA} | ${R_RETRANS[$key]} | ${R_RTT[$key]} | ${R_RATE[$key]} |"
+        echo "| ${key} | ${R_LOSS[$key]} | ${R_SENT[$key]} | ${R_RCVDROP[$key]:-NA} | ${R_SNDDROP[$key]:-NA} | ${R_BELATED[$key]:-NA} | ${R_RETRANS[$key]} | ${R_RTT[$key]} | ${R_RATE[$key]} | ${R_RXA[$key]:--} | ${R_RXB[$key]:--} |"
     done
 } | tee "$SUMMARY"
 

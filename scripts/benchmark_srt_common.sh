@@ -105,15 +105,30 @@ run_vpn() {
         path_args+=(--path "$ifc")
     done
 
-    local extra_args=()
+    local server_conf="" client_conf=""
     if [ "${SRT_BENCH_REORDER:-off}" = "on" ]; then
-        printf '[Reorder]\nEnabled = on\n' > "${WORK_DIR}/reorder.conf"
-        extra_args=(--config "${WORK_DIR}/reorder.conf")
+        server_conf+=$'[Reorder]\nEnabled = on\n'
+        client_conf+=$'[Reorder]\nEnabled = on\n'
+    fi
+    # VPN_REINJ=<mode> sets [Multipath] Reinjection on the client only (no CLI
+    # flag exists): the client is the SRT sender, and a phone would enable it
+    # in its own config while the shared server keeps the default.
+    local reinj="${VPN_REINJ:-off}"
+    if [ "$reinj" != "off" ]; then
+        client_conf+=$'[Multipath]\nReinjection = '"${reinj}"$'\n'
     fi
     # SRT_BENCH_CC selects the QUIC congestion controller (default bbr2).
     # Diagnostic knob: C3 burst loss collapses the datagram path under bbr2;
     # bbr/cubic/none isolate how much of that is the CC's loss response.
-    extra_args+=(--cc "${SRT_BENCH_CC:-bbr2}")
+    local server_args=(--cc "${SRT_BENCH_CC:-bbr2}") client_args=(--cc "${SRT_BENCH_CC:-bbr2}")
+    if [ -n "$server_conf" ]; then
+        printf '%s' "$server_conf" > "${WORK_DIR}/server.conf"
+        server_args+=(--config "${WORK_DIR}/server.conf")
+    fi
+    if [ -n "$client_conf" ]; then
+        printf '%s' "$client_conf" > "${WORK_DIR}/client.conf"
+        client_args+=(--config "${WORK_DIR}/client.conf")
+    fi
 
     ip netns exec "$NS_SERVER" "$MQVPN" \
         --mode server \
@@ -123,7 +138,7 @@ run_vpn() {
         --key "${WORK_DIR}/server.key" \
         --auth-key "$PSK" \
         --scheduler "$scheduler" \
-        "${extra_args[@]}" \
+        "${server_args[@]}" \
         --log-level info >"${WORK_DIR}/server.log" 2>&1 &
     SERVER_PID=$!
     sleep 2
@@ -139,7 +154,7 @@ run_vpn() {
         --auth-key "$PSK" \
         --insecure \
         --scheduler "$scheduler" \
-        "${extra_args[@]}" \
+        "${client_args[@]}" \
         --log-level info >"${WORK_DIR}/client.log" 2>&1 &
     CLIENT_PID=$!
     sleep 5
@@ -152,7 +167,43 @@ run_vpn() {
         echo "    ERROR: tunnel not established"
         return 1
     fi
+    # An unknown Reinjection value is a WARN + fallback to off, which would
+    # silently turn a redundant arm into a plain one.
+    if [ "$reinj" != "off" ] && \
+       ! grep -q "reinjection enabled: mode=${reinj}" "${WORK_DIR}/client.log"; then
+        echo "    ERROR: client did not enable reinjection mode=${reinj} (see ${WORK_DIR}/client.log)"
+        return 1
+    fi
     return 0
+}
+
+# rx_bytes <server-iface> — bytes the server received on one path: per-path
+# uplink wire volume, which shows whether a redundant arm really duplicated.
+rx_bytes() {
+    ip netns exec "$NS_SERVER" cat "/sys/class/net/$1/statistics/rx_bytes"
+}
+
+# set_path_a <rate> <netem> — replace path A's shaping in both directions.
+set_path_a() {
+    local rate="$1" netem="$2"
+    # shellcheck disable=SC2086  # netem args are intentionally word-split
+    ip netns exec "$NS_CLIENT" tc qdisc change dev bench-a0 root netem $netem rate "$rate"
+    # shellcheck disable=SC2086
+    ip netns exec "$NS_SERVER" tc qdisc change dev bench-a1 root netem $netem rate "$rate"
+}
+
+# flap_path_a <down-s> <period-s> <rate> <netem> — blackhole path A for
+# <down-s> out of every <period-s> (a carrier dropout / handover), first
+# outage <period-s minus down-s> in. Runs until killed; the caller restores
+# path A with set_path_a, since a kill can land inside an outage.
+flap_path_a() {
+    local down="$1" period="$2" rate="$3" netem="$4"
+    while :; do
+        sleep $((period - down))
+        set_path_a "$rate" "loss 100%"
+        sleep "$down"
+        set_path_a "$rate" "$netem"
+    done
 }
 
 kill_vpn() {
