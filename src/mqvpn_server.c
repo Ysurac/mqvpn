@@ -989,6 +989,29 @@ svr_check_session_invariants(const mqvpn_server_t *s)
 #  define svr_check_session_invariants(s) ((void)(s))
 #endif
 
+/* Whether pool offset `offset` is a pinned (fixed) address: reserved for its
+ * user for the server's life, so never returned to dynamic allocation. */
+static int
+svr_offset_is_pinned(const mqvpn_server_t *s, uint32_t offset)
+{
+    for (int i = 0; i < s->n_pinned_ips; i++) {
+        if (s->pinned_ips[i].offset == offset) return 1;
+    }
+    return 0;
+}
+
+/* Give up pinned entry `idx`'s reservation: back to the pool now, unless a
+ * live session holds the address, in which case that session's release
+ * returns it (the caller drops or replaces the entry, so the address is no
+ * longer pinned by then). The caller updates s->pinned_ips itself. */
+static void
+svr_unpin_release(mqvpn_server_t *s, int idx)
+{
+    uint32_t off = s->pinned_ips[idx].offset;
+    if (off >= 1 && off <= MQVPN_ADDR_POOL_MAX && s->sessions[off]) return;
+    mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[idx].ip);
+}
+
 /* Deregister `conn`'s session and release its pool address(es), then zero the
  * conn-scoped tunnel fields so the conn can host a fresh CONNECT-IP
  * establishment. No-op when the conn never completed an ADDRESS_ASSIGN
@@ -1019,15 +1042,7 @@ svr_session_release(mqvpn_server_t *s, svr_conn_t *conn)
     }
 
     /* Pinned IPs are permanently reserved — skip lease/release */
-    int is_pinned = 0;
-    for (int i = 0; i < s->n_pinned_ips; i++) {
-        if (s->pinned_ips[i].offset == offset) {
-            is_pinned = 1;
-            break;
-        }
-    }
-
-    if (!is_pinned) {
+    if (!svr_offset_is_pinned(s, offset)) {
         /* Save lease so the user gets the same IP on reconnect */
         if (conn->username[0]) {
             int saved = 0;
@@ -1449,7 +1464,10 @@ ip_assigned:;
     return 0;
 
 fail_release_ip:
-    mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
+    /* A pinned address stays reserved for its user, as in svr_session_release. */
+    if (!svr_offset_is_pinned(s, ntohl(conn->assigned_ip.s_addr) -
+                                     ntohl(s->pool.base.s_addr)))
+        mqvpn_addr_pool_release(&s->pool, &conn->assigned_ip);
     memset(&conn->assigned_ip, 0, sizeof(conn->assigned_ip));
     /* Always 0/zero on the goto paths today; reset for safety against
      * future edits that move the assignments above. */
@@ -2784,6 +2802,11 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             continue;
         }
         uint32_t offset = addr_h - base_h;
+        if (offset == 1) {
+            LOG_W(s, "fixed IP '%s' for user '%s' is the server's own address — skipping",
+                  s->config.user_fixed_ips[i], s->config.user_names[i]);
+            continue;
+        }
         struct in_addr alloc_out;
         if (mqvpn_addr_pool_alloc_at(&s->pool, offset, &alloc_out) < 0) {
             LOG_W(s, "fixed IP '%s' for user '%s' already in use — skipping",
@@ -3754,15 +3777,7 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
     /* Release pinned IP for the removed user if not currently connected */
     for (int i = 0; i < s->n_pinned_ips; i++) {
         if (strcmp(s->pinned_ips[i].username, username) != 0) continue;
-        int is_connected = 0;
-        for (int k = 1; k <= MQVPN_ADDR_POOL_MAX; k++) {
-            if (s->sessions[k] && strcmp(s->sessions[k]->username, username) == 0) {
-                is_connected = 1;
-                break;
-            }
-        }
-        if (!is_connected)
-            mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[i].ip);
+        svr_unpin_release(s, i);
         /* Remove from pinned table */
         for (int j = i + 1; j < s->n_pinned_ips; j++)
             s->pinned_ips[j - 1] = s->pinned_ips[j];
@@ -3955,15 +3970,7 @@ mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const ch
     /* ip="" — clear fixed IP */
     if (ip[0] == '\0') {
         if (pinned_idx >= 0) {
-            int is_connected = 0;
-            for (int k = 1; k <= MQVPN_ADDR_POOL_MAX; k++) {
-                if (s->sessions[k] && strcmp(s->sessions[k]->username, username) == 0) {
-                    is_connected = 1;
-                    break;
-                }
-            }
-            if (!is_connected)
-                mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[pinned_idx].ip);
+            svr_unpin_release(s, pinned_idx);
             for (int j = pinned_idx + 1; j < s->n_pinned_ips; j++)
                 s->pinned_ips[j - 1] = s->pinned_ips[j];
             s->n_pinned_ips--;
@@ -3981,40 +3988,39 @@ mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const ch
     if (addr_h <= base_h || addr_h - base_h > s->pool.pool_size)
         return MQVPN_ERR_INVALID_ARG;
     uint32_t new_offset = addr_h - base_h;
-
-    /* Release old pinned IP if not currently in use */
-    if (pinned_idx >= 0) {
-        int is_connected = 0;
-        for (int k = 1; k <= MQVPN_ADDR_POOL_MAX; k++) {
-            if (s->sessions[k] && strcmp(s->sessions[k]->username, username) == 0) {
-                is_connected = 1;
-                break;
-            }
-        }
-        if (!is_connected)
-            mqvpn_addr_pool_release(&s->pool, &s->pinned_ips[pinned_idx].ip);
-        for (int j = pinned_idx + 1; j < s->n_pinned_ips; j++)
-            s->pinned_ips[j - 1] = s->pinned_ips[j];
-        s->n_pinned_ips--;
-        pinned_idx = -1;
+    if (new_offset == 1) {
+        LOG_W(s, "fixed IP %s for user '%s' is the server's own address, rejected", ip,
+              username);
+        return MQVPN_ERR_INVALID_ARG;
     }
 
-    /* Reserve new IP in pool */
+    /* Already pinned there: nothing to reserve. */
+    if (pinned_idx >= 0 && s->pinned_ips[pinned_idx].offset == new_offset) {
+        snprintf(s->config.user_fixed_ips[user_idx],
+                 sizeof(s->config.user_fixed_ips[user_idx]), "%s", ip);
+        return MQVPN_OK;
+    }
+
+    if (pinned_idx < 0 && s->n_pinned_ips >= MQVPN_MAX_USERS)
+        return MQVPN_ERR_MAX_CLIENTS;
+
+    /* Reserve the new address BEFORE giving up the old one: if it is taken,
+     * the old pin, the pool and the config all stay as they were. */
     struct in_addr alloc_out;
     if (mqvpn_addr_pool_alloc_at(&s->pool, new_offset, &alloc_out) < 0)
         return MQVPN_ERR_POOL_FULL;
 
-    if (s->n_pinned_ips >= MQVPN_MAX_USERS) {
-        mqvpn_addr_pool_release(&s->pool, &alloc_out);
-        return MQVPN_ERR_MAX_CLIENTS;
+    int idx;
+    if (pinned_idx >= 0) {
+        svr_unpin_release(s, pinned_idx);
+        idx = pinned_idx; /* replace the entry in place */
+    } else {
+        idx = s->n_pinned_ips++;
     }
-
-    int idx = s->n_pinned_ips;
-    snprintf(s->pinned_ips[idx].username, sizeof(s->pinned_ips[idx].username),
-             "%s", username);
+    snprintf(s->pinned_ips[idx].username, sizeof(s->pinned_ips[idx].username), "%s",
+             username);
     s->pinned_ips[idx].offset = new_offset;
     s->pinned_ips[idx].ip = alloc_out;
-    s->n_pinned_ips++;
 
     snprintf(s->config.user_fixed_ips[user_idx],
              sizeof(s->config.user_fixed_ips[user_idx]), "%s", ip);

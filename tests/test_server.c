@@ -1846,6 +1846,48 @@ TEST(server_set_user_fixed_ip_api)
     mqvpn_server_destroy(s);
 }
 
+TEST(server_set_user_fixed_ip_is_transactional)
+{
+    /* A move that cannot reserve the new address must keep the old pin, and
+     * the server's own address (.1) is refused outright. */
+    mqvpn_config_t *cfg = make_server_config();
+    mqvpn_config_add_user(cfg, "alice", "alice-key");
+    mqvpn_config_add_user(cfg, "bob", "bob-key");
+    mqvpn_config_add_user(cfg, "carol", "carol-key");
+
+    mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
+    cbs.tun_output = mock_tun_output;
+    cbs.tunnel_config_ready = mock_tunnel_config_ready;
+    mqvpn_server_t *s = mqvpn_server_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.5"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.6"), MQVPN_OK);
+
+    /* alice -> bob's address fails, and alice still holds .5: carol cannot
+     * take it (before the fix the old pin was released first and lost). */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.6"),
+              MQVPN_ERR_POOL_FULL);
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "carol", "10.0.0.5"),
+              MQVPN_ERR_POOL_FULL);
+
+    /* The server's own address is rejected and alice keeps .5. */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.1"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "carol", "10.0.0.5"),
+              MQVPN_ERR_POOL_FULL);
+
+    /* Re-pinning the same address is a no-op success, not a conflict. */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.5"), MQVPN_OK);
+
+    /* A successful move frees the old address. */
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.7"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "carol", "10.0.0.5"), MQVPN_OK);
+
+    mqvpn_server_destroy(s);
+}
+
 TEST(server_remove_user_releases_pinned_ip)
 {
     /* Removing a user with a pinned IP frees that address back to the pool. */
@@ -2626,6 +2668,7 @@ main(void)
     /* Fixed (pinned) IP tests */
     run_server_pinned_ip_preconfig_reserves_pool();
     run_server_set_user_fixed_ip_api();
+    run_server_set_user_fixed_ip_is_transactional();
     run_server_remove_user_releases_pinned_ip();
 
     /* Manual reconnect regressions */
