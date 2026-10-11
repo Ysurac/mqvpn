@@ -129,6 +129,7 @@ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
 {
     struct pollfd pfd[MQVPN_MAX_PATHS + 1];
     int slot[MQVPN_MAX_PATHS];
+    mqvpn_path_handle_t polled[MQVPN_MAX_PATHS];
     int n = 0;
     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
         if (r->e[i].state != MQVPN_REACTOR_ENTRY_ATTACHED) continue;
@@ -136,6 +137,7 @@ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
         pfd[n].events = POLLIN;
         pfd[n].revents = 0;
         slot[n] = i;
+        polled[n] = r->e[i].handle;
         n++;
     }
     if (!client && n > 0)
@@ -158,6 +160,13 @@ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
     for (int k = 0; k < n; k++) {
         entry_t *e = &r->e[slot[k]];
         if (pfd[k].revents == 0) continue;
+        /* The poll set is a snapshot. A drain earlier in this loop runs
+         * library callbacks, and a platform that removes and releases a path
+         * from one of them detaches, frees or reuses this entry: act only on
+         * the entry that was polled, still attached. */
+        if (e->state != MQVPN_REACTOR_ENTRY_ATTACHED || e->handle != polled[k] ||
+            e->fd != pfd[k].fd || e->ctx == NULL)
+            continue;
         if (pfd[k].revents & POLLNVAL) {
             /* The number is no longer open: someone closed it behind the
              * platform. Stop polling it; the platform learns the handle from
@@ -218,14 +227,18 @@ mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
     snprintf(desc.iface, sizeof(desc.iface), "%s", iface ? iface : "");
     struct sockaddr_storage ss;
     socklen_t ss_len = sizeof(ss);
-    if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) == 0 &&
-        ss_len <= sizeof(desc.local_addr)) {
-        memcpy(desc.local_addr, &ss, ss_len);
-        desc.local_addr_len = ss_len;
-    } else {
-        /* xquic learns the local address from the first packet instead. */
+    /* On failure xquic learns the local address from the first packet. */
+    if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) != 0) {
         LOG_WRN("android-reactor: add_path(%s): getsockname: %s", e->tag,
                 strerror(errno));
+    } else if (ss_len > sizeof(desc.local_addr) || ss_len > sizeof(ss)) {
+        /* Succeeded, so errno is stale: report the length instead. */
+        LOG_WRN("android-reactor: add_path(%s): getsockname: address length %u too "
+                "large",
+                e->tag, (unsigned)ss_len);
+    } else {
+        memcpy(desc.local_addr, &ss, ss_len);
+        desc.local_addr_len = ss_len;
     }
 
     mqvpn_bind_posix_opts_t bopts;
