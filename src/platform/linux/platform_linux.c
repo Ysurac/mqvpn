@@ -1624,20 +1624,42 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         mqvpn_config_set_tls_cert(lib_cfg, cfg->cert_file, cfg->key_file);
     if (cfg->tls_ciphers && cfg->tls_ciphers[0])
         mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
-    if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
+    /* Credentials fail closed: a user the library refused (bad name, table
+     * full) used to be skipped silently, which could leave the server with
+     * fewer credentials than configured, or none at all. */
+    if (cfg->auth_key && mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key) != MQVPN_OK) {
+        LOG_ERR("invalid auth key");
+        mqvpn_config_free(lib_cfg);
+        return 1;
+    }
     for (int i = 0; i < cfg->n_users; i++) {
-        if (cfg->user_names[i] && cfg->user_keys[i]) {
-            mqvpn_config_add_user(lib_cfg, cfg->user_names[i], cfg->user_keys[i]);
-            if (cfg->user_fixed_ips[i] && cfg->user_fixed_ips[i][0])
-                mqvpn_config_set_user_fixed_ip(lib_cfg, cfg->user_names[i],
-                                               cfg->user_fixed_ips[i]);
+        const char *name = cfg->user_names[i];
+        const char *key = cfg->user_keys[i];
+        if (!name && !key) continue;
+        if (!name || !key || mqvpn_config_add_user(lib_cfg, name, key) != MQVPN_OK) {
+            LOG_ERR("cannot add user '%s': a name and a key are required, the name "
+                    "must not contain quotes, backslashes or control characters, and "
+                    "the user table must not be full",
+                    name ? name : "(none)");
+            mqvpn_config_free(lib_cfg);
+            return 1;
+        }
+        if (cfg->user_fixed_ips[i] && cfg->user_fixed_ips[i][0] &&
+            mqvpn_config_set_user_fixed_ip(lib_cfg, name, cfg->user_fixed_ips[i]) !=
+                MQVPN_OK) {
+            LOG_ERR("cannot set fixed IP %s for user '%s'", cfg->user_fixed_ips[i], name);
+            mqvpn_config_free(lib_cfg);
+            return 1;
         }
     }
     for (int i = 0; i < cfg->n_path_policy; i++) {
-        mqvpn_config_add_path_policy(
-            lib_cfg, cfg->path_policy[i].user, cfg->path_policy[i].iface,
-            cfg->path_policy[i].has_weight, cfg->path_policy[i].weight,
-            cfg->path_policy[i].has_dscp_mask, cfg->path_policy[i].dscp_mask);
+        if (mqvpn_config_add_path_policy(
+                lib_cfg, cfg->path_policy[i].user, cfg->path_policy[i].iface,
+                cfg->path_policy[i].has_weight, cfg->path_policy[i].weight,
+                cfg->path_policy[i].has_dscp_mask,
+                cfg->path_policy[i].dscp_mask) != MQVPN_OK)
+            LOG_WRN("path policy for user '%s' on '%s' ignored (invalid or table full)",
+                    cfg->path_policy[i].user, cfg->path_policy[i].iface);
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
     mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
