@@ -1666,10 +1666,13 @@ test_relay_pending_stream_high_water(void)
     ASSERT_TRUE(f != NULL, "flow bound, PENDING_STREAM");
 
     const uint16_t seg = 9000;
-    /* Crossing index: smallest n with 9000*n >= HIGH_WATER.
-     * default: ceil(262144/9000)=30 (unchanged); iOS scale=2:
-     * ceil(131070/9000)=15. */
-    const uint32_t n = (MQVPN_TCP_LANE_BP_HIGH_WATER + 8999u) / 9000u;
+    /* Crossing index: smallest n with per*n >= HIGH_WATER, where the
+     * watermark counts each queued segment's bookkeeping memory on top of
+     * its payload (tcp_lane_uplink_backlog). default: 29 (30 payload-only);
+     * iOS scale=2: 15. */
+    const uint32_t per = seg + (uint32_t)sizeof(mqvpn_tcp_uplink_node_t) +
+                         (uint32_t)TCP_LANE_UPLINK_PBUF_OVERHEAD;
+    const uint32_t n = (MQVPN_TCP_LANE_BP_HIGH_WATER + per - 1u) / per;
     for (uint32_t i = 0; i < n; i++) {
         struct pbuf *p = mk_pbuf(seg);
         ASSERT_TRUE(p != NULL, "pbuf alloc");
@@ -1693,6 +1696,52 @@ test_relay_pending_stream_high_water(void)
                   "withheld cleared once queue drains below low-water");
     ASSERT_EQ_INT(g_recved_total, (uint32_t)seg * n,
                   "deferred segment's recved eventually caught up");
+
+    f->pcb = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
+/* Tiny uplink segments are coalesced into shared buffers instead of being
+ * queued one pbuf (a whole packet allocation) each, and the watermark
+ * metric counts the per-node overhead, so the queue's memory tracks its
+ * payload instead of ~100x it. Order and bytes are preserved. */
+static void
+test_relay_tiny_segments_coalesced(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x5a5bULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 5510, &fake_req, &fake_stream, 0);
+    ASSERT_TRUE(f != NULL, "flow bound, PENDING_STREAM");
+
+    const uint32_t count = 10000; /* 10000 one-byte segments */
+    for (uint32_t i = 0; i < count; i++) {
+        mqvpn_tcp_lane_on_lwip_recv(f, &pcb, mk_pbuf(1), ERR_OK);
+    }
+    ASSERT_EQ_INT(f->uplink_queued_bytes, count, "every byte queued");
+    uint32_t nodes = 0;
+    for (mqvpn_tcp_uplink_node_t *n = f->uplink_q_head; n; n = n->next) {
+        nodes++;
+    }
+    ASSERT_EQ_INT(
+        nodes, (count + TCP_LANE_UPLINK_COALESCE_CAP - 1) / TCP_LANE_UPLINK_COALESCE_CAP,
+        "coalesced into a few buffers, not one node per segment");
+    ASSERT_TRUE(tcp_lane_uplink_backlog(f) < count + nodes * 256u,
+                "backlog memory stays close to the payload");
+    ASSERT_EQ_INT(f->uplink_withheld, 0, "far below high-water: window not withheld");
+
+    /* A larger delivery is queued as-is behind the coalesced ones. */
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, mk_pbuf(2000), ERR_OK);
+    ASSERT_EQ_INT(f->uplink_queued_bytes, count + 2000, "large segment queued");
+
+    mqvpn_tcp_lane_on_stream_established(lane, &fake_stream);
+    ASSERT_EQ_INT(g_h3_capture_len, count + 2000, "every byte relayed");
+    ASSERT_TRUE(memcmp(g_h3_capture, g_expected, count + 2000) == 0,
+                "exact in-order relay");
+    ASSERT_EQ_INT(f->uplink_queued_overhead, 0, "overhead released with the nodes");
 
     f->pcb = NULL;
     mqvpn_tcp_lane_free(lane);
@@ -3863,6 +3912,7 @@ main(void)
     test_relay_partial_accept();
     test_relay_pending_stream_buffering();
     test_relay_pending_stream_high_water();
+    test_relay_tiny_segments_coalesced();
     test_relay_fin_ordering();
     test_relay_repeated_eagain_writable();
     test_relay_chained_pbuf_gt_mss();

@@ -33,6 +33,24 @@ tcp_lane_recved(struct tcp_pcb *pcb, uint32_t len)
     }
 }
 
+/* Small deliveries are copied into a shared coalescing buffer instead of
+ * being queued one pbuf each: an ingress pbuf is a whole PBUF_RAM packet
+ * allocation (lwip_glue.c), so a stream of 1-byte segments would otherwise
+ * cost ~100x its payload in queued memory. */
+#define TCP_LANE_UPLINK_COALESCE_MAX 256u  /* deliveries up to this are copied */
+#define TCP_LANE_UPLINK_COALESCE_CAP 4096u /* capacity of one coalescing buffer */
+
+/* Memory one queued pbuf (chain element) costs beyond its payload: the pbuf
+ * header plus the IP/TCP header bytes and allocator slack its PBUF_RAM
+ * packet allocation still carries. */
+#define TCP_LANE_UPLINK_PBUF_OVERHEAD (LWIP_MEM_ALIGN_SIZE(sizeof(struct pbuf)) + 64u)
+
+uint32_t
+tcp_lane_uplink_backlog(const mqvpn_tcp_flow_t *f)
+{
+    return f->uplink_queued_bytes + f->uplink_queued_overhead;
+}
+
 void
 tcp_lane_uplink_queue_free(mqvpn_tcp_flow_t *f)
 {
@@ -46,6 +64,7 @@ tcp_lane_uplink_queue_free(mqvpn_tcp_flow_t *f)
     f->uplink_q_head = NULL;
     f->uplink_q_tail = NULL;
     f->uplink_queued_bytes = 0;
+    f->uplink_queued_overhead = 0;
 }
 
 /* Hand p's bytes [offset, tot_len) to the H3 stream. Returns the new offset
@@ -101,16 +120,49 @@ tcp_lane_uplink_send_from(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
 }
 
 /* Append a (possibly partially sent) delivery to the flow's uplink queue.
- * Takes ownership of p on success; on failure the caller still owns p. */
+ * Takes ownership of p on success; on failure the caller still owns p.
+ * A small remainder is copied into the tail coalescing buffer (or a new
+ * one) and p freed — see TCP_LANE_UPLINK_COALESCE_MAX. */
 static int
 tcp_lane_uplink_stash(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
 {
+    uint16_t want = (uint16_t)(p->tot_len - offset);
+    mqvpn_tcp_uplink_node_t *t = f->uplink_q_tail;
+    if (want <= TCP_LANE_UPLINK_COALESCE_MAX && t && t->cap &&
+        (uint32_t)t->p->tot_len + want <= t->cap) {
+        pbuf_copy_partial(p, (uint8_t *)t->p->payload + t->p->tot_len, want, offset);
+        t->p->len = (u16_t)(t->p->len + want);
+        t->p->tot_len = (u16_t)(t->p->tot_len + want);
+        f->uplink_queued_bytes += want;
+        pbuf_free(p);
+        return 0;
+    }
+    uint16_t cap = 0;
+    if (want <= TCP_LANE_UPLINK_COALESCE_MAX) {
+        struct pbuf *c =
+            pbuf_alloc(PBUF_RAW, (u16_t)TCP_LANE_UPLINK_COALESCE_CAP, PBUF_RAM);
+        if (c) {
+            pbuf_copy_partial(p, c->payload, want, offset);
+            c->len = c->tot_len = want; /* grows as deliveries are appended */
+            pbuf_free(p);
+            p = c;
+            offset = 0;
+            cap = (uint16_t)TCP_LANE_UPLINK_COALESCE_CAP;
+        }
+        /* allocation failure: queue p itself, uncoalesced */
+    }
     mqvpn_tcp_uplink_node_t *n = malloc(sizeof(*n));
     if (!n) {
+        if (cap) {
+            pbuf_free(p); /* the copy; the caller's p was already freed */
+            return -2;
+        }
         return -1;
     }
     n->p = p;
     n->offset = offset;
+    n->cap = cap;
+    n->overhead = (uint16_t)(sizeof(*n) + pbuf_clen(p) * TCP_LANE_UPLINK_PBUF_OVERHEAD);
     n->next = NULL;
     if (f->uplink_q_tail) {
         f->uplink_q_tail->next = n;
@@ -119,6 +171,7 @@ tcp_lane_uplink_stash(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
     }
     f->uplink_q_tail = n;
     f->uplink_queued_bytes += (uint32_t)(p->tot_len - offset);
+    f->uplink_queued_overhead += n->overhead;
     return 0;
 }
 
@@ -221,6 +274,7 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
         if (!f->uplink_q_head) {
             f->uplink_q_tail = NULL;
         }
+        f->uplink_queued_overhead -= n->overhead;
         pbuf_free(n->p);
         free(n);
     }
@@ -230,7 +284,7 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
         return st; /* f was torn down (fatal error or clean-close completion) */
     }
 
-    if (f->uplink_withheld && f->uplink_queued_bytes < MQVPN_TCP_LANE_BP_LOW_WATER) {
+    if (f->uplink_withheld && tcp_lane_uplink_backlog(f) < MQVPN_TCP_LANE_BP_LOW_WATER) {
         f->uplink_withheld = 0;
         if (f->uplink_withheld_recved > 0 && f->pcb) {
             tcp_lane_recved(f->pcb, f->uplink_withheld_recved);
@@ -278,11 +332,14 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
     }
 
     /* Withhold/pre-2xx buffer — the SAME queue (one code path, not two). */
-    if (tcp_lane_uplink_stash(f, p, off) < 0) {
+    int sr = tcp_lane_uplink_stash(f, p, off);
+    if (sr < 0) {
         /* Alloc failure: these bytes are already ACKed at the TCP level —
          * dropping them would silently corrupt the relayed stream. Fail the
-         * flow instead. */
-        pbuf_free(p);
+         * flow instead. (-2: the stash already freed p.) */
+        if (sr == -1) {
+            pbuf_free(p);
+        }
         return mqvpn_tcp_lane_on_relay_error(f);
     }
 
@@ -294,7 +351,7 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
      * Withheld deliveries accumulate in uplink_withheld_recved and are
      * recved in one batch at the low-water resume in flush(). */
     if (f->state == TCP_FLOW_ACTIVE ||
-        f->uplink_queued_bytes >= MQVPN_TCP_LANE_BP_HIGH_WATER) {
+        tcp_lane_uplink_backlog(f) >= MQVPN_TCP_LANE_BP_HIGH_WATER) {
         f->uplink_withheld = 1;
     }
     if (f->uplink_withheld) {

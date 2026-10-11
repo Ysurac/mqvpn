@@ -130,8 +130,14 @@ typedef enum {
  * bytes xquic already accepted (partial-accept resume point): re-delivering
  * from 0 after a partial send would DUPLICATE bytes on the stream. */
 typedef struct mqvpn_tcp_uplink_node {
-    struct pbuf *p;  /* owned; freed when fully sent (or on queue teardown) */
-    uint16_t offset; /* bytes of p already handed to H3; < p->tot_len */
+    struct pbuf *p;    /* owned; freed when fully sent (or on queue teardown) */
+    uint16_t offset;   /* bytes of p already handed to H3; < p->tot_len */
+    uint16_t cap;      /* nonzero: p is a lane-allocated coalescing buffer
+                        * of this capacity that small deliveries are
+                        * appended to (tcp_lane_uplink_stash) */
+    uint16_t overhead; /* bookkeeping bytes this node costs beyond its
+                        * payload (node + pbuf headers), counted in
+                        * uplink_queued_overhead */
     struct mqvpn_tcp_uplink_node *next;
 } mqvpn_tcp_uplink_node_t;
 
@@ -167,8 +173,9 @@ typedef struct mqvpn_tcp_flow {
      * (PENDING_STREAM: nothing may be sent before the gate opens) and
      * EAGAIN/partial-accept retry (ACTIVE: xquic backpressure). FIFO; flushed
      * by the writable notify and by the 2xx transition. uplink_queued_bytes
-     * counts UNSENT bytes only (sum of tot_len - offset), which is the
-     * watermark metric: what xquic has not yet taken from us.
+     * counts UNSENT bytes only (sum of tot_len - offset): what xquic has
+     * not yet taken from us. The watermark metric is that plus
+     * uplink_queued_overhead (tcp_lane_uplink_backlog).
      * (An earlier uplink_inflight_bytes field was reserved here; it was never
      * decremented anywhere and its "accepted by xquic" meaning
      * has no completion signal to drive it, so it is replaced by
@@ -176,6 +183,13 @@ typedef struct mqvpn_tcp_flow {
     mqvpn_tcp_uplink_node_t *uplink_q_head;
     mqvpn_tcp_uplink_node_t *uplink_q_tail;
     uint32_t uplink_queued_bytes;    /* unsent bytes across the queue */
+    uint32_t uplink_queued_overhead; /* per-node bookkeeping memory across the
+                                      * queue (sum of node->overhead) — the
+                                      * watermarks compare payload PLUS this,
+                                      * so a flood of tiny segments, which
+                                      * costs far more memory than payload,
+                                      * withholds the window just as early
+                                      * (tcp_lane_uplink_backlog) */
     uint32_t uplink_withheld_recved; /* delivered bytes whose tcp_recved is
                                       * deferred until the low-water resume */
     int uplink_withheld;
@@ -308,6 +322,10 @@ tcp_lane_gone_status(const mqvpn_tcp_flow_t *f)
  * field comment). release frees a flow torn down while held. */
 void tcp_lane_flow_hold(mqvpn_tcp_flow_t *f);
 void tcp_lane_flow_release(mqvpn_tcp_flow_t *f);
+
+/* Defined in tcp_lane_uplink.c. The uplink queue's memory-weighted backlog
+ * (unsent payload + per-node overhead) that the BP watermarks compare. */
+uint32_t tcp_lane_uplink_backlog(const mqvpn_tcp_flow_t *f);
 
 /* Defined in tcp_lane_uplink.c. Frees every queued node + its owned pbuf;
  * idempotent on an already-empty queue. Called from tcp_lane.c's
