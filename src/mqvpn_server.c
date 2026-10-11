@@ -1485,6 +1485,30 @@ cb_request_close(xqc_h3_request_t *h3_request, void *strm_user_data)
  * mqvpn_server_internal.h (see that header for why only this struct + two
  * accessor functions moved, not the rest of this file's internals). */
 
+/* "Bearer <token>" from an authorization header value. RFC 9110 §11.1 makes
+ * the auth-scheme case-insensitive and §11.4 separates it from the
+ * credentials with 1*SP. Leaves *tok untouched when the value is not a
+ * Bearer credential with a non-empty token. */
+static void
+svr_parse_bearer(const char *v, size_t len, const char **tok, size_t *tok_len)
+{
+    static const char scheme[] = "bearer";
+    const size_t slen = sizeof(scheme) - 1;
+    if (len <= slen + 1) return; /* scheme, one SP, at least one token byte */
+    for (size_t i = 0; i < slen; i++) {
+        char c = v[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != scheme[i]) return;
+    }
+    size_t p = slen;
+    if (v[p] != ' ') return;
+    while (p < len && v[p] == ' ')
+        p++;
+    if (p == len) return;
+    *tok = v + p;
+    *tok_len = len - p;
+}
+
 /* Walks the header list into `out` only — no conn state is written here.
  * In particular the mqvpn-reorder advertisement is reported via
  * out->has_reorder_hdr and applied to conn->peer_reorder_supported only by
@@ -1528,11 +1552,9 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
             memcmp(h->name.iov_base, "capsule-protocol", 16) == 0 &&
             h->value.iov_len == 2 && memcmp(h->value.iov_base, "?1", 2) == 0)
             out->has_capsule_proto = 1;
-        if (h->name.iov_len == 13 && memcmp(h->name.iov_base, "authorization", 13) == 0 &&
-            h->value.iov_len > 7 && memcmp(h->value.iov_base, "Bearer ", 7) == 0) {
-            out->auth_token = (const char *)h->value.iov_base + 7;
-            out->auth_token_len = h->value.iov_len - 7;
-        }
+        if (h->name.iov_len == 13 && memcmp(h->name.iov_base, "authorization", 13) == 0)
+            svr_parse_bearer((const char *)h->value.iov_base, h->value.iov_len,
+                             &out->auth_token, &out->auth_token_len);
         if (h->name.iov_len == 6 && memcmp(h->name.iov_base, "x-user", 6) == 0 &&
             h->value.iov_len > 0) {
             size_t ulen = h->value.iov_len < sizeof(out->x_user) - 1
