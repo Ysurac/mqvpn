@@ -590,10 +590,12 @@ typedef struct {
 /* Path descriptor flags */
 /* Backup (failover) path: created and validated like any other path but held
  * in STANDBY (status MQVPN_PATH_STANDBY, PATH_STATUS_BACKUP sent to the
- * peer), so it stays probed. The backup and backup_fec schedulers send on a
- * standby path only while no primary path is usable, and return to the
- * primaries when one recovers. Other schedulers do not distinguish standby
- * paths from primary ones. */
+ * peer), so it stays probed. Schedulers send no new data on a standby path
+ * while a working primary path exists, and return to the primaries when one
+ * recovers; the peer's schedulers do the same for the downlink. Exceptions:
+ * redundant replicates onto standby paths, backup_fec sends its FEC repair
+ * on them, and backup also uses a standby path that performs better than
+ * every primary (a slow or loaded primary). */
 #define MQVPN_PATH_FLAG_BACKUP (1u << 0)
 
 /* ─── Callback function types ─── */

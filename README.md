@@ -314,7 +314,7 @@ Scheduler = wlb
                                # can't adopt it regardless of its own SyncPathLabels setting
 Path = eth0
 Path = wlan0
-# BackupPath = lte0   # standby path; Scheduler = backup / backup_fec use it only when all primary paths are down
+# BackupPath = lte0   # standby path: no traffic while a Path works (redundant and backup_fec still send over it)
 
 # [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
 # Enabled = true
@@ -510,10 +510,10 @@ high-bandwidth fibre link over a metered LTE backup while still drawing on
 both under load.
 
 **`redundant` — broadcast scheduler:** every packet is duplicated onto every
-currently usable path (both AVAILABLE and STANDBY, unlike the other
-schedulers' preference for AVAILABLE paths) instead of being split across
-them, trading bandwidth for maximum loss resilience — as long as one copy
-arrives, the data is delivered. There is no aggregation benefit and effective
+currently usable path (both AVAILABLE and STANDBY, whereas the other
+schedulers keep STANDBY paths idle while an AVAILABLE path works) instead
+of being split across them, trading bandwidth for maximum loss resilience —
+as long as one copy arrives, the data is delivered. There is no aggregation benefit and effective
 throughput is capped at the slowest usable path's share of bandwidth. Intended
 for low-bitrate, loss/latency-critical traffic (control channels, keepalives,
 VoIP) rather than bulk transfer.
@@ -1173,7 +1173,7 @@ mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
-  --backup-path IFACE    Standby interface; the backup/backup_fec schedulers use it only when all primary paths are down (repeatable)
+  --backup-path IFACE    Standby interface, no traffic while a --path interface works (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)

@@ -230,7 +230,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `Scheduler` | スケジューラアルゴリズム: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant`, `dscp` のいずれか | `wlb` |
 | `CC`（別名 `CongestionControl`） | 輻輳制御アルゴリズム: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited`, `none` のいずれか | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可、クライアントのみ、最大 8 個） | デフォルトインターフェース |
-| `BackupPath` | フェイルオーバー用のインターフェース（複数指定可、クライアントのみ）。スタンバイ状態で接続されます。`backup` と `backup_fec` スケジューラは使える `Path` がないときだけ使用します。それ以外のスケジューラ（デフォルトの `wlb` を含む）は現状このインターフェースにも送信します | — |
+| `BackupPath` | フェイルオーバー用のインターフェース（複数指定可、クライアントのみ）。スタンバイ状態で接続され、動作している `Path` がある間はトラフィックを流しません。すべての `Path` がダウンまたは不調になると引き継ぎます。例外：`redundant` はこのインターフェースにも複製を送信し、`backup_fec` は修復用データを送信します。`backup` は `Path` が低速または過負荷のときにも使用することがあります | — |
 | `Fec` / `FecEnable` | 前方誤り訂正（FEC）を有効化（FEC 有効ビルドが必要） | `false` |
 | `FecScheme` | FEC 方式: `galois_calculation`, `packet_mask`, `reed_solomon`, `xor` のいずれか | `reed_solomon` |
 | `SyncPathLabels` | パスごとの weight / DSCP マスクをクライアントとサーバーで共有する。クライアント: 自分の値をサーバーに通知する。サーバー: クライアントが通知した値を下り方向に採用する。どちらか一方でも `false` にすると共有されない | `true` |

@@ -235,7 +235,7 @@ Enables the [Control API](#control-api), in both client and server mode. Disable
 | `Scheduler` | Scheduler algorithm: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant` or `dscp` | `wlb` |
 | `CC` (alias `CongestionControl`) | Congestion control algorithm: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited` or `none` | `bbr2` |
 | `Path` | Network interface to bind (repeatable, client only, up to 8) | Default interface |
-| `BackupPath` | Failover interface (repeatable, client only). It is brought up in standby: the `backup` and `backup_fec` schedulers use it only when no `Path` interface is usable; the other schedulers (including the default `wlb`) currently still send on it | — |
+| `BackupPath` | Failover interface (repeatable, client only). It is brought up in standby and carries no traffic while a `Path` interface works; it takes over when every `Path` is down or failing. Exceptions: `redundant` also sends its copies over it, `backup_fec` sends its repair data over it, and `backup` may also use it while the `Path` interfaces are slow or overloaded | — |
 | `Fec` / `FecEnable` | Enable forward error correction (needs an FEC-enabled build) | `false` |
 | `FecScheme` | FEC scheme: `galois_calculation`, `packet_mask`, `reed_solomon` or `xor` | `reed_solomon` |
 | `SyncPathLabels` | Share per-path weight / DSCP mask between client and server. Client: announce its own values to the server. Server: adopt the values the client announces for its downlink. Either side set to `false` turns the sharing off | `true` |
