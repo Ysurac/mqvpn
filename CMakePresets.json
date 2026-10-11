@@ -9,9 +9,9 @@
     {
       "name": "default",
       "displayName": "Default",
-      "description": "Configure mqvpn against the prebuilt xquic tree used by build.sh",
+      "description": "Debug build in build-debug/ (build/ is build.sh's Release tree) against the prebuilt xquic tree used by build.sh",
       "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build",
+      "binaryDir": "${sourceDir}/build-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "BUILD_TESTING": "ON",

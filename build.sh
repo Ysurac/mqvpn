@@ -117,11 +117,12 @@ make -C "$XQUIC_BUILD" -j"$NPROC"
 
 echo "=== Building mqvpn ==="
 mkdir -p "$SCRIPT_DIR/build"
-if [ ! -f "$SCRIPT_DIR/build/CMakeCache.txt" ]; then
-    cmake -S "$SCRIPT_DIR" -B "$SCRIPT_DIR/build" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DXQUIC_BUILD_DIR="$XQUIC_BUILD"
-fi
+# Configure on every run, like xquic above: build/ is the Release tree, and a
+# cache left by a Debug configure (or another XQUIC_BUILD_DIR) must not
+# silently survive. Debug builds belong in build-debug/ (CMake preset).
+cmake -S "$SCRIPT_DIR" -B "$SCRIPT_DIR/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DXQUIC_BUILD_DIR="$XQUIC_BUILD"
 make -C "$SCRIPT_DIR/build" -j"$NPROC"
 
 # ---------- Done ----------
