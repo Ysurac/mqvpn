@@ -916,6 +916,8 @@ typedef struct {
  * fixture and reset them after teardown. */
 static const char *g_lb_server_cert = NULL;
 static const char *g_lb_server_key = NULL;
+/* Server PSK for the next loopback_setup (NULL = no auth). */
+static const char *g_lb_server_auth_key = NULL;
 
 /* Sockets, server, client (with every client mock registered, tunnel_closed
  * and log included), one path, connect. `tweak` edits the client config
@@ -965,6 +967,8 @@ loopback_setup(loopback_t *lb, void (*tweak)(mqvpn_config_t *cfg))
     if (g_lb_server_cert)
         ASSERT_EQ(mqvpn_config_set_tls_cert(svr_cfg, g_lb_server_cert, g_lb_server_key),
                   MQVPN_OK);
+    if (g_lb_server_auth_key)
+        ASSERT_EQ(mqvpn_config_set_auth_key(svr_cfg, g_lb_server_auth_key), MQVPN_OK);
     mqvpn_server_callbacks_t svr_cbs = MQVPN_SERVER_CALLBACKS_INIT;
     svr_cbs.tun_output = mock_tun_output;
     svr_cbs.tunnel_config_ready = mock_tunnel_config_ready;
@@ -1152,6 +1156,35 @@ static int
 done_client_closed(loopback_t *lb)
 {
     return mqvpn_client_get_state(lb->cli) == MQVPN_STATE_CLOSED;
+}
+
+/* ── CONNECT-IP refused (403): the client must leave AUTHENTICATING ──
+ *
+ * The server answers a wrong PSK with 403 and keeps the QUIC connection
+ * open. The client reports tunnel_closed(MQVPN_ERR_AUTH) once and closes the
+ * connection itself; with reconnect off it settles in CLOSED (with it on,
+ * the usual RECONNECTING backoff applies). */
+static void
+tweak_wrong_psk_no_reconnect(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_set_auth_key(cfg, "wrong-key"), MQVPN_OK);
+    mqvpn_config_set_reconnect(cfg, 0, 0);
+}
+
+TEST(client_auth_refused_leaves_authenticating)
+{
+    loopback_t lb;
+    g_lb_server_auth_key = "right-key";
+    loopback_setup(&lb, tweak_wrong_psk_no_reconnect);
+    g_lb_server_auth_key = NULL;
+    loopback_pump_until(&lb, done_client_closed, 10000);
+
+    ASSERT_EQ(mqvpn_client_get_state(lb.cli), MQVPN_STATE_CLOSED);
+    ASSERT_EQ(g_cli_tunnel_closed_count, 1);
+    ASSERT_EQ(g_cli_tunnel_closed_reason, MQVPN_ERR_AUTH);
+    ASSERT_EQ(g_cli_tunnel_ready_called, 0);
+
+    loopback_teardown(&lb);
 }
 
 TEST(client_verifier_accepts_presented_chain)
@@ -2732,6 +2765,7 @@ main(void)
     run_server_session_quic_loopback();
     run_server_runtime_added_path_not_stuck_pending();
     run_client_backup_path_validates_into_standby();
+    run_client_auth_refused_leaves_authenticating();
 
     /* Control API: get_status with and without clients */
     run_server_get_status_no_clients();

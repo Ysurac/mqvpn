@@ -3001,6 +3001,134 @@ TEST(request_close_server_rst_still_signals_protocol)
     mqvpn_client_destroy(c);
 }
 
+/* ── CONNECT-IP request lifecycle: a failed or lost tunnel closes the
+ *    connection (deferred to the next tick), so the client never parks in
+ *    AUTHENTICATING or keeps a tunnel-less connection alive. ── */
+
+extern int mqvpn_client_test_conn_close_pending(const mqvpn_client_t *c);
+extern int mqvpn_client_test_set_conn_tunnel_ok(mqvpn_client_t *c, int v);
+extern int mqvpn_client_test_tunnel_setup_stalled(const mqvpn_client_t *c,
+                                                  uint64_t now_us);
+extern uint64_t mqvpn_client_test_get_auth_started_us(const mqvpn_client_t *c);
+
+TEST(connect_fail_requests_conn_close)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_close_pending(c), 0);
+
+    /* A 403 keeps the server's connection open: the client must close it
+     * itself, while the platform still sees the AUTH reason. */
+    const char *vals[] = {"403"};
+    ASSERT_EQ(scan_status_headers(c, vals, 1), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_AUTH);
+    ASSERT_EQ(mqvpn_client_test_conn_close_pending(c), 1);
+
+    /* ...and the close notify that follows adds no second tunnel_closed. */
+    ASSERT_EQ(mqvpn_client_test_notify_conn_closed(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(request_close_after_2xx_requests_conn_close)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_conn_tunnel_ok(c, 1), 0);
+
+    /* The tunnel stream goes away after establishment: not a connect
+     * failure (no tunnel_closed yet), but the connection must be closed so
+     * the reconnect path runs instead of a permanent blackhole. */
+    ASSERT_EQ(mqvpn_client_test_request_close_connect_ip(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 0);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_close_pending(c), 1);
+
+    /* The conn close notify then reports a genuine CLOSED. */
+    ASSERT_EQ(mqvpn_client_test_notify_conn_closed(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_CLOSED);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(request_close_during_local_shutdown_requests_nothing)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_set_conn_tunnel_ok(c, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_set_shutting_down(c, 1), 0);
+
+    ASSERT_EQ(mqvpn_client_test_request_close_connect_ip(c), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_close_pending(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 0);
+
+    ASSERT_EQ(mqvpn_client_test_set_shutting_down(c, 0), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(headers_any_2xx_accepts_tunnel)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+
+    const char *vals[] = {"204"};
+    ASSERT_EQ(scan_status_headers(c, vals, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 1);
+    ASSERT_EQ(g_tunnel_closed_count, 0);
+    ASSERT_EQ(mqvpn_client_test_conn_close_pending(c), 0);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+
+    /* 3xx is not a success. */
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    const char *redirect[] = {"301"};
+    ASSERT_EQ(scan_status_headers(c, redirect, 1), 0);
+    ASSERT_EQ(mqvpn_client_test_conn_tunnel_ok(c), 0);
+    ASSERT_EQ(g_tunnel_closed_count, 1);
+    ASSERT_EQ(g_last_tunnel_closed_reason, MQVPN_ERR_PROTOCOL);
+
+    ASSERT_EQ(mqvpn_client_test_conn_free(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(tunnel_setup_watchdog_window)
+{
+    mqvpn_client_t *c = make_test_client();
+
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_CONNECTING), 0);
+    ASSERT_EQ(mqvpn_client_test_get_auth_started_us(c), 0u);
+    ASSERT_EQ(mqvpn_client_test_tunnel_setup_stalled(c, UINT64_MAX), 0);
+
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_AUTHENTICATING), 0);
+    uint64_t t0 = mqvpn_client_test_get_auth_started_us(c);
+    ASSERT_NE(t0, 0u);
+    ASSERT_EQ(mqvpn_client_test_tunnel_setup_stalled(c, t0 + 1000000ull), 0);
+    ASSERT_EQ(mqvpn_client_test_tunnel_setup_stalled(c, t0 + 15000000ull), 1);
+    /* a clock stepping back never reads as a stall */
+    ASSERT_EQ(mqvpn_client_test_tunnel_setup_stalled(c, t0 - 1), 0);
+
+    /* The deadline is part of the wake-up interest. */
+    mqvpn_interest_t i = {0};
+    ASSERT_EQ(mqvpn_client_get_interest(c, &i), MQVPN_OK);
+    ASSERT_EQ(i.next_timer_ms > 0 && i.next_timer_ms <= 15000, 1);
+
+    /* Leaving AUTHENTICATING disarms it. TUNNEL_READY -> RECONNECTING is a
+     * legal edge: the conn can die before the platform calls
+     * set_tun_active (Debug builds assert on an illegal one). */
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_TUNNEL_READY), 0);
+    ASSERT_EQ(mqvpn_client_test_get_auth_started_us(c), 0u);
+    ASSERT_EQ(mqvpn_client_test_force_state(c, MQVPN_STATE_RECONNECTING), 0);
+    ASSERT_EQ(mqvpn_client_get_state(c), MQVPN_STATE_RECONNECTING);
+
+    mqvpn_client_destroy(c);
+}
+
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
 /* ── Hybrid tcp_max_flows pool-bound warn at client_new (config-load-time
  *    visibility for the lane's silent clamp) ── */
@@ -4267,6 +4395,11 @@ main(void)
     run_reorder_echo_in_deciding_200_section_sets_flag();
     run_request_close_during_local_shutdown_keeps_closed_reason();
     run_request_close_server_rst_still_signals_protocol();
+    run_connect_fail_requests_conn_close();
+    run_request_close_after_2xx_requests_conn_close();
+    run_request_close_during_local_shutdown_requests_nothing();
+    run_headers_any_2xx_accepts_tunnel();
+    run_tunnel_setup_watchdog_window();
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     run_client_new_warns_tcp_max_flows_above_pool_bound();
     run_client_new_quiet_tcp_max_flows_at_pool_bound();

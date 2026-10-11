@@ -69,6 +69,11 @@
  * this window, so a dead first-listed path triggers reconnect (and primary_path_idx
  * rotation, issue #46) rather than waiting for xquic's idle_time_out (120s). */
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
+/* Longest AUTHENTICATING may last: from the end of the QUIC handshake to the
+ * CONNECT-IP 2xx plus ADDRESS_ASSIGN. A server that never answers, or answers
+ * 2xx and never assigns an address, would otherwise park the client there
+ * with no reconnect. Generous for long-RTT links (satellite). */
+#define TUNNEL_SETUP_TIMEOUT_MS 15000
 /* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
  * for PR4 — shared with path_state_machine.c. */
 
@@ -128,6 +133,14 @@ struct cli_conn_s {
     uint64_t masque_stream_id;
     int tunnel_ok;
     int tunnel_notified; /* one-shot: a tunnel_closed already fired for this conn */
+    /* Deferred local close (cli_conn_request_close): set from inside xquic
+     * callbacks, acted on by tick_conn_close_pending at the next tick, so a
+     * close never re-enters xquic from a stream callback and is dropped for
+     * free when the conn is being destroyed anyway. close_why is a static
+     * string for the log line. */
+    int close_pending;
+    const char *close_why;
+    int closed_early; /* close notify ran inside xqc_h3_connect */
     int addr_assigned;
     uint8_t assigned_ip[4];
     uint8_t assigned_prefix;
@@ -175,6 +188,7 @@ struct cli_stream_s {
     cli_conn_t *conn;
     xqc_h3_request_t *h3_request;
     cli_stream_role_t role;
+    int aborted; /* CONNECT-IP: we aborted the request; ignore further body */
     uint8_t *capsule_buf;
     size_t capsule_len;
     size_t capsule_cap;
@@ -321,6 +335,10 @@ struct mqvpn_client_s {
      * (typically a dead primary path) before xquic's 120s idle_time_out. */
     uint64_t handshake_started_us;
 
+    /* AUTHENTICATING-entry time (client_now_us), zeroed on exit. Drives the
+     * TUNNEL_SETUP_TIMEOUT_MS watchdog (tick_conn_close_pending). */
+    uint64_t auth_started_us;
+
     /* ICMP PTB rate limit */
     mqvpn_ptb_bucket_t ptb_bucket;
 
@@ -342,7 +360,7 @@ static const uint8_t state_transitions[MQVPN_STATE__COUNT][MQVPN_STATE__COUNT] =
     /* IDLE           */ {0, 1, 0, 0, 0, 0, 0},
     /* CONNECTING     */ {0, 0, 1, 0, 0, 1, 1},
     /* AUTHENTICATING */ {0, 0, 0, 1, 0, 1, 1},
-    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 0, 1},
+    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 1, 1}, /* conn may die before set_tun_active */
     /* ESTABLISHED    */ {0, 0, 0, 0, 0, 1, 1},
     /* RECONNECTING   */ {0, 1, 0, 0, 0, 0, 1},
     /* CLOSED         */ {0, 0, 0, 0, 0, 0, 0},
@@ -540,6 +558,11 @@ client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
     } else if (old == MQVPN_STATE_CONNECTING) {
         c->handshake_started_us = 0;
     }
+    if (new_state == MQVPN_STATE_AUTHENTICATING) {
+        c->auth_started_us = client_now_us(c);
+    } else if (old == MQVPN_STATE_AUTHENTICATING) {
+        c->auth_started_us = 0;
+    }
     if (new_state == MQVPN_STATE_ESTABLISHED) {
         c->connected_at_us = client_now_us(c);
     } else if (old == MQVPN_STATE_ESTABLISHED) {
@@ -560,6 +583,15 @@ client_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us)
     if (now_us <= c->handshake_started_us) return 0;
     uint64_t elapsed = now_us - c->handshake_started_us;
     return elapsed >= (uint64_t)HANDSHAKE_STALL_TIMEOUT_MS * 1000;
+}
+
+static int
+client_tunnel_setup_stalled(const mqvpn_client_t *c, uint64_t now_us)
+{
+    if (c->state != MQVPN_STATE_AUTHENTICATING) return 0;
+    if (c->auth_started_us == 0) return 0;
+    if (now_us <= c->auth_started_us) return 0;
+    return now_us - c->auth_started_us >= (uint64_t)TUNNEL_SETUP_TIMEOUT_MS * 1000;
 }
 
 #ifndef NDEBUG
@@ -897,6 +929,40 @@ mqvpn_client_test_masque_request_is_null(const mqvpn_client_t *c)
 {
     if (!c || !c->conn) return -1;
     return c->conn->masque_request == NULL ? 1 : 0;
+}
+
+/* Test-only: read conn->close_pending (0 none, 1 requested, 2 issued). */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_conn_close_pending(const mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    return c->conn->close_pending;
+}
+
+/* Test-only: plant conn->tunnel_ok (a 2xx already received). */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_set_conn_tunnel_ok(mqvpn_client_t *c, int v)
+{
+    if (!c || !c->conn) return -1;
+    c->conn->tunnel_ok = v;
+    return 0;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_tunnel_setup_stalled(const mqvpn_client_t *c, uint64_t now_us)
+{
+    if (!c) return -1;
+    return client_tunnel_setup_stalled(c, now_us) ? 1 : 0;
+}
+
+MQVPN_INTERNAL
+uint64_t
+mqvpn_client_test_get_auth_started_us(const mqvpn_client_t *c)
+{
+    return c ? c->auth_started_us : 0;
 }
 
 MQVPN_INTERNAL
@@ -1429,6 +1495,8 @@ cb_save_tp(const char *d, size_t dl, void *u)
 /* ─── H3 connection callbacks ─── */
 
 static int cli_masque_start_tunnel(cli_conn_t *conn);
+static void cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason,
+                                    int status_for_log);
 
 static int
 cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
@@ -1477,7 +1545,8 @@ cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
     conn->dgram_mss = xqc_h3_ext_datagram_get_mss(h3_conn);
     LOG_I(conn->client, "handshake finished (dgram_mss=%zu)", conn->dgram_mss);
     client_set_state(conn->client, MQVPN_STATE_AUTHENTICATING);
-    cli_masque_start_tunnel(conn);
+    if (cli_masque_start_tunnel(conn) < 0)
+        cli_signal_connect_fail(conn, MQVPN_ERR_ENGINE, 0);
 }
 
 /* Map a non-200 CONNECT-IP :status to a pre-establishment failure reason.
@@ -1496,18 +1565,33 @@ cli_classify_status(int status)
     }
 }
 
+/* Ask for the connection to be closed at the next tick (see close_pending).
+ * The first reason wins. cb_h3_conn_close then runs the normal teardown:
+ * reconnect with backoff when enabled, CLOSED otherwise. */
+static void
+cli_conn_request_close(cli_conn_t *conn, const char *why)
+{
+    if (conn->close_pending) return;
+    conn->close_pending = 1;
+    conn->close_why = why;
+}
+
 /* Fire tunnel_closed(reason) exactly once per conn for a pre-establishment
- * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
- * or (TLS) the platform verifier rejecting the server certificate from inside
- * the handshake. Notifies only — it does not abort the request in-core
- * (cross-platform full-stop and non-iOS reconnect-suppression are a
- * documented follow-up); iOS's onTunnelClosed turns this into a startTunnel
- * throw, and the process teardown that follows stops any reconnect on the iOS
- * target. */
+ * failure: a non-2xx CONNECT-IP status, the tunnel stream closing before 2xx,
+ * the Extended CONNECT failing to go out, or (TLS) the platform verifier
+ * rejecting the server certificate from inside the handshake. Then close the
+ * connection: without a tunnel it has nothing left to do, and leaving it open
+ * (a server answers 403 and keeps the connection) would park the client in
+ * AUTHENTICATING forever. The reason passed here (e.g. MQVPN_ERR_AUTH) is
+ * what the platform sees; cb_h3_conn_close adds no second tunnel_closed and
+ * applies the usual reconnect policy. iOS's onTunnelClosed turns this into a
+ * startTunnel throw, and the process teardown that follows stops any
+ * reconnect on the iOS target. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
     mqvpn_client_t *c = conn->client;
+    cli_conn_request_close(conn, "tunnel setup failed");
     if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
@@ -1544,6 +1628,17 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     (void)cid;
     cli_conn_t *conn = (cli_conn_t *)user_data;
     mqvpn_client_t *c = conn->client;
+
+    /* A connection that dies inside xqc_h3_connect (before
+     * cli_start_connection commits it to c->conn): its caller sees the
+     * failure and owns both the conn memory and the retry, so nothing here —
+     * a second reconnect arming, or IDLE -> RECONNECTING, would be wrong. */
+    if (c->conn != conn) {
+        LOG_D(c, "connection closed before start completed");
+        conn->h3_conn = NULL;
+        conn->closed_early = 1;
+        return 0;
+    }
 
     int err = xqc_h3_conn_get_errno(h3_conn);
     /* Grepped by scripts/ci_transport_smoke.py (VN_REACTION): reword it there too. */
@@ -1886,7 +1981,9 @@ stream_append_capsules(cli_stream_t *s, const uint8_t *buf, size_t len)
     return 0;
 }
 
-static void
+/* Returns -1 when the request was aborted (stream must not be touched
+ * afterwards by the caller), 0 otherwise. */
+static int
 process_capsules(cli_stream_t *stream)
 {
     cli_conn_t *conn = stream->conn;
@@ -1939,9 +2036,15 @@ process_capsules(cli_stream_t *stream)
         } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
             xret = xqc_h3_ext_connectip_validate_route_advertisement(payload, cap_len);
             if (xret != XQC_OK) {
+                /* RFC 9484 §4.7.3: MUST abort the request stream. Drop the
+                 * buffered capsules and stop parsing: the bad capsule must
+                 * not be seen (and logged) again on the next body read.
+                 * cb_request_close then closes the connection. */
                 LOG_E(c, "ROUTE_ADVERTISEMENT validation failed");
+                stream->aborted = 1;
+                stream->capsule_len = 0;
                 xqc_h3_request_close(stream->h3_request);
-                return;
+                return -1;
             }
             /* Log routes but no action needed */
         } else if (cap_type == MQVPN_CAPSULE_PATH_LABEL_PUSH) {
@@ -2005,6 +2108,7 @@ process_capsules(cli_stream_t *stream)
                     stream->capsule_len - consumed);
         stream->capsule_len -= consumed;
     }
+    return 0;
 }
 
 /* ─── H3 request callbacks ─── */
@@ -2037,10 +2141,18 @@ cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *use
 }
 
 /* CONNECT-IP tunnel stream reached its final close notify. Stream closed
- * without reaching 200 → pre-establishment failure. A prior non-200 status
+ * without reaching 2xx → pre-establishment failure. A prior non-2xx status
  * already latched (once-flag dedups); a bare RST-before-headers is a generic
  * PROTOCOL failure. This is what unblocks iOS when the server RSTs the
  * tunnel stream after 403.
+ *
+ * Stream closed AFTER 2xx (peer reset, or our own abort on a malformed
+ * capsule): the tunnel is gone for good on this connection — the client never
+ * re-opens CONNECT-IP on it — so close the connection and let the normal
+ * reconnect path run, instead of keeping a connection that only carries
+ * keepalives while every TUN packet is refused. When the whole connection is
+ * closing, xquic destroys the streams first: the deferred close is then
+ * discarded with the conn.
  *
  * Not during a LOCAL shutdown: mqvpn_client_disconnect sets shutting_down
  * before xqc_conn_close, and xquic destroys streams before the conn
@@ -2050,8 +2162,12 @@ cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *use
 static void
 cli_connect_ip_on_request_close(cli_conn_t *conn)
 {
-    if (!conn->tunnel_ok && !conn->client->shutting_down)
-        cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
+    if (!conn->client->shutting_down) {
+        if (!conn->tunnel_ok)
+            cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
+        else
+            cli_conn_request_close(conn, "CONNECT-IP tunnel stream closed");
+    }
     conn->tunnel_ok = 0;
     /* xquic frees the request right after this close-notify, but the conn
      * lives on, so drop the borrowed pointer: later weight/dscp sends guard
@@ -2177,11 +2293,12 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
                 LOG_I(c, "tunnel interim status=%d, awaiting final response", st);
             } else if (final_seen) {
                 LOG_W(c, "tunnel duplicate :status %d ignored", st);
-            } else if (st == 200) {
+            } else if (st >= 200 && st < 300) {
+                /* RFC 9484: a 2xx response means the request succeeded. */
                 final_seen = 1;
                 decided_200 = 1;
                 conn->tunnel_ok = 1;
-                LOG_I(c, "tunnel 200 OK");
+                LOG_I(c, "tunnel %d OK", st);
             } else if (st < 0) {
                 final_seen = 1;
                 LOG_W(c, "tunnel malformed :status");
@@ -2230,18 +2347,23 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     mqvpn_client_t *c = conn->client;
     unsigned char fin = 0;
 
+    if (stream->aborted) return 0;
+
     unsigned char buf[4096];
     ssize_t n;
     do {
         n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
         if (n <= 0) break;
         if (stream_append_capsules(stream, buf, (size_t)n) < 0) return -1;
-        process_capsules(stream);
+        if (process_capsules(stream) < 0) return 0; /* aborted: stream may be gone */
     } while (!fin);
 
-    /* Notify platform on ADDRESS_ASSIGN */
-    if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
-        c->state != MQVPN_STATE_TUNNEL_READY) {
+    /* Notify platform on ADDRESS_ASSIGN — only once per connection, and only
+     * for a request the server accepted (2xx): never resurrect a client that
+     * left AUTHENTICATING (CLOSED, RECONNECTING), nor bring a TUN up from an
+     * ADDRESS_ASSIGN that rode on a refused (e.g. 403) response. */
+    if (conn->addr_assigned && conn->tunnel_ok &&
+        c->state == MQVPN_STATE_AUTHENTICATING) {
         int tun_mtu = cli_effective_tun_mtu(c, conn);
         c->mtu = tun_mtu;
         /* The platform applies this MTU from tunnel_config_ready; a later
@@ -3276,7 +3398,7 @@ cli_start_connection(mqvpn_client_t *c)
     const xqc_cid_t *cid =
         xqc_h3_connect(c->engine, &cs, NULL, 0, sni, 0, &ssl_cfg,
                        (struct sockaddr *)&c->server_addr, c->server_addrlen, conn);
-    if (!cid) {
+    if (!cid || conn->closed_early) {
         LOG_E(c, "xqc_h3_connect failed");
         goto cleanup;
     }
@@ -4697,6 +4819,34 @@ tick_handshake_watchdog(mqvpn_client_t *c)
     }
 }
 
+/* ─── Tick: deferred connection close + tunnel setup watchdog ─── */
+
+static void
+tick_conn_close_pending(mqvpn_client_t *c)
+{
+    cli_conn_t *conn = c->conn;
+    if (c->shutting_down || !conn || !c->engine) return;
+
+    if (!conn->close_pending && client_tunnel_setup_stalled(c, client_now_us(c))) {
+        c->auth_started_us = 0; /* fire once */
+        LOG_W(c, "tunnel setup timed out after %dms (%s)", TUNNEL_SETUP_TIMEOUT_MS,
+              conn->tunnel_ok ? "no ADDRESS_ASSIGN" : "no CONNECT-IP response");
+        if (!conn->tunnel_notified) {
+            conn->tunnel_notified = 1; /* cb_h3_conn_close reports nothing more */
+            if (c->cbs.tunnel_closed)
+                c->cbs.tunnel_closed(MQVPN_ERR_TIMEOUT, c->user_ctx);
+        }
+        cli_conn_request_close(conn, "tunnel setup timed out");
+    }
+
+    if (conn->close_pending != 1) return;
+    conn->close_pending = 2; /* issued: xqc_h3_conn_close is not repeated */
+    LOG_I(c, "closing connection: %s", conn->close_why ? conn->close_why : "?");
+    /* The close notify (cb_h3_conn_close) runs from the main_logic call that
+     * follows in mqvpn_client_tick. */
+    xqc_h3_conn_close(c->engine, &conn->cid);
+}
+
 /* ─── Tick ─── */
 
 int
@@ -4706,6 +4856,7 @@ mqvpn_client_tick(mqvpn_client_t *c)
     ASSERT_TICK_THREAD(c);
 
     tick_handshake_watchdog(c);
+    tick_conn_close_pending(c);
     if (c->engine) xqc_engine_main_logic(c->engine);
     tick_path_recovery(c);
     tick_reconnect(c);
@@ -5064,6 +5215,18 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         int hms = (deadline > now_val) ? (int)((deadline - now_val) / 1000) : 1;
         if (ms <= 0 || hms < ms) ms = hms;
     }
+
+    /* During AUTHENTICATING, wake up no later than the tunnel setup deadline
+     * (tick_conn_close_pending), for the same reason as above. */
+    if (c->state == MQVPN_STATE_AUTHENTICATING && c->auth_started_us > 0) {
+        uint64_t deadline = c->auth_started_us + (uint64_t)TUNNEL_SETUP_TIMEOUT_MS * 1000;
+        uint64_t now_val = client_now_us(c);
+        int ams = (deadline > now_val) ? (int)((deadline - now_val) / 1000) : 1;
+        if (ms <= 0 || ams < ms) ms = ams;
+    }
+
+    /* A deferred connection close is due at the next tick. */
+    if (c->conn && c->conn->close_pending == 1) ms = 1;
 
     /* Account for path recovery and stability timers */
     if (c->multipath_ready && c->state == MQVPN_STATE_ESTABLISHED) {
