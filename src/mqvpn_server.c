@@ -4328,6 +4328,26 @@ mqvpn_server_get_interest(const mqvpn_server_t *s, mqvpn_interest_t *out)
 
     int ms = (int)(s->next_wake_us / 1000);
     out->next_timer_ms = ms > 0 ? ms : 1;
+    /* No platform ticks periodically: each schedules its next tick from this
+     * value, which so far only reflected xquic's timer, so on a quiet tunnel a
+     * packet held behind a reorder gap waited for an unrelated event instead
+     * of MaxWaitMs. Wake for the earliest gap deadline too (same monotonic
+     * now_us clock the engines are fed in cb_dgram_read / tick). */
+    if (s->config.reorder.mode != MQVPN_REORDER_OFF && s->n_sessions > 0) {
+        uint64_t d = UINT64_MAX;
+        for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+            const svr_conn_t *conn = s->sessions[i];
+            if (conn && conn->reorder_rx) {
+                uint64_t cd = mqvpn_reorder_rx_next_deadline_us(conn->reorder_rx);
+                if (cd < d) d = cd;
+            }
+        }
+        if (d != UINT64_MAX) {
+            uint64_t t = now_us();
+            uint64_t dms = d > t ? (d - t + 999) / 1000 : 1;
+            if (dms < (uint64_t)out->next_timer_ms) out->next_timer_ms = (int)dms;
+        }
+    }
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     /* next_wake_us above comes solely from xquic's event timer, which knows
      * nothing about the egress deadlines (connect timeout -> 504, ACTIVE
