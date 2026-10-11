@@ -389,8 +389,35 @@ mqvpn_scheduler_label(int s)
     return mqvpn_sched_to_name((mqvpn_scheduler_t)s);
 }
 
+/* Monotonic microseconds: every internal timer and duration (reorder gap and
+ * idle timers, uptime, egress connect/idle deadlines) runs on this clock, so
+ * a wall-clock step (NTP, manual date change) cannot fire or stall them. */
 static uint64_t
 now_us(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    /* Split to avoid overflowing cnt * 1e6 after days of uptime. */
+    return (uint64_t)(cnt.QuadPart / freq.QuadPart) * 1000000ULL +
+           (uint64_t)(cnt.QuadPart % freq.QuadPart) * 1000000ULL /
+               (uint64_t)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+#endif
+}
+
+/* Wall-clock microseconds since the Unix epoch, for the two consumers that
+ * need it: connected_at_us, which the control API compares with its own
+ * gettimeofday() (control_socket.c's connected_sec), and the recv_time handed
+ * to xqc_engine_packet_process, which must be on xquic's internal clock
+ * (xqc_now() is gettimeofday-based; no timestamp hook is installed here, and
+ * xquic's hook is process-global, shared with an in-process client). */
+static uint64_t
+wall_us(void)
 {
 #ifdef _WIN32
     FILETIME ft;
@@ -870,7 +897,7 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
  * present. TX stamping stays gated on peer_reorder_supported (set when the
  * client advertises in its CONNECT-IP request), so until then everything is
  * sent RAW. The hash seeds need not match the peer (§6.2); derive from
- * wall-clock time. Shared by cb_h3_conn_create (first tunnel) and
+ * the clock. Shared by cb_h3_conn_create (first tunnel) and
  * svr_connect_ip_on_request (re-establishment after svr_session_release freed
  * the previous generation's engines — each tunnel generation gets fresh
  * sequence/flow state). On alloc failure both engines are left NULL (RAW
@@ -1906,7 +1933,7 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
             return 0;
         }
 
-        stream->conn->connected_at_us = now_us();
+        stream->conn->connected_at_us = wall_us();
         /* A shared-key ("(global)") client may name itself with x-user, but
          * not as a configured user (impersonation) or with an unsafe name. */
         int wants_x_user = strcmp(username, "(global)") == 0 && hdrs->x_user[0] != '\0';
@@ -3367,7 +3394,7 @@ mqvpn_server_on_socket_recv(mqvpn_server_t *s, const uint8_t *pkt, size_t len,
     ASSERT_TICK_THREAD(s);
     if (!s->engine) return MQVPN_ERR_ENGINE;
 
-    uint64_t recv_time = now_us();
+    uint64_t recv_time = wall_us(); /* xquic's clock, see wall_us() */
     xqc_int_t ret = xqc_engine_packet_process(
         s->engine, pkt, len, (struct sockaddr *)&s->local_addr, s->local_addrlen, peer,
         peer_len, (xqc_usec_t)recv_time, s);
