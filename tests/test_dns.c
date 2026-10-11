@@ -822,11 +822,61 @@ test_apply_through_symlink(void)
     rmdir(dir);
 }
 
+/* The systemd unit runs with ProtectSystem=strict: /etc is read-only except
+ * the bind-mounted resolv.conf and backup, so no temp file can be created
+ * next to them. A read-only directory holding writable files reproduces
+ * that; apply and restore must fall back to rewriting in place. */
+static void
+test_apply_readonly_dir(void)
+{
+    if (geteuid() == 0) return; /* root ignores directory permissions */
+    char dir[] = "/tmp/test_dns_ro_XXXXXX";
+    char lockdir[] = "/tmp/test_dns_rolock_XXXXXX";
+    if (!mkdtemp(dir) || !mkdtemp(lockdir)) {
+        g_fail++;
+        return;
+    }
+    char resolv[128], backup_path[128], lock_path[128];
+    snprintf(resolv, sizeof(resolv), "%s/resolv.conf", dir);
+    snprintf(backup_path, sizeof(backup_path), "%s/resolv.conf.mqvpn.bak", dir);
+    snprintf(lock_path, sizeof(lock_path), "%s/lock", lockdir);
+    write_file(resolv, "nameserver 192.0.2.53\n");
+    write_file(backup_path, "");
+    ASSERT_EQ_INT(chmod(dir, 0555), 0, "ro dir");
+
+    mqvpn_dns_t dns;
+    mqvpn_dns_init(&dns);
+    dns.resolv_path = resolv;
+    dns.backup_path = backup_path;
+    dns.lock_path = lock_path;
+    mqvpn_dns_add_server(&dns, "1.1.1.1");
+    ASSERT_EQ_INT(mqvpn_dns_apply(&dns), 0, "apply in ro dir ok");
+
+    char buf[512];
+    read_file(resolv, buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "nameserver 1.1.1.1") != NULL,
+                "ro dir: mqvpn servers written");
+    read_file(backup_path, buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "192.0.2.53") != NULL, "ro dir: backup holds original");
+
+    mqvpn_dns_restore(&dns);
+    read_file(resolv, buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "192.0.2.53") != NULL, "ro dir: original restored");
+
+    chmod(dir, 0755);
+    unlink(resolv);
+    unlink(backup_path);
+    unlink(lock_path);
+    rmdir(dir);
+    rmdir(lockdir);
+}
+
 int
 main(void)
 {
     test_init();
     test_add_server_validation();
+    test_apply_readonly_dir();
     test_apply_after_crash_keeps_original();
     test_restore_stale_not_ours();
     test_apply_through_symlink();

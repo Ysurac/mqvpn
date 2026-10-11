@@ -195,10 +195,42 @@ write_target(const char *path, char *out, size_t out_len)
     return 0;
 }
 
+/* Rewrite `target` in place (truncate + write + fsync). Only used when the
+ * atomic path cannot work: under the systemd unit's ProtectSystem=strict
+ * /etc is read-only except the bind-mounted files themselves, so neither a
+ * temp file next to them nor a rename over a mount point is possible. */
+static int
+write_file_inplace(const char *target, const char *data, size_t len, mode_t mode)
+{
+    int fd = open(target, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (fd < 0) return -1;
+    int ok = 1;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, data + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            ok = 0;
+            break;
+        }
+        off += (size_t)w;
+    }
+    if (ok && fsync(fd) != 0) ok = 0;
+    int e = errno;
+    if (close(fd) != 0 && ok) {
+        ok = 0;
+        e = errno;
+    }
+    errno = e;
+    return ok ? 0 : -1;
+}
+
 /* Replace `path` atomically with `data`: a temp file in the same directory,
  * synced and renamed over the target, so a crash or a full disk never
  * leaves a truncated resolv.conf. Keeps the existing file's mode (0644 for
- * a new one). 0, or -1 with errno set (the caller logs). */
+ * a new one). Falls back to an in-place rewrite when the directory is not
+ * writable or the target is a mount point (sandboxed unit). 0, or -1 with
+ * errno set (the caller logs). */
 static int
 write_file_atomic(const char *path, const char *data, size_t len)
 {
@@ -218,7 +250,11 @@ write_file_atomic(const char *path, const char *data, size_t len)
     if (stat(target, &st) == 0) mode = st.st_mode & 07777;
 
     int fd = mkstemp(tmp);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        if (errno == EROFS || errno == EACCES || errno == EPERM)
+            return write_file_inplace(target, data, len, mode);
+        return -1;
+    }
     (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
     int ok = fchmod(fd, mode) == 0;
     size_t off = 0;
@@ -233,10 +269,14 @@ write_file_atomic(const char *path, const char *data, size_t len)
     }
     if (ok && fsync(fd) != 0) ok = 0;
     if (close(fd) != 0) ok = 0;
-    if (ok && rename(tmp, target) != 0) ok = 0;
-    if (!ok) {
+    int renamed = ok && rename(tmp, target) == 0;
+    if (!renamed) {
         int e = errno;
         unlink(tmp);
+        /* A bind-mounted target (EBUSY) or one on another mount (EXDEV)
+         * cannot be renamed over: rewrite it in place instead. */
+        if (ok && (e == EBUSY || e == EXDEV))
+            return write_file_inplace(target, data, len, mode);
         errno = e;
         return -1;
     }
