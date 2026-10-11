@@ -101,9 +101,11 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#define CTRL_MAX_REQ          4096 /* per-connection request buffer */
-#define CTRL_MAX_CONNS        8    /* max concurrent control connections */
-#define CTRL_CONN_DEADLINE_SEC 5   /* whole request+reply must finish within 5s */
+#define CTRL_MAX_REQ           4096 /* per-connection request buffer */
+#define CTRL_MAX_CONNS         8    /* max concurrent control connections */
+#define CTRL_MAX_REJECTS       8    /* refused connections lingering at once */
+#define CTRL_REJECT_LINGER_MS  1000 /* how long a refused one may linger */
+#define CTRL_CONN_DEADLINE_SEC 5    /* whole request+reply must finish within 5s */
 /* CTRL_MAX_RESP_BYTES moved to control_socket.h so test_control_response_bound
  * can verify the worst-case JSON size fits. */
 
@@ -144,6 +146,12 @@ struct ctrl_socket_s {
     void *rx_ctx;
     int n_conns;        /* active control connections */
     ctrl_conn_t *conns; /* the active connections themselves */
+    /* Connections refused for "too many connections", held open until the
+     * peer's request is drained (see ctrl_reject). */
+    struct ctrl_reject {
+        int fd;
+        struct event *ev; /* NULL = free slot */
+    } rejects[CTRL_MAX_REJECTS];
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
@@ -1128,6 +1136,67 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     ctrl_conn_dispatch(conn);
 }
 
+/* ── Refused connections ────────────────────────────────────────────────── */
+
+static void
+ctrl_reject_free(struct ctrl_reject *r)
+{
+    if (!r->ev) return;
+    event_free(r->ev);
+    close(r->fd);
+    r->ev = NULL;
+}
+
+static void
+ctrl_on_reject_event(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    struct ctrl_reject *r = arg;
+    if (what & EV_READ) {
+        char junk[512];
+        ssize_t n;
+        while ((n = recv(r->fd, junk, sizeof(junk), MSG_DONTWAIT)) > 0) {}
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+            return; /* more may follow; EV_PERSIST keeps waiting until EOF */
+    }
+    ctrl_reject_free(r); /* EOF, error or linger timeout */
+}
+
+/* Answer "too many connections" without losing the answer. Closing right
+ * after the send, with the peer's request still unread in the socket, makes
+ * the kernel reset the connection, and a reset can discard the reply before
+ * the client reads it. So the write side is shut down and the connection
+ * lingers (bounded in count and time) until the client's request is drained
+ * and it closes. Past CTRL_MAX_REJECTS lingering ones it is closed at once. */
+static void
+ctrl_reject(ctrl_socket_t *cs, int cfd)
+{
+    const char *msg = "{\"ok\":false,\"error\":\"too many connections\"}\n";
+    (void)send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
+    (void)shutdown(cfd, SHUT_WR);
+
+    struct ctrl_reject *r = NULL;
+    for (int i = 0; i < CTRL_MAX_REJECTS; i++) {
+        if (!cs->rejects[i].ev) {
+            r = &cs->rejects[i];
+            break;
+        }
+    }
+    int flags = fcntl(cfd, F_GETFL, 0);
+    if (!r || flags < 0 || fcntl(cfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(cfd);
+        return;
+    }
+    r->fd = cfd;
+    r->ev = event_new(cs->eb, cfd, EV_READ | EV_PERSIST, ctrl_on_reject_event, r);
+    if (!r->ev) {
+        close(cfd);
+        return;
+    }
+    struct timeval tv = {CTRL_REJECT_LINGER_MS / 1000, (CTRL_REJECT_LINGER_MS % 1000) * 1000};
+    if (event_add(r->ev, &tv) < 0) ctrl_reject_free(r);
+}
+
 /* ── Accept handler ──────────────────────────────────────────────────────── */
 
 static void
@@ -1138,11 +1207,7 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
     if (cs->n_conns >= CTRL_MAX_CONNS) {
         int cfd = accept(fd, NULL, NULL);
-        if (cfd >= 0) {
-            const char *msg = "{\"ok\":false,\"error\":\"too many connections\"}\n";
-            (void)send(cfd, msg, strlen(msg), MSG_NOSIGNAL | MSG_DONTWAIT);
-            close(cfd);
-        }
+        if (cfd >= 0) ctrl_reject(cs, cfd);
         return;
     }
 
@@ -1285,5 +1350,7 @@ ctrl_socket_destroy(ctrl_socket_t *cs)
     /* In-flight connections hold events on cs->eb and a pointer back to cs. */
     while (cs->conns)
         ctrl_conn_close(cs->conns);
+    for (int i = 0; i < CTRL_MAX_REJECTS; i++)
+        ctrl_reject_free(&cs->rejects[i]);
     free(cs);
 }

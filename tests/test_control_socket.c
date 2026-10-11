@@ -1723,6 +1723,46 @@ TEST(io_deadline_is_absolute)
     io_socket_free(cs);
 }
 
+/* A ninth connection is refused with "too many connections", and the reply
+ * must reach a client that sent its request straight away: closing on top
+ * of that unread request made the kernel reset the connection, which could
+ * drop the reply before the client read it. */
+TEST(io_too_many_connections_reply_delivered)
+{
+    int port = 0;
+    ctrl_socket_t *cs = io_socket(&port);
+    int holders[CTRL_MAX_CONNS];
+    for (int i = 0; i < CTRL_MAX_CONNS; i++)
+        holders[i] = loopback_connect(port);
+    run_loop_ms(cs->eb, 100);
+    for (int round = 0; round < 5; round++) {
+        int fd = loopback_connect(port);
+        /* Let the server refuse first, then send: with the old close-at-once
+         * the request then hit a closed socket and the reset discarded the
+         * reply still queued for the client. */
+        run_loop_ms(cs->eb, 50);
+        const char *req = "{\"cmd\":\"list_users\"}\n";
+        (void)send(fd, req, strlen(req), MSG_NOSIGNAL);
+        run_loop_ms(cs->eb, 50);
+        /* A client still writing (nc sends its whole stdin) must not see a
+         * reset: OpenBSD nc exits on a failed write without reading the
+         * reply, which is how the e2e D8 check saw empty answers. */
+        if (send(fd, "\n", 1, MSG_NOSIGNAL) != 1) {
+            printf("FAIL\n    refused connection was reset under the client (%s)\n",
+                   strerror(errno));
+            exit(1);
+        }
+        char buf[256];
+        read_all(fd, buf, sizeof(buf));
+        ASSERT_STR_EQ(buf, "{\"ok\":false,\"error\":\"too many connections\"}\n");
+        close(fd);
+        run_loop_ms(cs->eb, 20); /* peer EOF frees the lingering slot */
+    }
+    for (int i = 0; i < CTRL_MAX_CONNS; i++)
+        close(holders[i]);
+    io_socket_free(cs); /* frees any refused connection still lingering */
+}
+
 /* Destroying the socket with connections still open must free them (ASan's
  * leak check runs at exit). */
 TEST(io_destroy_frees_inflight)
@@ -1858,6 +1898,7 @@ main(void)
     run_io_http_request_refused();
     run_io_newline_json_request_answered();
     run_io_deadline_is_absolute();
+    run_io_too_many_connections_reply_delivered();
     run_io_destroy_frees_inflight();
 
     printf("\n  %d/%d tests passed\n", g_passed, g_run);
