@@ -216,8 +216,10 @@ struct mqvpn_client_s {
      * get_stats branch). connected_at_us: stamped in client_set_state()
      * on entering MQVPN_STATE_ESTABLISHED, mirrors svr_conn_t's
      * connected_at_us — read by mqvpn_client_get_info() (client-mode
-     * get_status branch). Both use client_now_us() so Android's injected
-     * CLOCK_BOOTTIME clock is honored the same as handshake_started_us. */
+     * get_status branch). Both honor an injected clock (Android's
+     * CLOCK_BOOTTIME) the same as handshake_started_us; without one,
+     * boot_us is monotonic (client_now_us) while connected_at_us is wall
+     * clock (wall_now_us), the absolute time the control API expects. */
     uint64_t boot_us;
     uint64_t connected_at_us;
 
@@ -381,8 +383,34 @@ mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to)
 
 /* ─── Helpers ─── */
 
+/* Default library clock: monotonic µs, so a wall-clock step (NTP, manual
+ * set) can neither fire nor freeze the timers (handshake/tunnel watchdogs,
+ * reconnect backoff, path retry and stability windows, reorder gaps, lwIP).
+ * xquic keeps its own clock: its timestamp hooks are process-wide globals
+ * shared with any server engine in the same process, so the recv time handed
+ * to it comes from client_xqc_now_us(), never from this clock. */
 static uint64_t
 now_us(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER freq, cnt;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&cnt);
+    uint64_t f = (uint64_t)freq.QuadPart, n = (uint64_t)cnt.QuadPart;
+    return (n / f) * 1000000 + (n % f) * 1000000 / f; /* split: no overflow */
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+#endif
+}
+
+/* Wall clock µs since the Unix epoch: xquic's default clock (xqc_now), and
+ * the one timestamp that leaves the library as an absolute time,
+ * mqvpn_client_info_t.connected_at_us, which the control API turns into
+ * connected seconds against gettimeofday. */
+static uint64_t
+wall_now_us(void)
 {
 #ifdef _WIN32
     FILETIME ft;
@@ -405,6 +433,15 @@ client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
     return now_us();
+}
+
+/* The clock xquic runs on: the injected one when set (installed as xquic's
+ * timestamp hooks too), else xquic's default, the wall clock. */
+static uint64_t
+client_xqc_now_us(const mqvpn_client_t *c)
+{
+    if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
+    return wall_now_us();
 }
 
 /*
@@ -569,7 +606,9 @@ client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
         c->auth_started_us = 0;
     }
     if (new_state == MQVPN_STATE_ESTABLISHED) {
-        c->connected_at_us = client_now_us(c);
+        /* Absolute time for get_info (see wall_now_us); an injected clock
+         * keeps being used as is, as before. */
+        c->connected_at_us = client_xqc_now_us(c);
     } else if (old == MQVPN_STATE_ESTABLISHED) {
         /* Cleared so a stale connected_at_us from a previous session can't
          * leak into mqvpn_client_get_info()'s connected_sec after a
@@ -4684,7 +4723,7 @@ mqvpn_client_on_socket_recv(mqvpn_client_t *c, mqvpn_path_handle_t path,
         }
     }
 
-    uint64_t recv_time = client_now_us(c);
+    uint64_t recv_time = client_xqc_now_us(c); /* xquic's clock, not ours */
     xqc_engine_packet_process(c->engine, pkt, len, (struct sockaddr *)&local_addr,
                               local_len, peer, peer_len, (xqc_usec_t)recv_time, NULL);
 

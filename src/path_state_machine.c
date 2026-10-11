@@ -253,7 +253,9 @@ path_should_warn_residence(const path_entry_t *p, uint64_t now_us)
 
     uint64_t anchor = p->last_residence_warn_at_us != 0 ? p->last_residence_warn_at_us
                                                         : p->state_entered_at_us;
-    uint64_t since_anchor = now_us - anchor;
+    /* Saturating: an injected clock that steps back reads as "just entered",
+     * never as a huge residence. */
+    uint64_t since_anchor = now_us > anchor ? now_us - anchor : 0;
 
     switch (p->status) {
     case MQVPN_PATH_PENDING: return since_anchor > PATH_RESIDENCE_PENDING_WARN_US;
@@ -718,7 +720,10 @@ void
 path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 {
     if (p->state != PATH_LC_ACTIVE && p->state != PATH_LC_STANDBY) return;
+    /* now < path_stable_since_us (a clock stepping back) is "not yet stable",
+     * not an unsigned wrap that would reset the budget at once. */
     if (p->path_stable_since_us == 0 || !p->xquic_path_live ||
+        now < p->path_stable_since_us ||
         now - p->path_stable_since_us < PATH_STABLE_THRESHOLD_US)
         return;
 

@@ -259,6 +259,18 @@ test_should_warn_pending_above_threshold(void)
 }
 
 static void
+test_should_warn_clock_step_back_saturates(void)
+{
+    /* A clock stepping back behind the state-entry anchor is "just entered",
+     * not an unsigned wrap read as an enormous residence. */
+    path_entry_t p = make_slot();
+    p.status = MQVPN_PATH_PENDING;
+    p.transport_attached = 1;
+    p.state_entered_at_us = 100ULL * 1000000;
+    assert(path_should_warn_residence(&p, 1000) == 0);
+}
+
+static void
 test_should_warn_pending_debounce(void)
 {
     path_entry_t p = make_slot();
@@ -1011,6 +1023,24 @@ test_stable_reset_rearms_timer(void)
     assert(p.path_stable_since_us == t2);
 }
 
+static void
+test_stable_clock_step_back_does_not_reset(void)
+{
+    path_entry_t p = {0};
+    p.state = PATH_LC_ACTIVE;
+    p.status = MQVPN_PATH_ACTIVE;
+    p.transport_attached = 1;
+    p.xquic_path_live = 1;
+    p.xqc_path_id = 42;
+    p.recreate_retries = 3;
+    p.path_stable_since_us = 100ULL * 1000000;
+
+    /* now < path_stable_since_us must not wrap into "stable for ages". */
+    path_fsm_tick_confirm_stable(NULL, &p, 1000);
+    assert(p.recreate_retries == 3);
+    assert(p.path_stable_since_us == 100ULL * 1000000);
+}
+
 /* G-P15: each local lifecycle demotion must fire the corresponding
  * xquic mark_path API. STANDBY=1, AVAILABLE=2, FROZEN=3 (xqc_typedef.h). */
 static void
@@ -1078,6 +1108,7 @@ main(void)
     test_should_warn_pending_below_threshold();
     test_should_warn_pending_at_threshold_exact();
     test_should_warn_pending_above_threshold();
+    test_should_warn_clock_step_back_saturates();
     test_should_warn_pending_debounce();
     test_should_warn_active_never();
     test_should_warn_standby_never();
@@ -1110,6 +1141,7 @@ main(void)
     printf("  test_transport_released_before_xquic_removed: OK\n");
     printf("  test_conn_reset_frees_released_dropped_slot: OK\n");
     test_stable_reset_rearms_timer();
+    test_stable_clock_step_back_does_not_reset();
     printf("  test_stable_reset_rearms_timer: OK\n");
     test_g_p15_lifecycle_notifies_xquic();
     printf("  test_g_p15_lifecycle_notifies_xquic: OK\n");
