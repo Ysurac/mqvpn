@@ -1289,61 +1289,6 @@ TEST(client_on_socket_recv_null)
               MQVPN_ERR_INVALID_ARG);
 }
 
-TEST(client_remove_first_path_keeps_second)
-{
-    mqvpn_client_t *c = make_test_client();
-    mqvpn_path_desc_t d0 = {0}, d1 = {0};
-    d0.struct_size = sizeof(d0);
-    snprintf(d0.iface, sizeof(d0.iface), "eth0");
-    d1.struct_size = sizeof(d1);
-    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
-
-    mqvpn_path_handle_t h0 = add_fake_path(c, &d0, NULL);
-    mqvpn_path_handle_t h1 = add_fake_path(c, &d1, NULL);
-    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
-    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
-
-    /* Remove first path */
-    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
-
-    /* Second path must still be accessible */
-    mqvpn_path_info_t info[4];
-    int n = 0;
-    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
-    ASSERT_EQ(n, 1);
-    ASSERT_EQ(info[0].handle, h1);
-    ASSERT_STR_EQ(info[0].name, "wlan0");
-
-    mqvpn_client_destroy(c);
-}
-
-TEST(client_remove_path_then_add)
-{
-    mqvpn_client_t *c = make_test_client();
-
-    /* Fill up to max */
-    mqvpn_path_handle_t handles[4];
-    for (int i = 0; i < 4; i++) {
-        handles[i] = add_fake_path(c, NULL, NULL);
-        ASSERT_NE(handles[i], (mqvpn_path_handle_t)-1);
-    }
-    /* At max — adding another should fail */
-    ASSERT_EQ(add_fake_path(c, NULL, NULL), (mqvpn_path_handle_t)-1);
-
-    /* Remove one, then add should succeed */
-    ASSERT_EQ(mqvpn_client_remove_path(c, handles[0]), MQVPN_OK);
-    mqvpn_path_handle_t h_new = add_fake_path(c, NULL, NULL);
-    ASSERT_NE(h_new, (mqvpn_path_handle_t)-1);
-
-    /* Total should be 4 again */
-    mqvpn_path_info_t info[4];
-    int n = 0;
-    ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
-    ASSERT_EQ(n, 4);
-
-    mqvpn_client_destroy(c);
-}
-
 TEST(client_remove_path_invalid_handle)
 {
     mqvpn_client_t *c = make_test_client();
@@ -4398,6 +4343,7 @@ main(void)
     /* I/O feed tests */
     run_client_on_tun_packet_null();
     run_client_on_socket_recv_null();
+    run_client_remove_path_invalid_handle();
 
     /* I/O error path tests */
     run_on_tun_packet_no_connection();

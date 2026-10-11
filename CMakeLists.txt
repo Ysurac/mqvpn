@@ -33,7 +33,9 @@ if(MQVPN_DEBUG_QOS_OVERRIDE)
 endif()
 
 if(ENABLE_SANITIZERS)
-    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -Werror)
+    # -Wall -Wextra too: the tree builds clean with them (lwip_core opts out
+    # with -Wno-error), so the CI sanitizer job now gates on the full set.
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror)
     add_link_options(-fsanitize=address,undefined)
 elseif(ENABLE_MSAN)
     add_compile_options(-fsanitize=memory -fno-omit-frame-pointer -fsanitize-memory-track-origins)
