@@ -80,6 +80,11 @@ static void test_tcp_abort_hook(struct tcp_pcb *pcb);
 static void test_tcp_close_hook(struct tcp_pcb *pcb);
 #define MQVPN_TCP_LANE_TCP_CLOSE(pcb) test_tcp_close_hook(pcb)
 
+/* tcp_abandon hook (stale-pcb retirement on 4-tuple reuse): recording only,
+ * since the real call would memp_free a stack-fake pcb. */
+static void test_tcp_abandon_hook(struct tcp_pcb *pcb);
+#define MQVPN_TCP_LANE_TCP_ABANDON(pcb) test_tcp_abandon_hook(pcb)
+
 #include "hybrid/tcp_lane.c"
 /* tcp_lane.c crossed its ~800-line extraction trigger: the uplink QUEUE +
  * SEND + FLUSH + FIN machinery moved to its own TU (tcp_lane_internal.h
@@ -237,6 +242,16 @@ test_tcp_abort_hook(struct tcp_pcb *pcb)
 
 static int g_tcp_close_calls;
 static struct tcp_pcb *g_tcp_close_last_pcb;
+
+static int g_tcp_abandon_calls;
+static struct tcp_pcb *g_tcp_abandon_last_pcb;
+
+static void
+test_tcp_abandon_hook(struct tcp_pcb *pcb)
+{
+    g_tcp_abandon_calls++;
+    g_tcp_abandon_last_pcb = pcb;
+}
 
 static void
 test_tcp_close_hook(struct tcp_pcb *pcb)
@@ -500,6 +515,8 @@ relay_reset(void)
     g_tcp_abort_last_pcb = NULL;
     g_tcp_close_calls = 0;
     g_tcp_close_last_pcb = NULL;
+    g_tcp_abandon_calls = 0;
+    g_tcp_abandon_last_pcb = NULL;
     g_h3_close_calls = 0;
     g_h3_close_last_req = NULL;
     g_h3_close_reenter_lane = NULL;
@@ -3725,6 +3742,70 @@ test_pending_accept_dropped_syn_expires(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* A TCP-lane SYN reusing the 4-tuple of a connection lwIP still holds in
+ * TIME_WAIT (or a detached clean-closed pcb finishing its FINs) retires
+ * that pcb first, so lwIP accepts the new SYN instead of answering it from
+ * the old connection. */
+static void
+test_syn_retires_time_wait_pcb(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf00bULL, NULL, fake_clock, NULL);
+
+    struct tcp_pcb tw;
+    memset(&tw, 0, sizeof(tw));
+    tw.state = TIME_WAIT;
+    IP_ADDR4(&tw.local_ip, 10, 0, 0, 2);
+    IP_ADDR4(&tw.remote_ip, 10, 0, 0, 1);
+    tw.local_port = 80;
+    tw.remote_port = 4400;
+    struct tcp_pcb *saved_tw = tcp_tw_pcbs;
+    tcp_tw_pcbs = &tw;
+
+    /* RAW verdict and a different tuple leave it alone. */
+    mqvpn_flow_key_t raw = make_key(4400, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &raw, 0, 1), 0, "sticky RAW recorded");
+    mqvpn_flow_key_t other = make_key(4401, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &other, 1, 0), 0, "other tuple committed");
+    ASSERT_EQ_INT(g_tcp_abandon_calls, 0, "unrelated SYNs abandon nothing");
+
+    /* Same tuple, new ISN, TCP verdict: the TIME_WAIT pcb is retired. */
+    mqvpn_flow_key_t k = make_key(4400, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k, 1, 2), 0, "reused tuple committed");
+    ASSERT_EQ_INT(g_tcp_abandon_calls, 1, "TIME_WAIT pcb retired");
+    ASSERT_TRUE(g_tcp_abandon_last_pcb == &tw, "the matching pcb");
+
+    /* Detached clean-closed pcb (LAST_ACK, callback_arg NULL) on the
+     * active list: retired too; an attached one is not touched. */
+    tcp_tw_pcbs = saved_tw;
+    struct tcp_pcb la;
+    memset(&la, 0, sizeof(la));
+    la.state = LAST_ACK;
+    IP_ADDR4(&la.local_ip, 10, 0, 0, 2);
+    IP_ADDR4(&la.remote_ip, 10, 0, 0, 1);
+    la.local_port = 80;
+    la.remote_port = 4402;
+    la.callback_arg = lane; /* still attached */
+    struct tcp_pcb *saved_active = tcp_active_pcbs;
+    tcp_active_pcbs = &la;
+    mqvpn_flow_key_t k2 = make_key(4402, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k2, 1, 0), 0, "committed");
+    ASSERT_EQ_INT(g_tcp_abandon_calls, 1, "attached pcb left alone");
+    tcp_active_pcbs = saved_active;
+
+    mqvpn_flow_key_t k3 = make_key(4403, 80);
+    la.callback_arg = NULL;
+    la.remote_port = 4403;
+    tcp_active_pcbs = &la;
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &k3, 1, 0), 0, "committed");
+    ASSERT_EQ_INT(g_tcp_abandon_calls, 2, "detached LAST_ACK pcb retired");
+    tcp_active_pcbs = saved_active;
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 /* Pins audit item C: a later on_lwip_sent stamp (downlink-traffic activity)
  * overrides the original creation-time stamp, so a flow well past its
  * ORIGINAL deadline survives once activity refreshed the clock. */
@@ -4012,6 +4093,7 @@ main(void)
     test_idle_eviction_timeout_zero_never_evicts();
     test_idle_eviction_pending_accept_stamped();
     test_pending_accept_dropped_syn_expires();
+    test_syn_retires_time_wait_pcb();
     test_idle_eviction_activity_refresh();
     test_idle_eviction_same_bucket_head_evicted();
     test_idle_eviction_pending_stream();

@@ -91,25 +91,59 @@
 /* Is there a half-open (SYN_RCVD) lwIP pcb for this flow key? lwIP has
  * created one for every SYN it accepted that has not completed the
  * handshake (its accept callback runs on the final ACK). */
+/* Does this pcb carry the flow key's 4-tuple (key: inner src -> inner dst;
+ * pcb: local = original dst, remote = inner src — wildcard intercept)? */
+static int
+tcp_lane_pcb_matches(const struct tcp_pcb *pcb, const mqvpn_flow_key_t *key)
+{
+    if (pcb->local_port != key->dst_port || pcb->remote_port != key->src_port) return 0;
+    if (key->ip_version == 6) {
+        return IP_IS_V6(&pcb->local_ip) &&
+               memcmp(ip_2_ip6(&pcb->local_ip)->addr, key->dst_ip, 16) == 0 &&
+               memcmp(ip_2_ip6(&pcb->remote_ip)->addr, key->src_ip, 16) == 0;
+    }
+    return !IP_IS_V6(&pcb->local_ip) &&
+           memcmp(&ip_2_ip4(&pcb->local_ip)->addr, key->dst_ip, 4) == 0 &&
+           memcmp(&ip_2_ip4(&pcb->remote_ip)->addr, key->src_ip, 4) == 0;
+}
+
 static int
 tcp_lane_half_open_exists(const mqvpn_flow_key_t *key)
 {
     for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
-        if (pcb->state != SYN_RCVD || pcb->local_port != key->dst_port ||
-            pcb->remote_port != key->src_port)
-            continue;
-        if (key->ip_version == 6) {
-            if (IP_IS_V6(&pcb->local_ip) &&
-                memcmp(ip_2_ip6(&pcb->local_ip)->addr, key->dst_ip, 16) == 0 &&
-                memcmp(ip_2_ip6(&pcb->remote_ip)->addr, key->src_ip, 16) == 0)
-                return 1;
-        } else if (!IP_IS_V6(&pcb->local_ip) &&
-                   memcmp(&ip_2_ip4(&pcb->local_ip)->addr, key->dst_ip, 4) == 0 &&
-                   memcmp(&ip_2_ip4(&pcb->remote_ip)->addr, key->src_ip, 4) == 0) {
-            return 1;
-        }
+        if (pcb->state == SYN_RCVD && tcp_lane_pcb_matches(pcb, key)) return 1;
     }
     return 0;
+}
+
+/* A fresh SYN is about to be fed to lwIP for a 4-tuple whose previous
+ * connection lwIP may still hold: a TIME_WAIT pcb (2*TCP_MSL after a clean
+ * close), or a clean-closed pcb still finishing its FIN exchange (detached
+ * by tcp_lane_finish_clean_close, so callback_arg == NULL). lwIP demuxes the
+ * SYN to that old pcb, which answers with an RST or an ACK, never an
+ * accept — the new connection would fail (and its PENDING_ACCEPT entry
+ * linger) until TIME_WAIT expired. The inner OS reusing the tuple means it
+ * is done with the old connection: drop the old pcb silently (no RST — it
+ * would land on the new connection's tuple). Runs from the TUN ingress
+ * path, never inside a lwIP callback. */
+static void
+tcp_lane_retire_stale_pcb(const mqvpn_flow_key_t *key)
+{
+    for (struct tcp_pcb *pcb = tcp_tw_pcbs; pcb; pcb = pcb->next) {
+        if (tcp_lane_pcb_matches(pcb, key)) {
+            MQVPN_TCP_LANE_TCP_ABANDON(pcb);
+            return; /* a 4-tuple has at most one pcb */
+        }
+    }
+    for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
+        if (pcb->callback_arg == NULL &&
+            (pcb->state == FIN_WAIT_1 || pcb->state == FIN_WAIT_2 ||
+             pcb->state == CLOSING || pcb->state == LAST_ACK) &&
+            tcp_lane_pcb_matches(pcb, key)) {
+            MQVPN_TCP_LANE_TCP_ABANDON(pcb);
+            return;
+        }
+    }
 }
 
 struct mqvpn_tcp_lane {
@@ -363,6 +397,7 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
             lane->stats.flows_rejected_cap++;
             return -1;
         }
+        tcp_lane_retire_stale_pcb(key);
     } else {
         /* Marker-cap hit is NOT a TCP-lane rejection (no flows_rejected_cap):
          * the flow simply stays unsticky and re-evaluates on each SYN. */

@@ -312,6 +312,11 @@ tcp_lane_gone_status(const mqvpn_tcp_flow_t *f)
 #ifndef MQVPN_TCP_LANE_TCP_CLOSE
 #  define MQVPN_TCP_LANE_TCP_CLOSE(pcb) tcp_close(pcb)
 #endif
+/* tcp_abandon(pcb, 0): silently drop a stale pcb of a reused 4-tuple
+ * (tcp_lane_retire_stale_pcb) — frees it like tcp_abort, without the RST. */
+#ifndef MQVPN_TCP_LANE_TCP_ABANDON
+#  define MQVPN_TCP_LANE_TCP_ABANDON(pcb) tcp_abandon((pcb), 0)
+#endif
 
 /* ─── Cross-TU declarations (tcp_lane.c <-> tcp_lane_uplink.c) ───
  *
