@@ -321,6 +321,18 @@ tun_write_proc(const char *path, const char *value)
     return (n > 0) ? 0 : -1;
 }
 
+/* Read an integer procfs sysctl; -1 when unreadable. */
+static int
+tun_read_proc_int(const char *path)
+{
+    FILE *fp = fopen(path, "re");
+    if (!fp) return -1;
+    int v = -1;
+    if (fscanf(fp, "%d", &v) != 1) v = -1;
+    fclose(fp);
+    return v;
+}
+
 int
 mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6_str, int prefix_len)
 {
@@ -337,12 +349,17 @@ mqvpn_tun_set_addr6(mqvpn_tun_t *tun, const char *addr6_str, int prefix_len)
     }
 
     /*
-     * First, try to enable IPv6 globally and on this interface via procfs.
-     * These writes may fail if the procfs entries don't exist yet — that's OK,
-     * the netlink call below will create inet6_dev as a side effect.
+     * Enable IPv6 on this interface only, via procfs. The write may fail if
+     * the entry doesn't exist yet — that's OK, the netlink call below creates
+     * inet6_dev as a side effect (see the EACCES retry). The host-wide
+     * conf/all and conf/default settings are the administrator's and are
+     * left alone: disable_ipv6 is checked per device, so the tunnel works
+     * either way.
      */
-    tun_write_proc("/proc/sys/net/ipv6/conf/all/disable_ipv6", "0");
-    tun_write_proc("/proc/sys/net/ipv6/conf/default/disable_ipv6", "0");
+    if (tun_read_proc_int("/proc/sys/net/ipv6/conf/all/disable_ipv6") == 1)
+        LOG_INF("TUN %s: IPv6 is disabled host-wide (net.ipv6.conf.all.disable_ipv6=1), "
+                "enabling it on %s only",
+                tun->name, tun->name);
 
     char path[128];
     snprintf(path, sizeof(path), "/proc/sys/net/ipv6/conf/%s/disable_ipv6", tun->name);
