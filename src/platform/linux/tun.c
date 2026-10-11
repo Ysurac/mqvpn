@@ -29,7 +29,7 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
     memset(tun, 0, sizeof(*tun));
     tun->fd = -1;
 
-    int fd = open("/dev/net/tun", O_RDWR);
+    int fd = open("/dev/net/tun", O_RDWR | O_CLOEXEC);
     if (fd < 0) {
         LOG_ERR("open /dev/net/tun: %s", strerror(errno));
         return -1;
@@ -68,7 +68,7 @@ int
 mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr,
                    int prefix_len)
 {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sock < 0) {
         LOG_ERR("socket: %s", strerror(errno));
         return -1;
@@ -127,7 +127,7 @@ mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr,
 int
 mqvpn_tun_set_mtu(mqvpn_tun_t *tun, int mtu)
 {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sock < 0) return -1;
 
     struct ifreq ifr;
@@ -150,7 +150,7 @@ mqvpn_tun_set_mtu(mqvpn_tun_t *tun, int mtu)
 int
 mqvpn_tun_get_mtu(const mqvpn_tun_t *tun)
 {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sock < 0) return -1;
 
     struct ifreq ifr;
@@ -165,7 +165,7 @@ mqvpn_tun_get_mtu(const mqvpn_tun_t *tun)
 int
 mqvpn_tun_up(mqvpn_tun_t *tun)
 {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sock < 0) return -1;
 
     struct ifreq ifr;
@@ -196,7 +196,7 @@ mqvpn_tun_up(mqvpn_tun_t *tun)
 static unsigned int
 tun_ifindex(const char *ifname)
 {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (sock < 0) return 0;
 
     struct ifreq ifr;
@@ -225,7 +225,7 @@ tun_ifindex(const char *ifname)
 static int
 tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr, int prefix_len)
 {
-    int fd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE);
+    int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_ROUTE);
     if (fd < 0) {
         LOG_ERR("socket(NETLINK_ROUTE): %s", strerror(errno));
         return -1;
@@ -314,7 +314,7 @@ tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr, int pre
 static int
 tun_write_proc(const char *path, const char *value)
 {
-    int fd = open(path, O_WRONLY);
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     ssize_t n = write(fd, value, strlen(value));
     close(fd);

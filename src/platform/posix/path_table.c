@@ -15,6 +15,7 @@
 #include "compat/socket_compat.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -59,7 +60,14 @@ platform_path_index(const platform_path_t *s)
 int
 platform_path_socket_open(sa_family_t af, int *failed_step)
 {
+    /* Close-on-exec: the platform forks ip/iptables/route helpers, which
+     * must not inherit the path sockets. */
+#ifdef SOCK_CLOEXEC
+    int fd = (int)socket(af, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#else
     int fd = (int)socket(af, SOCK_DGRAM, 0);
+    if (fd >= 0) (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
     if (fd < 0) {
         *failed_step = PLATFORM_PATH_STEP_SOCKET;
         return -1;

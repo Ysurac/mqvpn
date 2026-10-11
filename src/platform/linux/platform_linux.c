@@ -1540,7 +1540,7 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
         }
     }
 
-    int fd = socket(af, SOCK_DGRAM, 0);
+    int fd = socket(af, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         LOG_ERR("socket: %s", strerror(errno));
         return -1;
