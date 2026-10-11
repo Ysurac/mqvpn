@@ -37,7 +37,10 @@ typedef struct {
 } mqvpn_bind_winsock_opts_t;
 
 /* Copies the recognised prefix of *opts (min(struct_size, sizeof)) and never
- * retains the pointer. Returns MQVPN_OK and writes *out_ctx;
+ * retains the pointer. On success it also turns off SIO_UDP_CONNRESET on the
+ * socket (best effort): an ICMP port-unreachable for an earlier send would
+ * otherwise fail a later receive with WSAECONNRESET. Returns MQVPN_OK and
+ * writes *out_ctx;
  * MQVPN_ERR_INVALID_ARG (sock == INVALID_SOCKET, opts/out_ctx NULL,
  * struct_size not covering socket_buf_bytes); MQVPN_ERR_NO_MEMORY. On failure
  * *out_ctx is untouched and the socket is left exactly as it was — this
