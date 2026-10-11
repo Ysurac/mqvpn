@@ -1230,9 +1230,9 @@ client_reset_paths_for_reconnect(mqvpn_client_t *c)
     for (int i = 0; i < c->n_paths; i++) {
         client_reset_path_runtime(c, &c->paths[i]);
     }
-    /* Path rotation is handled exclusively by tick_reconnect() which builds a
-     * proper flags view marking detached paths as BACKUP before calling
-     * mqvpn_rotate_primary_path(). Rotating here as well causes a double-skip
+    /* Path rotation is handled exclusively by tick_reconnect(), through
+     * mqvpn_reconnect_path_idx(), which treats detached paths as BACKUP.
+     * Rotating here as well causes a double-skip
      * (dead path → B, then B → C) so the first reconnect attempt lands on C
      * instead of B when A is removed with B and C still live. */
 }
@@ -4873,7 +4873,7 @@ tick_reconnect(mqvpn_client_t *c)
     client_reset_paths_for_reconnect(c);
 
     /* Rotate to the next usable primary path (issue #4271 Bug 2).
-     * mqvpn_reconnect_path_idx() treats inactive paths (fd gone, active=0) as
+     * mqvpn_reconnect_path_idx() treats detached paths (transport gone) as
      * backup so the rotation skips them, and falls back to an attached
      * backup path when no attached primary is left. This prevents hammering
      * a dead path when a live alternative exists. */
@@ -4929,13 +4929,13 @@ tick_handshake_watchdog(mqvpn_client_t *c)
         /* xqc_h3_conn_close marks the conn for close. Engine drains it on
          * the next main_logic call (already queued in mqvpn_client_tick after
          * this watchdog) and fires cb_h3_conn_close, which arms the reconnect
-         * timer; tick_reconnect → client_reset_paths_for_reconnect rotates
-         * primary_path_idx so the dead first path is skipped. */
+         * timer; tick_reconnect then rotates primary_path_idx
+         * (mqvpn_reconnect_path_idx) so the dead first path is skipped. */
         xqc_h3_conn_close(c->engine, &c->conn->cid);
     } else {
         /* No live conn (cli_start_connection failed earlier) — shortcut to
          * reconnect via the same code path. Rotation still happens in
-         * client_reset_paths_for_reconnect. */
+         * tick_reconnect. */
         client_arm_reconnect_timer(c);
         client_set_state(c, MQVPN_STATE_RECONNECTING);
     }

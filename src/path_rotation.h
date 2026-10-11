@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * path_rotation.h — Primary path rotation logic (no xquic dependency)
  */
@@ -13,8 +16,10 @@
  * mqvpn_rotate_primary_path - pick the next primary path index.
  *
  * Iterates forward (wrapping) from cur_idx+1, skipping any path whose
- * flags have MQVPN_PATH_FLAG_BACKUP set.  Returns the new index, or
- * cur_idx unchanged when there is ≤1 non-backup path (nothing to rotate to).
+ * flags have MQVPN_PATH_FLAG_BACKUP set, and returns the first such index.
+ * Returns cur_idx unchanged when there is no non-backup path, or when the
+ * only one is cur_idx itself; when cur_idx is a backup path and a single
+ * non-backup path exists, that path is returned.
  *
  * @cur_idx    current primary path index (0-based)
  * @path_flags array of per-path flag words, length n_paths
