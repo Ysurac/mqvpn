@@ -50,12 +50,16 @@ tcp_lane_uplink_queue_free(mqvpn_tcp_flow_t *f)
 
 /* Hand p's bytes [offset, tot_len) to the H3 stream. Returns the new offset
  * (== tot_len when fully accepted, < tot_len on EAGAIN/partial-accept
- * backpressure) or -1 on a fatal send error. A contiguous pbuf is sent
- * straight from its payload (no copy); a CHAINED pbuf (ooseq coalescing can
+ * backpressure), -1 on a fatal send error, or TCP_LANE_SEND_GONE when the
+ * send ran the engine and that tore the flow down (tcp_lane_flow_gone —
+ * the caller must stop touching f's relay state, and p if it is queued). A contiguous
+ * pbuf is sent straight from its payload (no copy); a CHAINED pbuf (ooseq coalescing can
  * hand chains whose tot_len exceeds any single segment) is flattened through
  * a TCP_MSS-sized stack slice via pbuf_copy_partial — the loop slices until
  * done, never truncates. Partial accepts advance offset by exactly the
  * accepted byte count so nothing is ever resent. */
+#define TCP_LANE_SEND_GONE (-2)
+
 static int32_t
 tcp_lane_uplink_send_from(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
 {
@@ -79,6 +83,9 @@ tcp_lane_uplink_send_from(mqvpn_tcp_flow_t *f, struct pbuf *p, uint16_t offset)
             ptr = slice;
         }
         ssize_t sent = cli_tcp_lane_h3_send(f->h3_request, ptr, chunk, 0);
+        if (tcp_lane_flow_gone(f)) {
+            return TCP_LANE_SEND_GONE;
+        }
         if (sent == MQVPN_TCP_LANE_H3_SEND_AGAIN) {
             break;
         }
@@ -154,6 +161,10 @@ tcp_lane_uplink_maybe_fin(mqvpn_tcp_flow_t *f)
         return TCP_LANE_FLOW_LIVE;
     }
     ssize_t r = cli_tcp_lane_h3_send(f->h3_request, NULL, 0, 1);
+    /* A fin-only send always runs the engine (xqc_h3_stream_send_finish). */
+    if (tcp_lane_flow_gone(f)) {
+        return tcp_lane_gone_status(f);
+    }
     if (r == MQVPN_TCP_LANE_H3_SEND_ERR) {
         /* Fatal — mirror the general relay-error contract (full teardown,
          * not just a state flip) rather than leaving the flow ACTIVE with a
@@ -195,6 +206,9 @@ tcp_lane_uplink_flush(mqvpn_tcp_flow_t *f)
     while (f->uplink_q_head) {
         mqvpn_tcp_uplink_node_t *n = f->uplink_q_head;
         int32_t off = tcp_lane_uplink_send_from(f, n->p, n->offset);
+        if (off == TCP_LANE_SEND_GONE) {
+            return tcp_lane_gone_status(f); /* n may be freed with f — hands off */
+        }
         if (off < 0) {
             return mqvpn_tcp_lane_on_relay_error(f);
         }
@@ -246,6 +260,10 @@ tcp_lane_uplink_deliver(mqvpn_tcp_flow_t *f, struct pbuf *p)
 
     if (f->state == TCP_FLOW_ACTIVE && !f->uplink_q_head && f->h3_request) {
         int32_t r = tcp_lane_uplink_send_from(f, p, 0);
+        if (r == TCP_LANE_SEND_GONE) {
+            pbuf_free(p); /* never queued — still ours */
+            return tcp_lane_gone_status(f);
+        }
         if (r < 0) {
             pbuf_free(p);
             return mqvpn_tcp_lane_on_relay_error(f);

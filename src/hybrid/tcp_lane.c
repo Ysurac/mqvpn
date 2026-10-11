@@ -477,6 +477,12 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * spuriously evict a live flow. */
                 lane->stats.flows_idle_evicted++; /* before teardown frees f */
                 (void)tcp_lane_teardown_flow(f, /*close_h3=*/1);
+                /* The H3 close can run the engine (xqc_stream_close ->
+                 * xqc_engine_conn_logic), whose notifies may free OTHER
+                 * flows — `next` included. Restart the bucket, same as the
+                 * paused branch below does after a non-LIVE status. */
+                f = lane->buckets[b];
+                continue;
             } else if (f->downlink_paused) {
                 /* I3: the sent-notify driver (mqvpn_tcp_lane_on_lwip_sent)
                  * only fires if THIS pcb still has un-ACKed data in flight,
@@ -776,6 +782,8 @@ tcp_lane_downlink_stash_retry(mqvpn_tcp_flow_t *f)
  * callers; mqvpn_tcp_lane_on_lwip_sent calls THIS directly because a lwIP
  * frame needs the ABORTED/GONE distinction (ERR_ABRT vs ERR_OK — see
  * tcp_lane_flow_status_t). */
+static tcp_lane_flow_status_t tcp_lane_downlink_pump_held(mqvpn_tcp_flow_t *f);
+
 static tcp_lane_flow_status_t
 tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
 {
@@ -793,6 +801,19 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
      * against a future change to that invariant. */
     if (f->state == TCP_FLOW_CLOSING) {
         return TCP_LANE_FLOW_LIVE;
+    }
+    tcp_lane_flow_hold(f);
+    tcp_lane_flow_status_t st = tcp_lane_downlink_pump_held(f);
+    tcp_lane_flow_release(f);
+    return st;
+}
+
+/* Body of tcp_lane_downlink_pump_status, run with `f` held. */
+static tcp_lane_flow_status_t
+tcp_lane_downlink_pump_held(mqvpn_tcp_flow_t *f)
+{
+    if (tcp_lane_flow_gone(f)) {
+        return tcp_lane_gone_status(f);
     }
     /* Paused: this entry point is called from BOTH xquic-context notifies
      * (READ_BODY/EMPTY_FIN — more response body became available upstream,
@@ -872,31 +893,25 @@ mqvpn_tcp_lane_on_lwip_sent(void *arg, struct tcp_pcb *pcb, u16_t len)
     if (!f->downlink_paused) {
         return ERR_OK;
     }
+    /* Held across the retry and the resumed drain: a teardown of f from
+     * any nested frame defers the free, and f->pcb_aborted afterwards is
+     * the one source of truth for ERR_ABRT (tcp_lane_flow_status_t). */
+    tcp_lane_flow_hold(f);
     /* The retry itself is shared with tcp_lane_downlink_pump_status's
      * paused branch (tcp_lane_downlink_stash_retry) — this frame is the
      * ORIGINAL driver of that retry (a sent-notify is the one real signal
      * that sndbuf room may have opened up). */
     tcp_lane_flow_status_t rst = tcp_lane_downlink_stash_retry(f);
-    if (rst != TCP_LANE_FLOW_LIVE) {
-        /* f torn down (fatal write error). GONE is not actually reachable
-         * from this helper (f->pcb is always live entering it — see its
-         * own comment), but treat it the same defensively rather than
-         * assume. */
-        return rst == TCP_LANE_FLOW_ABORTED ? ERR_ABRT : ERR_OK;
+    if (rst == TCP_LANE_FLOW_LIVE && !f->downlink_paused) {
+        /* Resume draining recv_body via the pump core (same single "pump
+         * the downlink" code path as the public entry point). */
+        (void)tcp_lane_downlink_pump_held(f);
     }
-    if (f->downlink_paused) {
-        return ERR_OK; /* still not enough room; wait for the next sent notify */
-    }
-
-    /* Resume draining recv_body via the status-returning pump core (same
-     * single "pump the downlink" code path as the public entry point, but
-     * this lwIP frame needs the ABORTED distinction the public 0/-1
-     * contract deliberately collapses). f->lane/f->stream are stable for
-     * the lifetime of an ACTIVE flow. */
-    if (tcp_lane_downlink_pump_status(f->lane, f->stream) == TCP_LANE_FLOW_ABORTED) {
-        return ERR_ABRT;
-    }
-    return ERR_OK;
+    /* else: torn down by a fatal retry write, or still not enough room —
+     * wait for the next sent notify. */
+    err_t ret = f->pcb_aborted ? ERR_ABRT : ERR_OK;
+    tcp_lane_flow_release(f);
+    return ret;
 }
 
 /* ─── Close/error mapping + flow removal ───
@@ -930,6 +945,7 @@ tcp_lane_silent_abort_pcb(mqvpn_tcp_flow_t *f)
     tcp_err(f->pcb, NULL);
     MQVPN_TCP_LANE_TCP_ABORT(f->pcb);
     f->pcb = NULL;
+    f->pcb_aborted = 1;
     return 1;
 }
 
@@ -1040,6 +1056,9 @@ tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
      * debug. */
     assert(lane != NULL);
     assert(f != NULL);
+    if (f->doomed) {
+        return; /* already unlinked + counted out; freed on final release */
+    }
     uint32_t b =
         (uint32_t)(mqvpn_flow_key_hash(&f->key, lane->hash_seed) & (lane->n_buckets - 1));
     mqvpn_tcp_flow_t **pp = &lane->buckets[b];
@@ -1060,9 +1079,37 @@ tcp_lane_remove_flow(mqvpn_tcp_lane_t *lane, mqvpn_tcp_flow_t *f)
     } else {
         lane->n_tcp_flows--;
     }
+    if (f->depth > 0) {
+        /* A frame up the stack still holds f (an engine run inside one of
+         * its xquic calls delivered this teardown): it sees
+         * tcp_lane_flow_gone() and stops; the outermost release frees f,
+         * queue and stash included (an outer uplink flush may still hold a
+         * pointer into the queue). */
+        f->doomed = 1;
+        f->h3_request = NULL;
+        f->stream = NULL;
+        return;
+    }
     tcp_lane_uplink_queue_free(f);
     tcp_lane_downlink_stash_free(f);
     free(f);
+}
+
+void
+tcp_lane_flow_hold(mqvpn_tcp_flow_t *f)
+{
+    f->depth++;
+}
+
+void
+tcp_lane_flow_release(mqvpn_tcp_flow_t *f)
+{
+    assert(f->depth > 0);
+    if (--f->depth == 0 && f->doomed) {
+        tcp_lane_uplink_queue_free(f);
+        tcp_lane_downlink_stash_free(f);
+        free(f);
+    }
 }
 
 /* C1: evict the single OLDEST CLOSING routing marker (smallest
@@ -1292,6 +1339,7 @@ mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream)
     }
     f->state = TCP_FLOW_ACTIVE;
     f->last_activity_us = lane->clock_fn ? lane->clock_fn(lane->clock_ctx) : 0;
+    tcp_lane_flow_hold(f);
     /* Flush the uplink bytes buffered while the flow sat in PENDING_STREAM
      * waiting for the 2xx gate to open — same queue + flush the writable
      * notify uses (pre-2xx buffering and EAGAIN retry are ONE mechanism),
@@ -1299,6 +1347,7 @@ mqvpn_tcp_lane_on_stream_established(mqvpn_tcp_lane_t *lane, void *stream)
      * xquic-context frame (response-headers notify), not a lwIP callback —
      * f just must not be touched after a non-LIVE return (it isn't). */
     (void)tcp_lane_uplink_flush(f);
+    tcp_lane_flow_release(f);
 }
 
 void
@@ -1360,7 +1409,9 @@ mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream)
     /* Retry-queue drain + low-water recved resume + pending-FIN send all
      * live in flush (see its comment). Status discarded: xquic-context
      * frame (write notify), not a lwIP callback. */
+    tcp_lane_flow_hold(f);
     (void)tcp_lane_uplink_flush(f);
+    tcp_lane_flow_release(f);
     return 0;
 }
 
@@ -1459,10 +1510,13 @@ mqvpn_tcp_lane_lwip_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
      * tcp_receive(pcb) on the freed pcb, and any other non-ERR_OK value
      * makes it tcp_abort() the already-freed pcb a second time (vendored
      * tcp_in.c, TCP_EVENT_ACCEPT error handling). */
-    if (cli_tcp_lane_open_stream(lane->client_ctx, f, &key) != 0) {
-        return ERR_ABRT;
-    }
-    return ERR_OK;
+    tcp_lane_flow_hold(f);
+    int open_rc = cli_tcp_lane_open_stream(lane->client_ctx, f, &key);
+    /* send_headers inside open_stream can run the engine; a teardown it
+     * delivers for f aborts newpcb too, which this frame must report. */
+    err_t ret = (open_rc != 0 || f->pcb_aborted) ? ERR_ABRT : ERR_OK;
+    tcp_lane_flow_release(f);
+    return ret;
 }
 
 /* Thin dispatcher onto tcp_lane_uplink.c (the uplink QUEUE + SEND
@@ -1497,10 +1551,11 @@ mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_
          * still PENDING_STREAM there is nothing to FIN yet — the
          * established-flush completes it. */
         f->tcp_fin_seen = 1;
-        if (tcp_lane_uplink_flush(f) == TCP_LANE_FLOW_ABORTED) {
-            return ERR_ABRT;
-        }
-        return ERR_OK;
+        tcp_lane_flow_hold(f);
+        (void)tcp_lane_uplink_flush(f);
+        err_t ret = f->pcb_aborted ? ERR_ABRT : ERR_OK;
+        tcp_lane_flow_release(f);
+        return ret;
     }
 
     if (f->state != TCP_FLOW_ACTIVE && f->state != TCP_FLOW_PENDING_STREAM) {
@@ -1514,8 +1569,11 @@ mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_
         return ERR_OK;
     }
 
-    if (tcp_lane_uplink_deliver(f, p) == TCP_LANE_FLOW_ABORTED) {
-        return ERR_ABRT;
-    }
-    return ERR_OK;
+    /* Held: the send inside deliver can run the engine, whose notifies may
+     * tear f down (and abort this very pcb) underneath this frame. */
+    tcp_lane_flow_hold(f);
+    (void)tcp_lane_uplink_deliver(f, p);
+    err_t ret = f->pcb_aborted ? ERR_ABRT : ERR_OK;
+    tcp_lane_flow_release(f);
+    return ret;
 }

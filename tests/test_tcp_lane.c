@@ -382,10 +382,21 @@ typedef struct {
 static h3_call_t g_h3_log[H3_LOG_MAX];
 static int g_h3_log_len;
 
+/* Re-entrancy simulation: when set, the next cli_tcp_lane_h3_send call
+ * first runs this (once), the way an xquic send that runs the engine can
+ * deliver a notify — e.g. a RESET_STREAM-driven on_h3_closing — for the
+ * very flow being served. */
+static void (*g_h3_send_reenter)(void);
+
 ssize_t
 cli_tcp_lane_h3_send(void *h3_request, const uint8_t *buf, size_t len, int fin)
 {
     (void)h3_request;
+    if (g_h3_send_reenter) {
+        void (*fn)(void) = g_h3_send_reenter;
+        g_h3_send_reenter = NULL;
+        fn();
+    }
     g_h3_send_calls++;
     ssize_t ret = (ssize_t)len; /* default: accept everything */
     if (g_h3_script_pos < g_h3_script_len) {
@@ -493,6 +504,7 @@ relay_reset(void)
     g_h3_close_last_req = NULL;
     g_h3_close_reenter_lane = NULL;
     g_h3_close_reenter_stream = NULL;
+    g_h3_send_reenter = NULL;
     g_open_stream_fail = 0;
 }
 
@@ -2892,6 +2904,79 @@ test_close_h3_sync_destroy_reentry(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* ─── Re-entrancy (finding: nested engine run inside an lwIP callback) ───
+ *
+ * The H3 send inside an lwIP recv callback can run the engine, which can
+ * deliver a teardown for the same flow (here: the closing notify). The
+ * flow must survive in memory until the callback unwinds, the callback must
+ * return ERR_ABRT (its pcb was aborted underneath it), and nothing may be
+ * double-freed or used after free. */
+static mqvpn_tcp_lane_t *g_reenter_lane;
+static void *g_reenter_stream;
+
+static void
+reenter_closing(void)
+{
+    mqvpn_tcp_lane_on_h3_closing(g_reenter_lane, g_reenter_stream);
+}
+
+static void
+test_reentrant_teardown_in_lwip_recv(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe0b1ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb;
+    int fake_req, fake_stream;
+
+    /* (a) data delivery, fast path */
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb, 8300, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "flow established");
+    g_reenter_lane = lane;
+    g_reenter_stream = &fake_stream;
+    g_h3_send_reenter = reenter_closing;
+    err_t r = mqvpn_tcp_lane_on_lwip_recv(f, &pcb, mk_pbuf(700), ERR_OK);
+    ASSERT_EQ_INT(r, ERR_ABRT,
+                  "recv returns ERR_ABRT: its pcb was aborted in a nested frame");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted exactly once");
+    ASSERT_EQ_INT(g_recved_calls, 0, "no tcp_recved on the aborted pcb");
+    mqvpn_flow_key_t key = mk_std_key(8300);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0, "flow removed");
+    mqvpn_tcp_lane_stats_t st;
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.flows_active, 0, "counter balanced");
+
+    /* (b) queued backlog flushed by the writable notify: the nested teardown
+     * frees the queue only after the outer flush let go of its node. */
+    relay_reset();
+    f = setup_flow(lane, &pcb, 8301, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "second flow established");
+    h3_script_push(MQVPN_TCP_LANE_H3_SEND_AGAIN);
+    mqvpn_tcp_lane_on_lwip_recv(f, &pcb, mk_pbuf(900), ERR_OK);
+    ASSERT_EQ_INT(f->uplink_queued_bytes, 900, "backlog queued");
+    g_h3_send_reenter = reenter_closing;
+    mqvpn_tcp_lane_on_h3_writable(lane, &fake_stream);
+    key = mk_std_key(8301);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0, "flow removed");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb aborted once");
+
+    /* (c) peer FIN: the fin-only send always runs the engine */
+    relay_reset();
+    f = setup_flow(lane, &pcb, 8302, &fake_req, &fake_stream, 1);
+    ASSERT_TRUE(f != NULL, "third flow established");
+    g_h3_send_reenter = reenter_closing;
+    r = mqvpn_tcp_lane_on_lwip_recv(f, &pcb, NULL, ERR_OK);
+    ASSERT_EQ_INT(r, ERR_ABRT, "FIN recv returns ERR_ABRT after nested abort");
+    key = mk_std_key(8302);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &key, NULL, NULL), 0, "flow removed");
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.flows_active, 0, "counters balanced after all three");
+
+    g_reenter_lane = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_abort_pending_real(void)
 {
@@ -3804,6 +3889,7 @@ main(void)
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
     test_close_h3_sync_destroy_reentry();
+    test_reentrant_teardown_in_lwip_recv();
     test_abort_pending_real();
     test_accept_open_stream_fail_returns_abrt();
     test_lwip_sent_teardown_returns_abrt();

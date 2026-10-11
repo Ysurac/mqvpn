@@ -212,8 +212,39 @@ typedef struct mqvpn_tcp_flow {
      * is only ever reachable for a to_tcp=1 flow. */
     mqvpn_tcp_lane_t *lane;
 
+    /* Re-entrancy guard. cli_tcp_lane_h3_send / _h3_close /
+     * cli_tcp_lane_open_stream can run xqc_engine_conn_logic when called
+     * outside an engine callback — i.e. from the lwIP callbacks and the tick
+     * — and that engine run delivers notifies that can tear down this very
+     * flow while an outer frame is still using it. Entry points hold the
+     * flow (tcp_lane_flow_hold); tcp_lane_remove_flow on a held flow unlinks
+     * it and fixes the counters at once but only marks it `doomed`, and the
+     * outermost tcp_lane_flow_release frees it. Code that made one of those
+     * calls checks tcp_lane_flow_gone() before touching the flow again.
+     * pcb_aborted records that the flow's pcb was tcp_abort()ed (by any
+     * frame), which is what decides ERR_ABRT for the lwIP frame on top. */
+    uint8_t depth;
+    uint8_t doomed;
+    uint8_t pcb_aborted;
+
     struct mqvpn_tcp_flow *next; /* hash chain */
 } mqvpn_tcp_flow_t;
+
+/* True once the flow left the relay — torn down (doomed, still held) or
+ * turned into a CLOSING routing marker — inside a call that can run the
+ * engine. */
+static inline int
+tcp_lane_flow_gone(const mqvpn_tcp_flow_t *f)
+{
+    return f->doomed || f->state == TCP_FLOW_CLOSING;
+}
+
+/* The tcp_lane_flow_status_t a caller reports for a gone flow. */
+static inline tcp_lane_flow_status_t
+tcp_lane_gone_status(const mqvpn_tcp_flow_t *f)
+{
+    return f->pcb_aborted ? TCP_LANE_FLOW_ABORTED : TCP_LANE_FLOW_GONE;
+}
 
 /* ─── Compile-time test-double hooks ───
  *
@@ -272,6 +303,11 @@ typedef struct mqvpn_tcp_flow {
  *
  * The two .c files are one logical module; these are the seam. Everything
  * else each file needs stays static/private to it. */
+
+/* Defined in tcp_lane.c — the re-entrancy guard (see the depth/doomed
+ * field comment). release frees a flow torn down while held. */
+void tcp_lane_flow_hold(mqvpn_tcp_flow_t *f);
+void tcp_lane_flow_release(mqvpn_tcp_flow_t *f);
 
 /* Defined in tcp_lane_uplink.c. Frees every queued node + its owned pbuf;
  * idempotent on an already-empty queue. Called from tcp_lane.c's
