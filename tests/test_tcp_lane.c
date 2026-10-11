@@ -3670,6 +3670,61 @@ test_idle_eviction_pending_accept_stamped(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* A PENDING_ACCEPT entry whose SYN lwIP dropped (no SYN_RCVD pcb) is
+ * reaped after TCP_LANE_PENDING_ACCEPT_TIMEOUT_US — even with the idle
+ * eviction disabled — instead of holding a tcp_max_flows slot. One with a
+ * live half-open pcb is kept. */
+static void
+test_pending_accept_dropped_syn_expires(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.tcp_idle_timeout_sec = 0; /* idle eviction off */
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xf00aULL, NULL, fake_clock, NULL);
+
+    mqvpn_flow_key_t dropped = make_key(4300, 80);
+    mqvpn_flow_key_t halfopen = make_key(4301, 80);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &dropped, 1, 0), 0, "committed");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &halfopen, 1, 0), 0, "committed");
+
+    /* lwIP holds a SYN_RCVD pcb for the second one only. */
+    struct tcp_pcb syn_rcvd;
+    memset(&syn_rcvd, 0, sizeof(syn_rcvd));
+    syn_rcvd.state = SYN_RCVD;
+    IP_ADDR4(&syn_rcvd.local_ip, 10, 0, 0, 2);
+    IP_ADDR4(&syn_rcvd.remote_ip, 10, 0, 0, 1);
+    syn_rcvd.local_port = 80;
+    syn_rcvd.remote_port = 4301;
+    struct tcp_pcb *saved_active = tcp_active_pcbs;
+    tcp_active_pcbs = &syn_rcvd;
+
+    g_fake_now += 2ULL * 1000000ULL; /* under the timeout */
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &dropped, NULL, NULL), 1,
+                  "young entry kept");
+
+    g_fake_now += TCP_LANE_PENDING_ACCEPT_TIMEOUT_US;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &dropped, NULL, NULL), 0,
+                  "dropped SYN's entry reaped");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &halfopen, NULL, NULL), 1,
+                  "entry with a half-open pcb kept");
+    mqvpn_tcp_lane_stats_t st;
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.flows_active, 1, "slot released");
+
+    /* Once lwIP gives up on the half-open pcb, the entry goes too. */
+    tcp_active_pcbs = saved_active;
+    g_fake_now += 2ULL * 1000000ULL;
+    mqvpn_tcp_lane_tick(lane, g_fake_now);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &halfopen, NULL, NULL), 0,
+                  "reaped after the half-open pcb is gone");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "nothing to abort");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 /* Pins audit item C: a later on_lwip_sent stamp (downlink-traffic activity)
  * overrides the original creation-time stamp, so a flow well past its
  * ORIGINAL deadline survives once activity refreshed the clock. */
@@ -3956,6 +4011,7 @@ main(void)
     test_idle_eviction_sticky_raw_survives();
     test_idle_eviction_timeout_zero_never_evicts();
     test_idle_eviction_pending_accept_stamped();
+    test_pending_accept_dropped_syn_expires();
     test_idle_eviction_activity_refresh();
     test_idle_eviction_same_bucket_head_evicted();
     test_idle_eviction_pending_stream();

@@ -75,6 +75,43 @@
  * tracking here — a coarse, cite-able constant beats a timing heuristic. */
 #define TCP_LANE_CLOSING_GRACE_US ((uint64_t)(2 * TCP_MSL) * 1000ULL)
 
+/* A PENDING_ACCEPT entry (SYN committed, lwIP accept callback not yet run)
+ * older than this, for which lwIP holds no SYN_RCVD pcb, belongs to a SYN
+ * lwIP dropped (bad checksum, an address class it refuses, pool
+ * exhaustion, ...): no accept will ever claim it, so the sweep frees it
+ * instead of letting it hold a tcp_max_flows slot until the idle timeout.
+ * While a SYN_RCVD pcb exists the entry is kept (lwIP's own
+ * TCP_SYN_RCVD_TIMEOUT bounds that); a later SYN retransmit simply commits
+ * a fresh entry. Short next to the 300 s idle default, long next to a
+ * handshake round trip. */
+#ifndef TCP_LANE_PENDING_ACCEPT_TIMEOUT_US
+#  define TCP_LANE_PENDING_ACCEPT_TIMEOUT_US (5ULL * 1000000ULL)
+#endif
+
+/* Is there a half-open (SYN_RCVD) lwIP pcb for this flow key? lwIP has
+ * created one for every SYN it accepted that has not completed the
+ * handshake (its accept callback runs on the final ACK). */
+static int
+tcp_lane_half_open_exists(const mqvpn_flow_key_t *key)
+{
+    for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb; pcb = pcb->next) {
+        if (pcb->state != SYN_RCVD || pcb->local_port != key->dst_port ||
+            pcb->remote_port != key->src_port)
+            continue;
+        if (key->ip_version == 6) {
+            if (IP_IS_V6(&pcb->local_ip) &&
+                memcmp(ip_2_ip6(&pcb->local_ip)->addr, key->dst_ip, 16) == 0 &&
+                memcmp(ip_2_ip6(&pcb->remote_ip)->addr, key->src_ip, 16) == 0)
+                return 1;
+        } else if (!IP_IS_V6(&pcb->local_ip) &&
+                   memcmp(&ip_2_ip4(&pcb->local_ip)->addr, key->dst_ip, 4) == 0 &&
+                   memcmp(&ip_2_ip4(&pcb->remote_ip)->addr, key->src_ip, 4) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 struct mqvpn_tcp_lane {
     mqvpn_hybrid_config_t cfg;
     uint64_t hash_seed;
@@ -415,16 +452,10 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
      * bucket walk entirely. Checked before the cadence gate so a fully
      * idle lane never even consumes a last_sweep_us update.
      *
-     * Doc note: PENDING_ACCEPT flows also rely on this sweep to be
-     * reaped if the accept callback never arrives (a half-open SYN whose
-     * lwIP accept callback is somehow lost) — with
-     * cfg.tcp_idle_timeout_sec == 0, such an orphan lingers for the
-     * connection's whole lifetime and consumes a tcp_max_flows slot. This
-     * is a SEPARATE, pre-existing tradeoff of the 0 opt-out (not something
-     * C1's n_closing accounting mitigates — n_closing only tracks CLOSING
-     * routing markers, which PENDING_ACCEPT flows never become); documented
-     * here rather than changed, since 0 is an intentional "never evict my
-     * relay flows" choice a deployment opts into. */
+     * Doc note: PENDING_ACCEPT flows whose SYN lwIP dropped are reaped by
+     * this sweep after TCP_LANE_PENDING_ACCEPT_TIMEOUT_US, regardless of
+     * cfg.tcp_idle_timeout_sec (they hold no relay resource, only a
+     * tcp_max_flows slot). */
     if (lane->n_tcp_flows == 0 && lane->n_closing == 0) {
         return;
     }
@@ -464,6 +495,17 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                     now_us - f->last_activity_us > TCP_LANE_CLOSING_GRACE_US) {
                     tcp_lane_remove_flow(lane, f);
                 }
+            } else if (f->state == TCP_FLOW_PENDING_ACCEPT &&
+                       now_us > f->last_activity_us &&
+                       now_us - f->last_activity_us >
+                           TCP_LANE_PENDING_ACCEPT_TIMEOUT_US &&
+                       !tcp_lane_half_open_exists(&f->key)) {
+                /* A SYN lwIP dropped (see TCP_LANE_PENDING_ACCEPT_TIMEOUT_US):
+                 * no pcb, no H3 side — plain unlink + free, independent of
+                 * the idle-eviction opt-out. Counted as an idle eviction
+                 * (the flow never did anything). */
+                lane->stats.flows_idle_evicted++;
+                tcp_lane_remove_flow(lane, f);
             } else if (idle_evict_enabled && f->state != TCP_FLOW_STICKY_RAW &&
                        now_us > f->last_activity_us &&
                        now_us - f->last_activity_us > idle_us) {
