@@ -242,6 +242,7 @@ netmon_try_reactivate_by_ifname(platform_ctx_t *p, const char *ifname)
      * The lib's gate rejects bad states with MQVPN_ERR_INVALID_STATE, which
      * we silently swallow. */
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    pinfo[0].struct_size = sizeof(pinfo[0]); /* array stride */
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return;
 
@@ -446,6 +447,8 @@ netmon_try_readd_removed_path(platform_ctx_t *p, const char *ifname)
     if (netmon_iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) return 0;
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+
+    pinfo[0].struct_size = sizeof(pinfo[0]); /* array stride */
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
         return 0;
@@ -573,6 +576,8 @@ recover_dropped_paths_cb(evutil_socket_t fd, short what, void *arg)
     int pre_scan_dropped = netmon_platform_pre_scan(p);
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+
+    pinfo[0].struct_size = sizeof(pinfo[0]); /* array stride */
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) {
         /* If the pre-scan may have dropped paths (queuing PATH_ABANDON

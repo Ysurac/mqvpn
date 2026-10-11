@@ -389,10 +389,12 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
     mqvpn_client_state_t state = mqvpn_client_get_state(p->client);
     if (state != MQVPN_STATE_ESTABLISHED) return;
 
-    mqvpn_stats_t stats;
+    mqvpn_stats_t stats = {.struct_size = sizeof(stats)};
     if (mqvpn_client_get_stats(p->client, &stats) != MQVPN_OK) return;
 
     mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+
+    paths[0].struct_size = sizeof(paths[0]); /* array stride */
     int n_paths = 0;
     mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
 
@@ -428,7 +430,7 @@ static void on_tick_timer(evutil_socket_t fd, short what, void *arg);
 void
 schedule_next_tick(platform_ctx_t *p)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_client_get_interest(p->client, &interest);
 
     int ms = interest.next_timer_ms;
@@ -1217,7 +1219,7 @@ static void svr_on_tun_read(evutil_socket_t fd, short what, void *arg);
 static void
 svr_schedule_next_tick(server_platform_ctx_t *sp)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_server_get_interest(sp->server, &interest);
 
     int ms = interest.next_timer_ms;

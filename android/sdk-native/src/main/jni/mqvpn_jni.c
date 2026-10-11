@@ -1257,6 +1257,7 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
     (void)thiz;
     enum { MAX_PATHS = 8 };
     mqvpn_path_info_t paths[MAX_PATHS];
+    paths[0].struct_size = sizeof(paths[0]); /* array stride */
     int n_paths = 0;
 
     int rc = mqvpn_client_get_paths((const mqvpn_client_t *)(intptr_t)client, paths,

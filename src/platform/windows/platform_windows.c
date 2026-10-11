@@ -479,7 +479,7 @@ static void on_tick_timer(evutil_socket_t fd, short what, void *arg);
 void
 schedule_next_tick(platform_win_ctx_t *p)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_client_get_interest(p->client, &interest);
 
     int ms = interest.next_timer_ms;

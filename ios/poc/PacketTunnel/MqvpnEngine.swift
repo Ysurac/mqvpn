@@ -406,6 +406,8 @@ final class MqvpnEngine: NSObject {
         guard let c = client else { return [] }
         var out = [mqvpn_path_info_t](repeating: mqvpn_path_info_t(),
                                       count: Int(MQVPN_MAX_PATHS))
+        // The library takes the array stride from out[0].struct_size.
+        out[0].struct_size = UInt32(MemoryLayout<mqvpn_path_info_t>.stride)
         var n: Int32 = 0
         // &out is Swift's inout-array-to-pointer bridging (valid for the
         // duration of the call) — matches the C signature exactly.
