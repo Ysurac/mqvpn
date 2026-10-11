@@ -23,6 +23,7 @@ policy_error_hint(DWORD err)
     case CERT_E_UNTRUSTEDROOT: return ": root not trusted by this machine";
     case CERT_E_CHAINING: return ": incomplete chain (server must send intermediates)";
     case CERT_E_WRONG_USAGE: return ": not valid for server authentication";
+    case CRYPT_E_REVOKED: return ": revoked";
     default: return "";
     }
 }
@@ -49,7 +50,10 @@ mqvpn_win_cert_verify(const uint8_t *const certs[], const size_t cert_len[],
     PCCERT_CONTEXT leaf = NULL;
     HCERTSTORE extra = NULL;
     PCCERT_CHAIN_CONTEXT chain = NULL;
-    HCERTCHAINENGINE engine = (HCERTCHAINENGINE)ctx; /* NULL = default */
+    /* NULL = the machine engine: trust anchors from the local machine's
+     * stores only, so a root a non-admin user added to their own store does
+     * not count for a client that runs elevated. */
+    HCERTCHAINENGINE engine = ctx ? (HCERTCHAINENGINE)ctx : HCCE_LOCAL_MACHINE;
 
     /* 1. inputs. Every rejection logs a fixed reason; the host is printed
      * only once the identity step has accepted it as printable ASCII. */
@@ -104,7 +108,10 @@ mqvpn_win_cert_verify(const uint8_t *const certs[], const size_t cert_len[],
 
     /* 4. chain: no network retrieval of any kind (this runs synchronously on
      * the thread that drives tick(), and AIA/CRL retrieval can block for
-     * seconds). Intermediates come from the server and the local CA stores. */
+     * seconds). Intermediates come from the server and the local CA stores.
+     * Revocation is checked from the local cache only (CRLs/OCSP responses
+     * Windows already holds): "revoked" is fatal, "unknown/offline" — the
+     * usual outcome without a fetch — is not (steps 4b and 5). */
     {
         LPSTR usages[] = {(LPSTR)szOID_PKIX_KP_SERVER_AUTH};
         CERT_CHAIN_PARA para;
@@ -115,12 +122,21 @@ mqvpn_win_cert_verify(const uint8_t *const certs[], const size_t cert_len[],
         para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
         if (!CertGetCertificateChain(engine, leaf, NULL, extra, &para,
                                      CERT_CHAIN_DISABLE_AIA |
-                                         CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL,
+                                         CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL |
+                                         CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT |
+                                         CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY,
                                      NULL, &chain)) {
             LOG_ERR("TLS certificate rejected: chain building failed (0x%08lx)",
                     (unsigned long)GetLastError());
             goto cleanup;
         }
+    }
+
+    /* 4b. a revocation the cache knows about is final, whatever step 5's
+     * revocation-unknown leniency would make of the policy result. */
+    if (chain->TrustStatus.dwErrorStatus & CERT_TRUST_IS_REVOKED) {
+        LOG_ERR("TLS certificate rejected: revoked");
+        goto cleanup;
     }
 
     /* 5. policy: trust anchor, validity, EKU, constraints, signature. The
@@ -138,6 +154,8 @@ mqvpn_win_cert_verify(const uint8_t *const certs[], const size_t cert_len[],
             SECURITY_FLAG_IGNORE_CERT_CN_INVALID; /* ignore CERT_E_CN_NO_MATCH */
         ssl.pwszServerName = NULL;                /* and nothing to compare against */
         ppara.cbSize = sizeof(ppara);
+        /* cache-only revocation mostly ends "unknown": not a rejection */
+        ppara.dwFlags = CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS;
         ppara.pvExtraPolicyPara = &ssl;
         status.cbSize = sizeof(status);
         if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &ppara,
@@ -146,6 +164,12 @@ mqvpn_win_cert_verify(const uint8_t *const certs[], const size_t cert_len[],
                     (unsigned long)GetLastError());
             goto cleanup;
         }
+        /* Belt and braces for the flag above: the SSL policy reports a
+         * revocation it could not determine with these two codes. A known
+         * revocation was rejected in 4b. */
+        if ((HRESULT)status.dwError == CRYPT_E_REVOCATION_OFFLINE ||
+            (HRESULT)status.dwError == CRYPT_E_NO_REVOCATION_CHECK)
+            status.dwError = 0;
         if (status.dwError != 0) {
             LOG_ERR(
                 "TLS certificate rejected: chain policy error 0x%08lx (element %ld)%s",
