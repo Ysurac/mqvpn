@@ -607,5 +607,5 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-The systemd units read fixed paths ending in `.conf` (`/etc/mqvpn/server.conf`, `/etc/mqvpn/client-<instance>.conf`). The content may be INI or JSON: mqvpn and the server unit's NAT helper both detect the format from the first non-space character, so a JSON config works when saved under that `.conf` name. The NAT helper reads `Subnet`, `Subnet6` and `TunName` with a simpler parser, so keep end-of-line comments off those three lines.
+The systemd units read fixed paths ending in `.conf` (`/etc/mqvpn/server.conf`, `/etc/mqvpn/client-<instance>.conf`). The content may be INI or JSON: mqvpn and the server unit's NAT helper both detect the format from the first non-space character, so a JSON config works when saved under that `.conf` name.
 :::

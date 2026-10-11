@@ -599,5 +599,5 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-systemd ユニットは `.conf` で終わる固定のパス（`/etc/mqvpn/server.conf`、`/etc/mqvpn/client-<インスタンス名>.conf`）を読み込みます。中身は INI でも JSON でも構いません。mqvpn もサーバーユニットの NAT ヘルパーも最初の空白以外の文字で形式を判定するため、JSON の設定もその `.conf` という名前で保存すれば使えます。NAT ヘルパーは `Subnet`、`Subnet6`、`TunName` を簡易的なパーサーで読むため、この 3 行には行末コメントを書かないでください。
+systemd ユニットは `.conf` で終わる固定のパス（`/etc/mqvpn/server.conf`、`/etc/mqvpn/client-<インスタンス名>.conf`）を読み込みます。中身は INI でも JSON でも構いません。mqvpn もサーバーユニットの NAT ヘルパーも最初の空白以外の文字で形式を判定するため、JSON の設定もその `.conf` という名前で保存すれば使えます。
 :::
