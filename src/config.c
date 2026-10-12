@@ -13,6 +13,7 @@
 #include "json_mini.h"
 #include "libmqvpn.h"
 #include "log.h"
+#include "redundant_tx.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -129,6 +130,22 @@ section_name(int section)
     case SEC_ADVANCED: return "Advanced";
     default: return "?";
     }
+}
+
+/* RedundantPorts: a bad list sets redundant_ports_err (the CLI then refuses to
+ * start) instead of degrading to "all UDP". `val` is already trimmed. */
+static void
+set_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
+{
+    uint16_t tmp[MQVPN_REDUNDANT_MAX_PORTS];
+    cfg->redundant_ports[0] = '\0';
+    cfg->redundant_ports_err = 0;
+    if (strlen(val) >= sizeof(cfg->redundant_ports) - 1 ||
+        mqvpn_redundant_parse_ports(val, tmp, MQVPN_REDUNDANT_MAX_PORTS) < 0) {
+        cfg->redundant_ports_err = 1;
+        return;
+    }
+    snprintf(cfg->redundant_ports, sizeof(cfg->redundant_ports), "%s", val);
 }
 
 /* Split comma-separated DNS list into cfg->dns_servers[] */
@@ -592,6 +609,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT_FB(SEC_MULTIPATH, "ReinjectionDeadlineLowerBoundMs",
                "reinjection_deadline_lower_bound_ms", reinjection_deadline_lower_bound_ms,
                cfgk_int_reinj_deadline_ms, 20),
+    CFG_BOOL(SEC_MULTIPATH, "Redundant", "redundant", redundant),
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
@@ -1005,6 +1023,10 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
             }
             return;
         }
+        if (strcasecmp(key, "RedundantPorts") == 0) {
+            set_redundant_ports(cfg, val);
+            return;
+        }
         break;
     case SEC_REORDER_RULE: {
         /* Keys fill the rule slot pushed by reorder_rule_begin() on section
@@ -1161,6 +1183,18 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         if (ed_v && json_read_cidr_array(cfg->hybrid.egress_deny, MQVPN_EGRESS_ACL_MAX,
                                          &cfg->hybrid.n_egress_deny, ed_v) < 0)
             return -1;
+    }
+
+    v = json_find_key(json_text, "redundant_ports");
+    if (v) {
+        char rp[1024];
+        /* json_read_string truncates silently: a full buffer means too long. */
+        if (json_read_string(v, rp, sizeof(rp)) != 0 || strlen(rp) >= sizeof(rp) - 1) {
+            cfg->redundant_ports[0] = '\0';
+            cfg->redundant_ports_err = 1;
+        } else {
+            set_redundant_ports(cfg, trim(rp));
+        }
     }
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];

@@ -385,6 +385,64 @@ TEST(config_load_json_reinjection)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_redundant_validates)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    uint16_t p[17];
+    ASSERT_EQ(cfg->redundant, 0);
+    ASSERT_EQ(cfg->n_redundant_ports, 0);
+    ASSERT_EQ(mqvpn_config_set_redundant(NULL, 1, NULL, 0), MQVPN_ERR_INVALID_ARG);
+    for (int i = 0; i < 17; i++)
+        p[i] = 4200;
+    ASSERT_EQ(mqvpn_config_set_redundant(cfg, 1, p, 17), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_redundant(cfg, 1, NULL, 1), MQVPN_ERR_INVALID_ARG);
+    uint16_t z[2] = {4200, 0};
+    ASSERT_EQ(mqvpn_config_set_redundant(cfg, 1, z, 2), MQVPN_ERR_INVALID_ARG);
+    uint16_t d[3] = {4200, 4200, 9000};
+    ASSERT_EQ(mqvpn_config_set_redundant(cfg, 1, d, 3), MQVPN_OK);
+    ASSERT_EQ(cfg->redundant, 1);
+    ASSERT_EQ(cfg->n_redundant_ports, 2);
+    ASSERT_EQ(cfg->redundant_ports[0], 4200);
+    ASSERT_EQ(cfg->redundant_ports[1], 9000);
+    ASSERT_EQ(mqvpn_config_set_redundant(cfg, 0, NULL, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->redundant, 0);
+    ASSERT_EQ(cfg->n_redundant_ports, 0);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_json_redundant)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    char buf[1400], longlist[512] = "", spaces[512] = "", huge[1200];
+    for (int i = 0; i < 60; i++)
+        strcat(longlist, "4200,");
+    memset(spaces, ' ', 300);
+    memset(huge, '1', 1100);
+    huge[1100] = '\0';
+
+    ASSERT_EQ(
+        mqvpn_config_load_json(cfg, "{\"redundant\":true,\"redundant_ports\":\"4200\"}"),
+        MQVPN_OK);
+    ASSERT_EQ(cfg->redundant, 1);
+    ASSERT_EQ(cfg->n_redundant_ports, 1);
+    ASSERT_EQ(cfg->redundant_ports[0], 4200);
+
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"redundant_ports\":\"x\"}"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"redundant_ports\":[4200]}"),
+              MQVPN_ERR_INVALID_ARG);
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s\"}", longlist);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_ERR_INVALID_ARG);
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%sabc\"}", spaces);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_ERR_INVALID_ARG);
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s\"}", huge);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_ERR_INVALID_ARG);
+    snprintf(buf, sizeof(buf), "{\"redundant_ports\":\"%s4200\"}", spaces);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, buf), MQVPN_OK);
+    ASSERT_EQ(cfg->n_redundant_ports, 1);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_json_reinjection_dgram_rejected)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -3398,6 +3456,8 @@ main(void)
     run_config_add_remove_user();
     run_config_add_user_max_capacity();
     run_config_load_json();
+    run_config_set_redundant_validates();
+    run_config_json_redundant();
     run_config_load_json_duplicate_users_last_wins();
     run_config_load_json_invalid_users();
     run_config_load_json_users_brace_in_string_value();

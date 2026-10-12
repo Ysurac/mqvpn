@@ -203,6 +203,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
+| `Redundant` | Client only. When `on`, each outgoing UDP packet is sent over every connected path at once, so losing one path does not interrupt live streams. Uses as much data as the number of paths for that traffic. See [Redundant mode](./multipath#redundant-mode). | `off` |
+| `RedundantPorts` | Client only. Comma-separated destination ports (at most 16 entries) to duplicate when `Redundant = on`; empty duplicates all UDP. An invalid list stops the client at startup. | empty |
 
 See [Multipath](./multipath) for scheduler details and
 [Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.

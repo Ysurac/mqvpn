@@ -104,6 +104,11 @@ struct mqvpn_config_s {
     int reinj_hard_deadline_ms;
     int reinj_deadline_lower_bound_ms;
 
+    /* Redundant mode (client only); empty port list = all UDP. */
+    int redundant;
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS];
+    int n_redundant_ports;
+
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;
