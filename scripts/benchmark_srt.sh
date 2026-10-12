@@ -202,12 +202,15 @@ run_srt() {
 
     if [ "$flap_rc" -ne 0 ]; then
         echo "    ERROR: path A outage loop failed (rc=${flap_rc}) for ${run_id}"
+        # Before the restore: its fatal exit must not archive this run's
+        # CSVs or let cleanup delete the logs.
+        BENCH_HAD_FAILURE=1
+        rm -f "${raw}/${run_id}.rcv.csv" "${raw}/${run_id}.snd.csv"
         # It can fail mid-outage; later arms must not inherit a dead path A.
         if ! set_path_a "$COND_RATE_A" "$COND_NETEM_A"; then
             echo "    FATAL: cannot restore path A shaping"
             exit 1
         fi
-        rm -f "${raw}/${run_id}.rcv.csv" "${raw}/${run_id}.snd.csv"
         return 1
     fi
     if ! [[ "$rxa0" =~ ^[0-9]+$ && "$rxb0" =~ ^[0-9]+$ && \
@@ -384,6 +387,15 @@ run_condition() {
             return 0
             ;;
     esac
+
+    # A run shorter than one outage period would report "with outages"
+    # results without a single outage.
+    if [ -n "${FLAP:-}" ] && [ "$DURATION" -lt "${FLAP#* }" ]; then
+        echo ""
+        echo "== [${cond}] SKIPPED: SRT_BENCH_DURATION=${DURATION}s is shorter than one outage period (${FLAP#* }s)"
+        BENCH_HAD_FAILURE=1
+        return 0
+    fi
 
     echo ""
     echo "== [${cond}] ${label} (repeats=${repeats})"
