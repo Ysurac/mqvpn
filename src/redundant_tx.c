@@ -13,8 +13,8 @@
 #define RTX_SLOTS     (2 * RTX_CAP)
 #define RTX_LIMIT_MIN 300
 #define RTX_RTT_SLACK 250000u /* us added to srtt in the limit */
-/* us of the current second before its rate counts */
-#define RTX_RATE_MIN_ELAPSED 100000u
+/* us per rate bucket; the last complete bucket estimates the current rate */
+#define RTX_RATE_BUCKET 100000u
 
 /* ---- port list / packet matching ---- */
 
@@ -107,8 +107,10 @@ struct mqvpn_redundant_tx_s {
     rtx_path_t path[MQVPN_MAX_PATHS];
     int have_win;
     uint64_t win_sec;
-    uint32_t win_count, prev_count; /* originals in win_sec / the second before */
-    uint64_t win_start_us, last_us; /* first/latest counted commit time in win_sec */
+    uint32_t win_count, prev_count;     /* originals in win_sec / the second before */
+    uint64_t last_us;                   /* latest counted commit time */
+    uint64_t bkt_id;                    /* now_us / RTX_RATE_BUCKET of the open bucket */
+    uint32_t bkt_count, prev_bkt_count; /* originals in bkt_id / bkt_id - 1 */
 };
 
 static uint32_t
@@ -226,15 +228,11 @@ uint32_t
 mqvpn_redundant_tx_limit(const mqvpn_redundant_tx_t *t, int path)
 {
     if (!t || !path_ok(path)) return RTX_LIMIT_MIN;
-    /* shortcut: pps is the larger of the previous second and the current second's
-     * rate (once >= 100 ms of it has elapsed); an idle gap keeps the last value
-     * until the next commit rolls the window. */
+    /* shortcut: pps is the larger of the previous second and the last complete
+     * 100 ms bucket x10; an idle gap keeps the last value until the next commit. */
     uint64_t pps = t->prev_count;
-    uint64_t elapsed = t->last_us - t->win_start_us;
-    if (elapsed >= RTX_RATE_MIN_ELAPSED) {
-        uint64_t cur = (uint64_t)t->win_count * 1000000u / elapsed;
-        if (cur > pps) pps = cur;
-    }
+    uint64_t bkt = (uint64_t)t->prev_bkt_count * (1000000u / RTX_RATE_BUCKET);
+    if (bkt > pps) pps = bkt;
     uint64_t v = pps * (t->path[path].srtt_us + RTX_RTT_SLACK) / 1000000u;
     if (v < RTX_LIMIT_MIN) v = RTX_LIMIT_MIN;
     return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
@@ -269,15 +267,22 @@ mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
     uint64_t sec = now_us / 1000000u;
     /* the clock stepped back, so restart the window */
     if (t->have_win && now_us < t->last_us) t->have_win = 0;
+    int fresh = !t->have_win;
     if (!t->have_win || sec != t->win_sec) {
         int contiguous = t->have_win && sec == t->win_sec + 1;
         t->prev_count = contiguous ? t->win_count : 0;
-        t->win_start_us = contiguous ? sec * 1000000u : now_us;
         t->have_win = 1;
         t->win_sec = sec;
         t->win_count = 0;
     }
     t->win_count++;
+    uint64_t b = now_us / RTX_RATE_BUCKET;
+    if (fresh || b != t->bkt_id) {
+        t->prev_bkt_count = (!fresh && b == t->bkt_id + 1) ? t->bkt_count : 0;
+        t->bkt_id = b;
+        t->bkt_count = 0;
+    }
+    t->bkt_count++;
     t->last_us = now_us;
 
     rtx_ent_t *o = tab_insert(&t->origs, ++t->next_orig);
