@@ -116,8 +116,15 @@ run_vpn() {
     # VPN_REINJ=<mode> sets [Multipath] Reinjection on the client only (no CLI
     # flag exists): the client is the SRT sender, and a phone would enable it
     # in its own config while the shared server keeps the default.
+    # VPN_REINJ=redundant sets Redundant = on instead (RedundantPorts from
+    # SRT_BENCH_RED_PORTS when set).
     local reinj="${VPN_REINJ:-off}"
-    if [ "$reinj" != "off" ]; then
+    if [ "$reinj" = "redundant" ]; then
+        client_conf+=$'[Multipath]\nRedundant = on\n'
+        if [ -n "${SRT_BENCH_RED_PORTS:-}" ]; then
+            client_conf+="RedundantPorts = ${SRT_BENCH_RED_PORTS}"$'\n'
+        fi
+    elif [ "$reinj" != "off" ]; then
         client_conf+=$'[Multipath]\nReinjection = '"${reinj}"$'\n'
     fi
     # SRT_BENCH_CC selects the QUIC congestion controller (default bbr2).
@@ -172,9 +179,13 @@ run_vpn() {
     fi
     # An unknown Reinjection value is a WARN + fallback to off, which would
     # silently turn a redundant arm into a plain one.
+    local marker="reinjection enabled: mode=${reinj}"
+    if [ "$reinj" = "redundant" ]; then
+        marker="redundant mode enabled:"
+    fi
     if [ "$reinj" != "off" ] && \
-       ! grep -q "reinjection enabled: mode=${reinj}" "${WORK_DIR}/client.log"; then
-        echo "    ERROR: client did not enable reinjection mode=${reinj} (see ${WORK_DIR}/client.log)"
+       ! grep -q "$marker" "${WORK_DIR}/client.log"; then
+        echo "    ERROR: client did not log '${marker}' (see ${WORK_DIR}/client.log)"
         return 1
     fi
     return 0

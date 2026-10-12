@@ -12,8 +12,8 @@
 #
 # SRT_BENCH_SUITE=redundant instead compares redundant (duplicate every
 # datagram on both paths) configurations at a rate that fits the slower
-# path: arms mq-<scheduler>-<reinjection>, default
-# "mq-wlb-off mq-wlb-dgram mq-minrtt-dgram" (override with SRT_BENCH_ARMS),
+# path: arms mq-<scheduler>-<off|redundant|reinjection mode>, default
+# "mq-wlb-off mq-wlb-redundant" (override with SRT_BENCH_ARMS),
 # conditions R1-R4 (see the end of main). The server scheduler stays wlb
 # (the default a shared server runs), so only the client's choice varies.
 # Metric: unique stream loss = (pktSentUnique - pktRecvUnique) / pktSentUnique
@@ -481,11 +481,11 @@ fi
 if [ "$SUITE" = "redundant" ]; then
 # Redundant mode: every datagram on both paths, so the send rate must fit
 # the slower path (30M in the C5 shape); 10 Mbps is a typical phone uplink
-# stream. The question is which scheduler to pair with Reinjection=dgram,
-# with the plain default (wlb, off) as the reference. Low-latency budgets
+# stream. The question is what Redundant = on buys over
+# the plain default (wlb, off). Low-latency budgets
 # (120ms) leave SRT little or no time to retransmit, so the second copy is
 # the only recovery.
-read -ra RED_ARMS <<< "${SRT_BENCH_ARMS:-mq-wlb-off mq-wlb-dgram mq-minrtt-dgram}"
+read -ra RED_ARMS <<< "${SRT_BENCH_ARMS:-mq-wlb-off mq-wlb-redundant}"
 RED_RATE="${SRT_BENCH_RED_RATE:-10}"
 C5_A="delay 40ms 20ms limit 750 loss 0.2%"
 C5_B="delay 60ms 30ms limit 600 loss 0.4%"
@@ -517,7 +517,7 @@ SUMMARY="${OUT_DIR}/summary.md"
         echo "- send rates: P1/C3/C4 = 25 Mbps, P2 = 120 Mbps (sender maxbw=0, inputbw=rate, oheadbw=25)"
         echo "- C3 gemodel: ${GEMODEL}"
     else
-        echo "- suite redundant: send rate ${RED_RATE} Mbps (sender maxbw=0, inputbw=rate, oheadbw=25), reinjection on the client only, server scheduler wlb"
+        echo "- suite redundant: send rate ${RED_RATE} Mbps (sender maxbw=0, inputbw=rate, oheadbw=25), duplication on the client only, server scheduler wlb"
         echo "- rxA/rxB: MB the server received per path during the send (uplink wire bytes, all traffic)"
     fi
     for c in "${!COND_LOSS_NOTE[@]}"; do
