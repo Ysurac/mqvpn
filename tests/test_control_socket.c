@@ -41,6 +41,7 @@ static int g_client_info_n = 0;
 static mqvpn_client_info_t g_client_info_tmpl;
 
 static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
+static int g_sched_n = 1; /* entries the sched getter returns */
 
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
@@ -146,6 +147,18 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
     (void)s;
     if (max > 0) out[0] = g_reinject_tmpl;
     return max > 0 ? 1 : 0;
+}
+
+int
+mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sched_t *out,
+                              int max)
+{
+    (void)s;
+    if (g_sched_n < 0) return -1;
+    int n = g_sched_n < max ? g_sched_n : max;
+    for (int i = 0; i < n; i++)
+        snprintf(out[i].scheduler, sizeof(out[i].scheduler), "wlb");
+    return n;
 }
 
 int
@@ -404,6 +417,23 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
+    CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"scheduler\":\"wlb\"");
+}
+
+/* Sched getter shorter than the client list (or failing): unknown. */
+static void
+test_get_status_scheduler_missing(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_n = 1;
+    for (int n = 0; n >= -1; n--) {
+        g_sched_n = n;
+        call("{\"cmd\":\"get_status\"}");
+        CHECK_HAS("\"scheduler\":\"unknown\"");
+    }
+    g_sched_n = 1;
 }
 
 /* Alignment semantics (a): a reinject snapshot entry whose path_id matches
@@ -590,6 +620,7 @@ main(void)
 
     test_get_status_empty();
     test_get_status_one_client_with_path();
+    test_get_status_scheduler_missing();
     test_get_status_reinject_matched_path_id();
     test_get_status_reinject_mismatched_path_id();
 

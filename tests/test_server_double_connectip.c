@@ -726,13 +726,15 @@ main(void)
             printf("  first CONNECT-IP did not establish exactly one session   FAIL\n");
             rc = 1;
         }
-        const char *cs = mqvpn_server_test_conn_sched(svr, 0);
-        if (strcmp(g_req1.sched_echo, "minrtt") == 0 && cs && strcmp(cs, "minrtt") == 0) {
+        mqvpn_internal_client_sched_t cs[MQVPN_MAX_USERS];
+        int ncs = mqvpn_server_get_client_sched(svr, cs, MQVPN_MAX_USERS);
+        if (strcmp(g_req1.sched_echo, "minrtt") == 0 && ncs >= 1 &&
+            strcmp(cs[0].scheduler, "minrtt") == 0) {
             printf("  client-requested scheduler: echo=minrtt, conn=minrtt     PASS\n");
         } else {
             printf("  client-requested scheduler: echo='%s' conn=%s (expected minrtt) "
                    "FAIL\n",
-                   g_req1.sched_echo, cs ? cs : "(none)");
+                   g_req1.sched_echo, ncs >= 1 ? cs[0].scheduler : "(none)");
             rc = 1;
         }
     }
@@ -882,14 +884,15 @@ main(void)
                 "assigned_ip2=%d.%d.%d.%d\n",
                 n_after_reest, g_req3.status, g_client_connected_calls, g_assigned_ip2[0],
                 g_assigned_ip2[1], g_assigned_ip2[2], g_assigned_ip2[3]);
-        const char *cs3 = mqvpn_server_test_conn_sched(svr, 0);
-        if (strcmp(g_req3.sched_echo, "minrtt") == 0 && cs3 &&
-            strcmp(cs3, "minrtt") == 0) {
+        mqvpn_internal_client_sched_t cs3[MQVPN_MAX_USERS];
+        int ncs3 = mqvpn_server_get_client_sched(svr, cs3, MQVPN_MAX_USERS);
+        if (strcmp(g_req3.sched_echo, "minrtt") == 0 && ncs3 >= 1 &&
+            strcmp(cs3[0].scheduler, "minrtt") == 0) {
             printf("  re-request wlb after swap: echo=minrtt (already_set)     PASS\n");
         } else {
             printf("  re-request wlb after swap: echo='%s' conn=%s (expected minrtt) "
                    "FAIL\n",
-                   g_req3.sched_echo, cs3 ? cs3 : "(none)");
+                   g_req3.sched_echo, ncs3 >= 1 ? cs3[0].scheduler : "(none)");
             rc = 1;
         }
         if (g_req3.status == 200 && n_after_reest == 1 && g_client_connected_calls == 2) {

@@ -1387,17 +1387,6 @@ mqvpn_server_test_sched_refusal_reason(int xqc_rc)
     return svr_sched_refusal_reason(xqc_rc);
 }
 
-/* Temporary test hook: effective scheduler of the idx-th live session. */
-MQVPN_INTERNAL const char *
-mqvpn_server_test_conn_sched(mqvpn_server_t *s, int idx)
-{
-    for (int off = 0; off <= MQVPN_ADDR_POOL_MAX; off++) {
-        if (s->sessions[off] && idx-- == 0)
-            return mqvpn_sched_to_name(s->sessions[off]->eff_sched);
-    }
-    return NULL;
-}
-
 /* Apply a client-requested scheduler to this connection (if allowed) and log
  * the outcome. The raw client value is never logged. Refusal never rejects
  * the connection; eff_sched stays what it was. */
@@ -1413,9 +1402,8 @@ svr_negotiate_scheduler(mqvpn_server_t *s, svr_conn_t *conn,
     if (neg == MQVPN_SCHED_NEG_NONE) return;
 
     const char *reason = mqvpn_sched_neg_reason(neg);
-    const char *req_name = neg == MQVPN_SCHED_NEG_INVALID
-                               ? "(invalid)"
-                               : mqvpn_sched_to_name((mqvpn_scheduler_t)requested);
+    const char *req_name =
+        requested < 0 ? "(invalid)" : mqvpn_sched_to_name((mqvpn_scheduler_t)requested);
     if (neg == MQVPN_SCHED_NEG_APPLY) {
         xqc_conn_settings_t cs = {0};
         mqvpn_apply_scheduler(&cs, (mqvpn_scheduler_t)requested);
@@ -3044,8 +3032,8 @@ mqvpn_server_remove_user(mqvpn_server_t *s, const char *username)
 }
 
 /* Iteration order and the tunnel_established guard here are load-bearing:
- * mqvpn_server_get_client_reinject() below mirrors this walk and must stay
- * index-aligned — change both together. */
+ * mqvpn_server_get_client_reinject() and _sched() below mirror this walk
+ * and must stay index-aligned — change both together. */
 int
 mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *out,
                              int max_clients, int *n_clients)
@@ -3161,6 +3149,26 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
         count++;
     }
 
+    return count;
+}
+
+int
+mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sched_t *out,
+                              int max)
+{
+    if (!s || !out || max <= 0) return -1;
+
+    mqvpn_server_t *srv = (mqvpn_server_t *)s;
+    int count = 0;
+
+    /* Same walk as mqvpn_server_get_client_info(); keep them in step. */
+    for (int i = 1; i <= MQVPN_ADDR_POOL_MAX && count < max; i++) {
+        svr_conn_t *conn = srv->sessions[i];
+        if (!conn || !conn->tunnel_established) continue;
+        snprintf(out[count].scheduler, sizeof(out[count].scheduler), "%s",
+                 mqvpn_sched_to_name(conn->eff_sched));
+        count++;
+    }
     return count;
 }
 

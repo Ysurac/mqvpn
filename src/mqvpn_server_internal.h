@@ -51,9 +51,8 @@ typedef struct {
                           * live tunnel's negotiated stamping. */
 } svr_req_headers_t;
 
-/* Test hooks (mqvpn_server.c). conn_sched is temporary. */
+/* Test hook (mqvpn_server.c). */
 MQVPN_INTERNAL const char *mqvpn_server_test_sched_refusal_reason(int xqc_rc);
-MQVPN_INTERNAL const char *mqvpn_server_test_conn_sched(mqvpn_server_t *s, int idx);
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on
