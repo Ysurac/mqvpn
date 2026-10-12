@@ -207,16 +207,19 @@ test_limit_scales(void)
     mqvpn_redundant_tx_free(t);
 }
 
+static mqvpn_redundant_tx_t *
+fresh_tracker(void)
+{
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_srtt(t, 0, 300000);
+    return t;
+}
+
 static void
 test_limit_first_second_rate(void)
 {
     mqvpn_redundant_tx_t *t;
-#define FRESH()                                    \
-    do {                                           \
-        t = mqvpn_redundant_tx_new();              \
-        mqvpn_redundant_tx_set_srtt(t, 0, 300000); \
-    } while (0)
-    FRESH(); /* trickle lead-in, then the real flow */
+    t = fresh_tracker(); /* trickle lead-in, then the real flow */
     add_copy(t, 1, 5000000);
     add_copy(t, 1, 5120000);
     for (int i = 0; i < 200; i++)
@@ -225,39 +228,47 @@ test_limit_first_second_rate(void)
     assert(mqvpn_redundant_tx_limit(t, 0) == 1100); /* 2000 pps */
     mqvpn_redundant_tx_free(t);
 
-    FRESH(); /* only the adjacent bucket counts */
+    t = fresh_tracker(); /* only the adjacent bucket counts */
     for (int i = 0; i < 200; i++)
         add_copy(t, 1, 6000000 + (uint64_t)i * 500);
     add_copy(t, 1, 6200000);
     assert(mqvpn_redundant_tx_limit(t, 0) == 300);
     mqvpn_redundant_tx_free(t);
 
-    FRESH(); /* no complete bucket yet */
+    t = fresh_tracker(); /* no complete bucket yet */
     for (int i = 0; i < 150; i++)
         add_copy(t, 1, 7000000 + (uint64_t)i * 500);
     assert(mqvpn_redundant_tx_limit(t, 0) == 300);
     mqvpn_redundant_tx_free(t);
 
-    FRESH(); /* 20 pkt/s stays at the floor */
+    t = fresh_tracker(); /* 20 pkt/s stays at the floor */
     for (int i = 0; i < 20; i++)
         add_copy(t, 1, (uint64_t)i * 50000);
     assert(mqvpn_redundant_tx_limit(t, 0) == 300);
     mqvpn_redundant_tx_free(t);
 
-    FRESH(); /* clock stepped back: window and bucket restart */
+    t = fresh_tracker(); /* clock stepped back: window and bucket restart */
     for (int i = 0; i < 1710; i++)
         add_copy(t, 1, 8000000 + (uint64_t)i * 900000 / 1709);
     add_copy(t, 1, 8100000);
     assert(mqvpn_redundant_tx_limit(t, 0) == 300);
     mqvpn_redundant_tx_free(t);
 
-    FRESH(); /* the previous second's count wins when larger */
+    t = fresh_tracker(); /* the previous second's count wins when larger */
     for (int i = 0; i < 1900; i++)
         add_copy(t, 1, 9000000 + (uint64_t)i * 500);
     add_copy(t, 1, 10000000);
     assert(mqvpn_redundant_tx_limit(t, 0) == 1900 * 550000 / 1000000); /* 1045 */
     mqvpn_redundant_tx_free(t);
-#undef FRESH
+
+    t = fresh_tracker(); /* step back inside the open bucket resets the bucket too */
+    for (int i = 0; i < 1900; i++)
+        add_copy(t, 1, 9000000 + (uint64_t)i * 500);
+    add_copy(t, 1, 10000000);
+    add_copy(t, 1, 10050000);
+    add_copy(t, 1, 10049999);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 300);
+    mqvpn_redundant_tx_free(t);
 }
 
 static void
