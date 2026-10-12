@@ -2,7 +2,7 @@
 
 - date: 2026-10-12 14:07
 - kernel: 7.0.0-38-generic
-- srt-xtransmit: /home/nori/workspace/oss-speedify-proj/tools/srt-xtransmit/build/bin/srt-xtransmit (srt-xtransmit v0.3.0 dev.)
+- srt-xtransmit: v0.3.0
 - mqvpn: 50c9b74a
 - duration: 60s/run, scheduler wlb, reorder off, lossmaxttl 32, cc bbr2
 - suite redundant: send rate 10 Mbps (sender maxbw=0, inputbw=rate, oheadbw=25), reinjection on the client only, server scheduler wlb
