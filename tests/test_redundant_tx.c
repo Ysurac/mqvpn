@@ -228,6 +228,24 @@ test_limit_first_second_rate(void)
         add_copy(t, 1, (uint64_t)i * 50000);
     assert(mqvpn_redundant_tx_limit(t, 0) == 300);
     mqvpn_redundant_tx_free(t);
+    t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_srtt(t, 0, 300000);
+    for (int i = 0; i < 300; i++) /* fresh window starts mid-second: 5500000 .. 5700000 */
+        add_copy(t, 1, 5500000 + (uint64_t)i * 200000 / 299);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 825); /* 1500 pps */
+    for (int i = 0; i < 200; i++) /* contiguous roll, late first commit */
+        add_copy(t, 1, 6100000 + (uint64_t)i * 100000 / 199);
+    assert(mqvpn_redundant_tx_limit(t, 0) ==
+           550); /* window starts at 6000000: 1000 pps */
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_srtt(t, 0, 300000);
+    for (int i = 0; i < 1710; i++) /* 7000000 .. 7900000 */
+        add_copy(t, 1, 7000000 + (uint64_t)i * 900000 / 1709);
+    add_copy(t, 1, 7100000); /* clock stepped back: window restarts, count 1 */
+    assert(mqvpn_redundant_tx_limit(t, 0) == 300);
+    mqvpn_redundant_tx_free(t);
 }
 
 static void

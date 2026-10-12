@@ -13,9 +13,8 @@
 #define RTX_SLOTS     (2 * RTX_CAP)
 #define RTX_LIMIT_MIN 300
 #define RTX_RTT_SLACK 250000u /* us added to srtt in the limit */
-#define RTX_RATE_MIN_ELAPSED                                   \
-    100000u /* us of the current second before its rate counts \
-             */
+/* us of the current second before its rate counts */
+#define RTX_RATE_MIN_ELAPSED 100000u
 
 /* ---- port list / packet matching ---- */
 
@@ -268,6 +267,8 @@ mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
 {
     if (!t || k <= 0 || t->origs.n >= RTX_CAP || t->copies.n + k > RTX_CAP) return;
     uint64_t sec = now_us / 1000000u;
+    /* the clock stepped back, so restart the window */
+    if (t->have_win && now_us < t->last_us) t->have_win = 0;
     if (!t->have_win || sec != t->win_sec) {
         int contiguous = t->have_win && sec == t->win_sec + 1;
         t->prev_count = contiguous ? t->win_count : 0;
