@@ -406,6 +406,12 @@ typedef struct {
      * in on_client_connected. */
     uint8_t assigned_prefix6;
     int has_v6; /* 1 = IPv6 assigned */
+    /* Server's effective scheduler for this connection — appended under ABI 3.
+     * Client only (the server leaves both 0). has_server_scheduler = 0: the
+     * server did not report one (older server). Read only when struct_size
+     * covers these fields. */
+    int has_server_scheduler;
+    int server_scheduler; /* mqvpn_scheduler_t */
 } mqvpn_tunnel_info_t;
 
 typedef struct {
