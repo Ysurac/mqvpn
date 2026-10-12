@@ -134,13 +134,23 @@ section_name(int section)
 
 /* RedundantPorts: a bad list sets redundant_ports_err (the CLI then refuses to
  * start) instead of degrading to "all UDP". `val` is already trimmed. */
+/* Bounded copy with an explicit NUL: a too-long value is kept truncated. */
+static void
+store_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
+{
+    size_t n = strlen(val);
+    if (n > sizeof(cfg->redundant_ports) - 1) n = sizeof(cfg->redundant_ports) - 1;
+    memcpy(cfg->redundant_ports, val, n);
+    cfg->redundant_ports[n] = '\0';
+}
+
 static void
 set_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
 {
     uint16_t tmp[MQVPN_REDUNDANT_MAX_PORTS];
     /* The value is stored even when bad (for the error message); consumers
      * must check redundant_ports_err before using it. */
-    snprintf(cfg->redundant_ports, sizeof(cfg->redundant_ports), "%s", val);
+    store_redundant_ports(cfg, val);
     cfg->redundant_ports_err =
         strlen(val) >= sizeof(cfg->redundant_ports) - 1 ||
         mqvpn_redundant_parse_ports(val, tmp, MQVPN_REDUNDANT_MAX_PORTS) < 0;
@@ -1203,8 +1213,7 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
         char rp[1024] = "";
         /* json_read_string truncates silently: a full buffer means too long. */
         if (json_read_string(v, rp, sizeof(rp)) != 0 || strlen(rp) >= sizeof(rp) - 1) {
-            snprintf(cfg->redundant_ports, sizeof(cfg->redundant_ports), "%s",
-                     rp); /* may be partial/garbage; only for the message */
+            store_redundant_ports(cfg, rp); /* may be partial/garbage; message only */
             cfg->redundant_ports_err = 1;
         } else {
             set_redundant_ports(cfg, trim(rp));
