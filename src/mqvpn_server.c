@@ -99,6 +99,12 @@ struct svr_conn_s {
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
 
+    /* Scheduler this connection runs (per connection: NOT reset by
+     * svr_session_release, so a re-established tunnel keeps it) and whether a
+     * client request already swapped it (at most one swap per connection). */
+    mqvpn_scheduler_t eff_sched;
+    int sched_swapped;
+
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
     int tcp_flow_count; /* per-session cap enforcement lands with the
                          * server-side limits work — no 5-tuple table needed
@@ -590,6 +596,7 @@ cb_accept(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid,
         return -1; /* refuse: SERVER_ACCEPT is not set, nothing to free */
     }
     conn_ctx->server = s;
+    conn_ctx->eff_sched = mqvpn_sched_effective(s->config.scheduler);
     /* Issue the transport scope before xquic switches this connection's
      * sends to cb_write_socket (which happens as soon as we return 0).
      * Monotonic, never reused; wrap is treated as exhaustion. */
@@ -927,7 +934,7 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
     }
 
     /* 1. Send 200 response headers */
-    xqc_http_header_t resp_hdrs[3] = {
+    xqc_http_header_t resp_hdrs[4] = {
         {.name = {.iov_base = ":status", .iov_len = 7},
          .value = {.iov_base = "200", .iov_len = 3},
          .flags = 0},
@@ -950,10 +957,19 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         resp_hdrs[resp_count].flags = 0;
         resp_count++;
     }
+    /* Always echo the scheduler this connection runs, whether or not the
+     * client asked: lets a client tell "server default" from "applied". */
+    const char *eff_name = mqvpn_sched_to_name(conn->eff_sched);
+    resp_hdrs[resp_count].name = (struct iovec){
+        .iov_base = MQVPN_SCHED_HDR_NAME, .iov_len = sizeof(MQVPN_SCHED_HDR_NAME) - 1};
+    resp_hdrs[resp_count].value =
+        (struct iovec){.iov_base = (void *)eff_name, .iov_len = strlen(eff_name)};
+    resp_hdrs[resp_count].flags = 0;
+    resp_count++;
     xqc_http_headers_t hdrs = {
         .headers = resp_hdrs,
         .count = resp_count,
-        .capacity = 3,
+        .capacity = 4,
     };
     ret = xqc_h3_request_send_headers(h3_request, &hdrs, 0);
     if (ret < 0) {
@@ -1279,6 +1295,12 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
             out->auth_token = (const char *)h->value.iov_base + 7;
             out->auth_token_len = h->value.iov_len - 7;
         }
+        if (h->name.iov_len == sizeof(MQVPN_SCHED_HDR_NAME) - 1 &&
+            memcmp(h->name.iov_base, MQVPN_SCHED_HDR_NAME, h->name.iov_len) == 0) {
+            out->has_sched_hdr = 1;
+            out->sched = (const char *)h->value.iov_base;
+            out->sched_len = h->value.iov_len;
+        }
         /* §19.3: client advertised mqvpn-reorder → it supports the shim. */
         if (mqvpn_reorder_header_match(h->name.iov_base, h->name.iov_len,
                                        h->value.iov_base, h->value.iov_len)) {
@@ -1351,6 +1373,66 @@ svr_auth_check(const mqvpn_server_t *s, const char *auth_token, size_t auth_toke
     return 0;
 }
 
+/* Why xqc_conn_reapply_settings refused: -XQC_ESTATE means a second path (or
+ * datagram redundancy, which mqvpn never enables) blocks the swap. */
+static const char *
+svr_sched_refusal_reason(int xqc_rc)
+{
+    return xqc_rc == -XQC_ESTATE ? "paths" : "engine";
+}
+
+MQVPN_INTERNAL const char *
+mqvpn_server_test_sched_refusal_reason(int xqc_rc)
+{
+    return svr_sched_refusal_reason(xqc_rc);
+}
+
+/* Temporary test hook: effective scheduler of the idx-th live session. */
+MQVPN_INTERNAL const char *
+mqvpn_server_test_conn_sched(mqvpn_server_t *s, int idx)
+{
+    for (int off = 0; off <= MQVPN_ADDR_POOL_MAX; off++) {
+        if (s->sessions[off] && idx-- == 0)
+            return mqvpn_sched_to_name(s->sessions[off]->eff_sched);
+    }
+    return NULL;
+}
+
+/* Apply a client-requested scheduler to this connection (if allowed) and log
+ * the outcome. The raw client value is never logged. Refusal never rejects
+ * the connection; eff_sched stays what it was. */
+static void
+svr_negotiate_scheduler(mqvpn_server_t *s, svr_conn_t *conn,
+                        const svr_req_headers_t *hdrs)
+{
+    int requested =
+        hdrs->has_sched_hdr ? mqvpn_sched_from_name_n(hdrs->sched, hdrs->sched_len) : -1;
+    mqvpn_sched_neg_t neg = mqvpn_sched_negotiate(
+        s->config.allow_client_scheduler, mqvpn_sched_effective(s->config.scheduler),
+        hdrs->has_sched_hdr, requested, conn->sched_swapped);
+    if (neg == MQVPN_SCHED_NEG_NONE) return;
+
+    const char *reason = mqvpn_sched_neg_reason(neg);
+    const char *req_name = neg == MQVPN_SCHED_NEG_INVALID
+                               ? "(invalid)"
+                               : mqvpn_sched_to_name((mqvpn_scheduler_t)requested);
+    if (neg == MQVPN_SCHED_NEG_APPLY) {
+        xqc_conn_settings_t cs = {0};
+        mqvpn_apply_scheduler(&cs, (mqvpn_scheduler_t)requested);
+        xqc_int_t rc = xqc_conn_reapply_settings(xqc_h3_conn_get_xqc_conn(conn->h3_conn),
+                                                 &cs, XQC_CONN_REAPPLY_SCHEDULER);
+        if (rc == XQC_OK) {
+            conn->eff_sched = (mqvpn_scheduler_t)requested;
+            conn->sched_swapped = 1;
+            LOG_I(s, "client requested scheduler %s: applied", req_name);
+            return;
+        }
+        reason = svr_sched_refusal_reason(rc);
+    }
+    LOG_I(s, "client requested scheduler %s: not applied (%s), using %s", req_name,
+          reason, mqvpn_sched_to_name(conn->eff_sched));
+}
+
 /* CONNECT-IP request: header-phase handling (validate, auth, 200 response).
  * Returns 0 on success, -1 to reset the stream. */
 static int
@@ -1403,6 +1485,8 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
      * duplicate or unrelated request can never flip stamping on for a live
      * tunnel that did not negotiate it. */
     stream->conn->peer_reorder_supported = hdrs->has_reorder_hdr;
+
+    svr_negotiate_scheduler(s, stream->conn, hdrs);
 
     LOG_I(s, "Extended CONNECT for connect-ip received");
     if (svr_masque_send_response(h3_request, stream) < 0) return -1;
@@ -2601,10 +2685,10 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
 
     uint64_t dgram_id;
     uint32_t fh =
-        flow_hash_pkt(pkt, (int)len, s->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
+        flow_hash_pkt(pkt, (int)len, target->eff_sched == MQVPN_SCHED_WLB_UDP_PIN);
     xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(target->h3_conn), fh);
     xret = xqc_h3_ext_datagram_send(target->h3_conn, frame_buf, frame_written, &dgram_id,
-                                    mqvpn_dgram_qos_level(s->config.scheduler));
+                                    mqvpn_dgram_qos_level(target->eff_sched));
 
     if (xret == -XQC_EAGAIN) {
         s->tun_paused = 1;
