@@ -2214,9 +2214,9 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         c->reconnect_attempts = 0;
         if (c->config.request_server_scheduler) {
             const char *req = mqvpn_sched_to_name(c->config.scheduler);
-            if (conn->has_peer_sched)
+            if (info.has_server_scheduler)
                 LOG_I(c, "server scheduler: %s (requested %s)",
-                      mqvpn_sched_to_name(conn->peer_sched), req);
+                      mqvpn_sched_to_name((mqvpn_scheduler_t)info.server_scheduler), req);
             else
                 LOG_I(c, "server did not report its scheduler (requested %s)", req);
         }
