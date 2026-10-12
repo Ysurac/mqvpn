@@ -1926,6 +1926,23 @@ test_redundant_ports_ini_json(void)
 }
 
 static void
+test_redundant_ini_onoff(void)
+{
+    const char *vals[] = {"on", "off", "ON", "Off", "true", "no", "bogus"};
+    const int want[] = {1, 0, 1, 0, 1, 0, 0};
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
+        char ini[64];
+        snprintf(ini, sizeof(ini), "[Multipath]\nRedundant = %s\n", vals[i]);
+        char *path = write_tmp(ini);
+        mqvpn_file_config_t c;
+        mqvpn_config_defaults(&c);
+        mqvpn_config_load(&c, path);
+        unlink(path);
+        ASSERT_EQ_INT(c.redundant, want[i], vals[i]);
+    }
+}
+
+static void
 test_ini_json_scalar_parity(void)
 {
     /* Every scalar key, non-default value. Complex keys (DNS/User/Path/
@@ -2392,6 +2409,7 @@ main(void)
     /* INI/JSON scalar-key parity */
     test_ini_json_scalar_parity();
     test_redundant_ports_ini_json();
+    test_redundant_ini_onoff();
     test_ini_json_invalid_scalar_parity();
 
     /* mqvpn_sched_names.h table parity */
