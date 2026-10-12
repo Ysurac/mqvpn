@@ -320,6 +320,31 @@ TEST(config_set_scheduler)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_sched_knob_setters)
+{
+    ASSERT_EQ(mqvpn_config_set_allow_client_scheduler(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_request_server_scheduler(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->allow_client_scheduler, 0);
+    ASSERT_EQ(cfg->request_server_scheduler, 0);
+    ASSERT_EQ(mqvpn_config_set_allow_client_scheduler(cfg, 5), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_request_server_scheduler(cfg, 5), MQVPN_OK);
+    ASSERT_EQ(cfg->allow_client_scheduler, 1);
+    ASSERT_EQ(cfg->request_server_scheduler, 1);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_sched_knobs_from_json)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"allow_client_scheduler\":true,"
+                                          "\"request_server_scheduler\":true}"),
+              MQVPN_OK);
+    ASSERT_EQ(cfg->allow_client_scheduler, 1);
+    ASSERT_EQ(cfg->request_server_scheduler, 1);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_cc)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -3396,6 +3421,8 @@ main(void)
     run_config_set_insecure();
     run_config_set_tun_mtu();
     run_config_set_scheduler();
+    run_config_sched_knob_setters();
+    run_config_sched_knobs_from_json();
     run_config_set_cc();
     run_config_load_json_reinjection();
     run_config_set_reinjection();

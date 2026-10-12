@@ -196,6 +196,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, or `backup_fec`) | `wlb` |
+| `AllowClientScheduler` | Server only. When `true`, a client that asks for a scheduler gets it for its own connection's download direction; other clients keep the server's `Scheduler`. The request is not applied, and the connection keeps the scheduler it already has (at first, the server's `Scheduler`), when the client asks for `backup_fec`, when the server's `Scheduler` is `backup_fec`, when the same connection already changed its scheduler once, or when the connection already uses more than one path. | `false` |
+| `RequestServerScheduler` | Client only. When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
@@ -203,6 +205,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
+
+A server of this version tells each connected client which scheduler it uses for that client, even when `AllowClientScheduler` is `false`.
 
 See [Multipath](./multipath) for scheduler details and
 [Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.

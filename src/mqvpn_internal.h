@@ -93,6 +93,8 @@ struct mqvpn_config_s {
     int insecure;
 
     mqvpn_scheduler_t scheduler;
+    int allow_client_scheduler;   /* server: honour a client scheduler request */
+    int request_server_scheduler; /* client: ask the server to use our scheduler */
     mqvpn_cc_t cc;
 
     /* Reinjection (speculative multipath duplication). 0 = OFF (default,

@@ -644,6 +644,12 @@ MQVPN_API int mqvpn_config_remove_user(mqvpn_config_t *cfg, const char *username
 MQVPN_API int mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text);
 MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
+/* Server only: when non-zero, a client that asks for a scheduler gets it for its
+ * own connection's download direction. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_allow_client_scheduler(mqvpn_config_t *cfg, int enabled);
+/* Client only: when non-zero, ask the server to use this config's scheduler for the
+ * download direction too. Needs a server with the knob above on. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_request_server_scheduler(mqvpn_config_t *cfg, int enabled);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 
 /* Reinjection (speculative multipath duplication of unacked data). OFF by

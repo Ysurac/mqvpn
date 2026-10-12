@@ -66,6 +66,8 @@ typedef struct mqvpn_file_config_s {
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
     int n_paths;
     char scheduler[16];
+    int allow_client_scheduler;   /* server */
+    int request_server_scheduler; /* client */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
     char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */

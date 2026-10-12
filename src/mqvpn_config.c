@@ -338,6 +338,16 @@ mqvpn_config_load_json(mqvpn_config_t *cfg, const char *json_text)
         cfg->scheduler = sched;
     }
 
+    v = json_find_key(json_text, "allow_client_scheduler");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->allow_client_scheduler = iv;
+    }
+
+    v = json_find_key(json_text, "request_server_scheduler");
+    if (v && json_read_bool(v, &iv) == MQVPN_OK) {
+        cfg->request_server_scheduler = iv;
+    }
+
     v = json_find_key(json_text, "cc");
     if (v && json_read_string(v, tmp, sizeof(tmp)) == MQVPN_OK) {
         mqvpn_cc_t cc = MQVPN_CC_BBR2;
@@ -718,6 +728,22 @@ mqvpn_config_apply_reorder(mqvpn_config_t *cfg, const mqvpn_reorder_config_t *sr
 _Static_assert(MQVPN_HYBRID_TCP_STREAM == 0 && MQVPN_HYBRID_TCP_RAW == 1 &&
                    MQVPN_HYBRID_TCP_AUTO == 2,
                "public setter doc pins tcp mode values 0=stream 1=raw 2=auto");
+
+int
+mqvpn_config_set_allow_client_scheduler(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->allow_client_scheduler = enabled ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_request_server_scheduler(mqvpn_config_t *cfg, int enabled)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->request_server_scheduler = enabled ? 1 : 0;
+    return MQVPN_OK;
+}
 
 int
 mqvpn_config_set_hybrid_enabled(mqvpn_config_t *cfg, int enabled)

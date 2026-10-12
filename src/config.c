@@ -584,6 +584,10 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
+    CFG_BOOL(SEC_MULTIPATH, "AllowClientScheduler", "allow_client_scheduler",
+             allow_client_scheduler),
+    CFG_BOOL(SEC_MULTIPATH, "RequestServerScheduler", "request_server_scheduler",
+             request_server_scheduler),
     CFG_STR(SEC_MULTIPATH, "Reinjection", "reinjection", reinjection),
     CFG_INT_FB(SEC_MULTIPATH, "ReinjectionSrttFactorPct", "reinjection_srtt_factor_pct",
                reinjection_srtt_factor_pct, cfgk_int_reinj_factor_pct, 110),
