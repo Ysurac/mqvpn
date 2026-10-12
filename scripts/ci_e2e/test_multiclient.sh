@@ -8,6 +8,7 @@
 #   2. All clients can ping through the tunnel
 #   3. One client disconnect doesn't affect others
 #   4. Wrong PSK is rejected (client exits)
+#   5. Per-client scheduler (--request-server-scheduler) shows in get_status
 #
 # Usage: sudo ./test_multiclient.sh [path-to-mqvpn-binary]
 
@@ -397,6 +398,7 @@ echo "  Multi-client Test Summary"
 echo "=========================================="
 echo "  Test 1 (3 clients connect): PASS"
 echo "  Test 2 (All ping):          PASS"
+echo "  Test 2b (Client scheduler): PASS"
 [ "$SURVIVE_PASS" -eq 1 ] \
     && echo "  Test 3 (Disconnect):        PASS" \
     || echo "  Test 3 (Disconnect):        FAIL"

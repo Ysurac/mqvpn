@@ -1403,14 +1403,14 @@ _phase_i_stop_client() {
 # _phase_i_order <log> <start_line> <negotiation-ERE>
 # Ordering rule: within the log window after <start_line>, the first
 # negotiation line and (independently) the first secondary-path activation
-# (`path[N>=1] activate:`) must both exist, negotiation first. Prints both
+# (`path[N] activate:`; only secondary paths log it) must both exist, negotiation first. Prints both
 # line numbers on failure. awk reads to EOF (no early-exit reader).
 _phase_i_order() {
     local log="$1" start="$2" neg_re="$3" neg act
     neg=$(tail -n "+$((start + 1))" "$log" | NEG_RE="$neg_re" awk \
         'f == 0 && $0 ~ ENVIRON["NEG_RE"] { f = NR } END { print f + 0 }')
     act=$(tail -n "+$((start + 1))" "$log" | awk \
-        'f == 0 && $0 ~ /path\[[1-9][0-9]*\] activate:/ { f = NR } END { print f + 0 }')
+        'f == 0 && $0 ~ /path\[[0-9]+\] activate:/ { f = NR } END { print f + 0 }')
     if (( neg == 0 || act == 0 || neg >= act )); then
         echo "  ordering violated in $log (window starts after line $start): " \
              "negotiation '$neg_re' at window line $neg (0=absent)," \
@@ -1504,12 +1504,19 @@ test_phase_i_client_scheduler() {
     n0=$(wc -l < "$alice_log")
     relaunch_server_in_ns "${LOG_DIR}/phase_i_server_3.log" "${srv_base[@]}" \
         --scheduler wlb --allow-client-scheduler || return 1
-    if ! wait_for_log_after "$alice_log" 'server scheduler: minrtt \(requested minrtt\)' "$n0" 20; then
+    # The killed server sent no CONNECTION_CLOSE: push one packet so the new
+    # server's stateless reset reaches alice at once (as run_reconnect_test.sh polls ping).
+    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_SERVER_IP" >/dev/null 2>&1 || true
+    if ! wait_for_log_after "$alice_log" 'server scheduler: minrtt \(requested minrtt\)' "$n0" 30; then
         echo "  I.3 no renegotiation line after alice log line $n0; tail:"
         tail -20 "$alice_log" >&2
         return 1
     fi
-    sleep 2   # let the secondary path activate before the ordering check
+    if ! wait_for_log_after "$alice_log" 'path\[[0-9]+\] activate:' "$n0" 5; then
+        echo "  I.3 no 'activate:' line after alice log line $n0; tail:"
+        tail -20 "$alice_log" >&2
+        return 1
+    fi
     _phase_i_order "$alice_log" "$n0" 'server scheduler: minrtt \(requested minrtt\)' || return 1
     _phase_i_expect alice minrtt 2 || return 1
     _phase_i_stop_client
@@ -1561,7 +1568,11 @@ test_phase_i_client_scheduler() {
     MQVPN="$MQVPN_E2E_OLD_SERVER" relaunch_server_in_ns "${LOG_DIR}/phase_i_server_7.log" \
         "${srv_base[@]}" --scheduler wlb || return 1
     _phase_i_client_up secret_a "$alice_log" "--scheduler minrtt --request-server-scheduler" || return 1
-    sleep 2
+    if ! wait_for_log_after "$alice_log" 'path\[[0-9]+\] activate:' 0 5; then
+        echo "  I.7 no 'activate:' line in alice log; tail:"
+        tail -20 "$alice_log" >&2
+        return 1
+    fi
     _phase_i_order "$alice_log" 0 'server did not report its scheduler \(requested minrtt\)' || return 1
     _phase_i_expect alice any 2 || return 1
     _phase_i_stop_client
