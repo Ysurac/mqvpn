@@ -270,6 +270,17 @@ test_capacity_truncates(void)
 }
 
 static void
+test_full_table_unknown_lookup(void)
+{
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    for (int i = 0; i < 16384; i++)
+        add_copy(t, 2, 0);
+    assert(mqvpn_redundant_tx_on_acked(t, 999999999ull) == -1);
+    assert(mqvpn_redundant_tx_on_lost(t, 999999999ull) == -1);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
 test_detach_and_rebind(void)
 {
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
@@ -311,6 +322,7 @@ main(void)
     RUN(test_ack_lost_accounting);
     RUN(test_no_eviction_of_live_copies);
     RUN(test_capacity_truncates);
+    RUN(test_full_table_unknown_lookup);
     RUN(test_detach_and_rebind);
     printf("\n=== test_redundant_tx: %d passed ===\n", g_run);
     return 0;

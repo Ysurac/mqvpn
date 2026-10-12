@@ -138,14 +138,12 @@ static void
 set_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
 {
     uint16_t tmp[MQVPN_REDUNDANT_MAX_PORTS];
-    cfg->redundant_ports[0] = '\0';
-    cfg->redundant_ports_err = 0;
-    if (strlen(val) >= sizeof(cfg->redundant_ports) - 1 ||
-        mqvpn_redundant_parse_ports(val, tmp, MQVPN_REDUNDANT_MAX_PORTS) < 0) {
-        cfg->redundant_ports_err = 1;
-        return;
-    }
+    /* The value is stored even when bad (for the error message); consumers
+     * must check redundant_ports_err before using it. */
     snprintf(cfg->redundant_ports, sizeof(cfg->redundant_ports), "%s", val);
+    cfg->redundant_ports_err =
+        strlen(val) >= sizeof(cfg->redundant_ports) - 1 ||
+        mqvpn_redundant_parse_ports(val, tmp, MQVPN_REDUNDANT_MAX_PORTS) < 0;
 }
 
 /* Split comma-separated DNS list into cfg->dns_servers[] */
@@ -1187,10 +1185,11 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 
     v = json_find_key(json_text, "redundant_ports");
     if (v) {
-        char rp[1024];
+        char rp[1024] = "";
         /* json_read_string truncates silently: a full buffer means too long. */
         if (json_read_string(v, rp, sizeof(rp)) != 0 || strlen(rp) >= sizeof(rp) - 1) {
-            cfg->redundant_ports[0] = '\0';
+            snprintf(cfg->redundant_ports, sizeof(cfg->redundant_ports), "%s",
+                     rp); /* may be partial/garbage; only for the message */
             cfg->redundant_ports_err = 1;
         } else {
             set_redundant_ports(cfg, trim(rp));

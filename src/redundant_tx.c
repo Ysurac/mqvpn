@@ -8,7 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RTX_CAP       16384 /* power of two; both tables */
+#define RTX_CAP 16384 /* power of two; both tables */
+/* Physical slots: load <= 0.5, so a probe always meets an empty slot. */
+#define RTX_SLOTS     (2 * RTX_CAP)
 #define RTX_LIMIT_MIN 300
 #define RTX_RTT_SLACK 250000u /* us added to srtt in the limit */
 
@@ -110,13 +112,13 @@ static uint32_t
 rtx_slot(uint64_t k)
 {
     k *= 0x9E3779B97F4A7C15ull;
-    return (uint32_t)(k >> 40) & (RTX_CAP - 1);
+    return (uint32_t)(k >> 40) & (RTX_SLOTS - 1);
 }
 
 static rtx_ent_t *
 tab_find(rtx_tab_t *t, uint64_t key)
 {
-    for (uint32_t i = rtx_slot(key);; i = (i + 1) & (RTX_CAP - 1)) {
+    for (uint32_t i = rtx_slot(key);; i = (i + 1) & (RTX_SLOTS - 1)) {
         if (!t->e[i].used) return NULL;
         if (t->e[i].key == key) return &t->e[i];
     }
@@ -128,7 +130,7 @@ tab_insert(rtx_tab_t *t, uint64_t key)
     if (t->n >= RTX_CAP) return NULL;
     uint32_t i = rtx_slot(key);
     while (t->e[i].used)
-        i = (i + 1) & (RTX_CAP - 1);
+        i = (i + 1) & (RTX_SLOTS - 1);
     memset(&t->e[i], 0, sizeof(t->e[i]));
     t->e[i].used = 1;
     t->e[i].key = key;
@@ -141,7 +143,7 @@ tab_remove(rtx_tab_t *t, rtx_ent_t *ent)
 {
     uint32_t i = (uint32_t)(ent - t->e), j = i;
     for (;;) {
-        j = (j + 1) & (RTX_CAP - 1);
+        j = (j + 1) & (RTX_SLOTS - 1);
         if (!t->e[j].used) break;
         uint32_t h = rtx_slot(t->e[j].key);
         /* entry j may move to hole i unless its home lies cyclically in (i, j] */
@@ -158,8 +160,8 @@ mqvpn_redundant_tx_new(void)
 {
     mqvpn_redundant_tx_t *t = calloc(1, sizeof(*t));
     if (!t) return NULL;
-    t->copies.e = calloc(RTX_CAP, sizeof(rtx_ent_t));
-    t->origs.e = calloc(RTX_CAP, sizeof(rtx_ent_t));
+    t->copies.e = calloc(RTX_SLOTS, sizeof(rtx_ent_t));
+    t->origs.e = calloc(RTX_SLOTS, sizeof(rtx_ent_t));
     if (!t->copies.e || !t->origs.e) {
         mqvpn_redundant_tx_free(t);
         return NULL;
@@ -186,9 +188,11 @@ void
 mqvpn_redundant_tx_detach_path(mqvpn_redundant_tx_t *t, int path)
 {
     if (!t || !path_ok(path)) return;
-    /* shortcut: full-table scan, slot loss/reuse is rare; index per path if it shows up
-     * in profiles */
-    for (int i = 0; i < RTX_CAP; i++)
+    /* outstanding counts exactly the copies with b == path, so an idle slot
+     * (the common call) needs no scan. shortcut: a real detach scans the whole
+     * table; index copies per path if detaches become frequent. */
+    if (t->path[path].outstanding == 0) return;
+    for (int i = 0; i < RTX_SLOTS; i++)
         if (t->copies.e[i].used && t->copies.e[i].b == path) t->copies.e[i].b = -1;
     t->path[path].outstanding = 0;
 }

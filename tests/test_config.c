@@ -1913,6 +1913,8 @@ test_redundant_ports_ini_json(void)
     ASSERT_EQ_INT(b.redundant_ports_err, 1, "rports json bad token");
     redundant_ports_ini("4200,abc", &a);
     ASSERT_EQ_INT(a.redundant_ports_err, 1, "rports ini bad token");
+    ASSERT_EQ_STR(a.redundant_ports, "4200,abc", "rports ini bad value kept");
+    ASSERT_EQ_STR(b.redundant_ports, "4200,abc", "rports json bad value kept");
 
     redundant_ports_json("\"  4200  \"", &b);
     ASSERT_EQ_STR(b.redundant_ports, "4200", "rports json trimmed");
