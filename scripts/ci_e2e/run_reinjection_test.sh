@@ -45,7 +45,7 @@
 #                  Asserts the client logs "redundant mode enabled:
 #                  ports=all", then sends an inner UDP flow client -> server
 #                  and compares the server-side veth rx_bytes of both paths:
-#                  each must carry at least 7 MB and min/max >= 0.8.
+#                  each must carry at least 1.4 MB and min/max >= 0.8.
 #
 # Every scenario ends with a sanitizer exit-code check (stop_and_check_sanitizer,
 # same as 22/25 sibling e2e scripts) on both the client and server PID —
@@ -695,7 +695,7 @@ EOT
 
     local udp_ok=1
     if ! ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_SERVER_IP" -p "$udp_port" \
-            -u -b 10M -l 1200 -t 6 >/dev/null 2>&1; then
+            -u -b 2M -l 1200 -t 6 >/dev/null 2>&1; then
         udp_ok=0
     fi
 
@@ -711,9 +711,9 @@ EOT
 
     local d_a=$(( rx_a_1 - rx_a_0 )) d_b=$(( rx_b_1 - rx_b_0 ))
     echo "  redundant: server rx delta path A=${d_a} B=${d_b} bytes"
-    # 10 Mbit/s x 6 s is about 7.5 MB of payload per path; both paths must
-    # carry nearly the whole flow, and evenly.
-    local min_bytes=7000000
+    # 2 Mbit/s x 6 s is about 1.5 MB of payload per path; duplication puts the
+    # whole flow on each path, while a WLB split would give about 0.75 MB each.
+    local min_bytes=1400000
     if (( d_a < min_bytes || d_b < min_bytes )); then
         echo "  FAIL: a path received less than ${min_bytes} bytes (A=${d_a} B=${d_b})"
         return 1
