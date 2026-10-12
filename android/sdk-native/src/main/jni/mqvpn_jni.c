@@ -26,6 +26,7 @@
 
 #include <jni.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -333,13 +334,22 @@ jni_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
                                    (const jbyte *)info->assigned_ip6);
     }
 
+    /* Fields appended under ABI 3: read only when the caller's struct covers them. */
+    int has_sched = 0, sched = 0;
+    if (info->struct_size >= offsetof(mqvpn_tunnel_info_t, server_scheduler) +
+                                 sizeof(info->server_scheduler)) {
+        has_sched = info->has_server_scheduler;
+        sched = info->server_scheduler;
+    }
+
     /* void onNativeTunnelConfigReady(byte[] assignedIp, int prefix,
      *     byte[] assignedIp6, int prefix6, byte[] serverIp, int serverPrefix,
-     *     int mtu, boolean hasV6) */
+     *     int mtu, boolean hasV6, boolean hasServerScheduler, int serverScheduler) */
     (*env)->CallVoidMethod(
         env, ctx->callback_obj, ctx->mid_tunnel_config_ready, assigned_ip,
         (jint)info->assigned_prefix, assigned_ip6, (jint)info->assigned_prefix6,
-        server_ip, (jint)info->server_prefix, (jint)info->mtu, (jboolean)info->has_v6);
+        server_ip, (jint)info->server_prefix, (jint)info->mtu, (jboolean)info->has_v6,
+        (jboolean)(has_sched ? 1 : 0), (jint)sched);
 
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
@@ -675,6 +685,17 @@ JNI_FN(configSetScheduler)(JNIEnv *env, jobject thiz, jlong cfg, jint scheduler)
                                       (mqvpn_scheduler_t)scheduler);
 }
 
+/* configSetRequestServerScheduler(cfg, enable) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetRequestServerScheduler)(JNIEnv *env, jobject thiz, jlong cfg,
+                                        jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_request_server_scheduler((mqvpn_config_t *)(intptr_t)cfg,
+                                                     enable ? 1 : 0);
+}
+
 /* configSetLogLevel(cfg, level) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
@@ -852,7 +873,7 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         const char *name;
         const char *sig;
     } methods[] = {
-        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V"},
+        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZZI)V"},
         {&ctx->mid_tunnel_closed, "onNativeTunnelClosed", "(I)V"},
         {&ctx->mid_state_changed, "onNativeStateChanged", "(II)V"},
         {&ctx->mid_path_event, "onNativePathEvent", "(JI)V"},

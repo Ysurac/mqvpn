@@ -24,7 +24,13 @@ data class DemoSettings(
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: String = MqvpnConfig.HybridTcpMode.AUTO.name,
     val bluetoothPathEnabled: Boolean = false,
+    val scheduler: String = SchedulerChoice.DEFAULT.name,
 ) {
+    enum class SchedulerChoice { DEFAULT, MIN_RTT, WLB }
+
+    fun schedulerChoice(): SchedulerChoice =
+        SchedulerChoice.entries.firstOrNull { it.name == scheduler } ?: SchedulerChoice.DEFAULT
+
     fun reorderProfileEnum(): MqvpnConfig.ReorderProfile =
         MqvpnConfig.ReorderProfile.entries.firstOrNull { it.name == reorderProfile }
             ?: MqvpnConfig.ReorderProfile.CELLULAR_BOND
@@ -59,6 +65,11 @@ data class DemoSettings(
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeEnum(),
         bluetoothPathEnabled = bluetoothPathEnabled,
+        scheduler = when (schedulerChoice()) {
+            SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
+            else -> MqvpnConfig.Scheduler.MIN_RTT
+        },
+        requestServerScheduler = schedulerChoice() != SchedulerChoice.DEFAULT,
     )
 
     fun hostValid(): Boolean = serverAddress.trim().isNotBlank()
