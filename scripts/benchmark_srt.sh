@@ -427,7 +427,13 @@ echo "================================================================"
 echo "  SRT single-path vs mqvpn multipath benchmark (tier 1)"
 echo "  binary:   $MQVPN"
 echo "  suite:    ${SUITE}"
-echo "  duration: ${DURATION}s/run   scheduler: ${SCHEDULER}   reorder: ${SRT_BENCH_REORDER:-off}   lossmaxttl: ${SRT_BENCH_LOSSMAXTTL:-32}"
+# The redundant suite's mq-* arms name their client scheduler; SCHEDULER
+# only drives the default suite's mqvpn-* arms.
+SCHED_LABEL="$SCHEDULER"
+if [ "$SUITE" = "redundant" ]; then
+    SCHED_LABEL="per arm (client), wlb (server)"
+fi
+echo "  duration: ${DURATION}s/run   scheduler: ${SCHED_LABEL}   reorder: ${SRT_BENCH_REORDER:-off}   lossmaxttl: ${SRT_BENCH_LOSSMAXTTL:-32}"
 echo "  date:     $(date '+%Y-%m-%d %H:%M')"
 echo "================================================================"
 
@@ -506,7 +512,7 @@ SUMMARY="${OUT_DIR}/summary.md"
     echo "- kernel: $(uname -r)"
     echo "- srt-xtransmit: ${SRT_XTRANSMIT} ($("$SRT_XTRANSMIT" --version 2>/dev/null | head -1 || echo unknown))"
     echo "- mqvpn: $(git -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    echo "- duration: ${DURATION}s/run, scheduler ${SCHEDULER}, reorder ${SRT_BENCH_REORDER:-off}, lossmaxttl ${SRT_BENCH_LOSSMAXTTL:-32}, cc ${SRT_BENCH_CC:-bbr2}"
+    echo "- duration: ${DURATION}s/run, scheduler ${SCHED_LABEL}, reorder ${SRT_BENCH_REORDER:-off}, lossmaxttl ${SRT_BENCH_LOSSMAXTTL:-32}, cc ${SRT_BENCH_CC:-bbr2}"
     if [ "$SUITE" = "default" ]; then
         echo "- send rates: P1/C3/C4 = 25 Mbps, P2 = 120 Mbps (sender maxbw=0, inputbw=rate, oheadbw=25)"
         echo "- C3 gemodel: ${GEMODEL}"
