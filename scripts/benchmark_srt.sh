@@ -394,6 +394,9 @@ run_condition() {
         echo ""
         echo "== [${cond}] SKIPPED: SRT_BENCH_DURATION=${DURATION}s is shorter than one outage period (${FLAP#* }s)"
         BENCH_HAD_FAILURE=1
+        # Same rule as run_arm: an earlier invocation's CSVs must not pass
+        # for this one's results.
+        rm -f "${OUT_DIR}/raw/${cond}_"*.rcv.csv "${OUT_DIR}/raw/${cond}_"*.snd.csv
         return 0
     fi
 
