@@ -90,6 +90,7 @@ fun SettingsScreen(
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
     }
     var bluetoothPathEnabled by rememberSaveable { mutableStateOf(false) }
+    var schedulerName by rememberSaveable { mutableStateOf(DemoSettings.SchedulerChoice.DEFAULT.name) }
 
     // Seed during composition (not LaunchedEffect) to avoid a one-frame flash
     // of empty fields; seeded gate makes it write-once.
@@ -107,6 +108,7 @@ fun SettingsScreen(
         hybridEnabled = current.hybridEnabled
         hybridTcpModeName = current.hybridTcpMode
         bluetoothPathEnabled = current.bluetoothPathEnabled
+        schedulerName = current.scheduler
         seeded = true
     }
 
@@ -123,6 +125,7 @@ fun SettingsScreen(
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeName,
         bluetoothPathEnabled = bluetoothPathEnabled,
+        scheduler = schedulerName,
     )
 
     val fieldsEnabled = isEditable && !isSaving
@@ -311,6 +314,28 @@ fun SettingsScreen(
                     )
                 }
             }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            EnumDropdownField(
+                label = "Scheduler",
+                options = DemoSettings.SchedulerChoice.entries,
+                selected = draft.schedulerChoice(),
+                displayName = {
+                    when (it) {
+                        DemoSettings.SchedulerChoice.DEFAULT -> "Default"
+                        DemoSettings.SchedulerChoice.MIN_RTT -> "minrtt"
+                        DemoSettings.SchedulerChoice.WLB -> "wlb"
+                    }
+                },
+                onSelect = { schedulerName = it.name },
+                enabled = fieldsEnabled,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "minrtt: lowest delay. wlb: combines connections for speed. " +
+                    "The server follows only if it allows it.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             Spacer(modifier = Modifier.height(16.dp))
 
             Text("Hybrid Mode", style = MaterialTheme.typography.titleSmall)

@@ -86,6 +86,7 @@ static void cli_notify_conn_closed(mqvpn_client_t *c, cli_conn_t *conn);
 static void cli_connect_ip_scan_headers(cli_conn_t *conn,
                                         const xqc_http_headers_t *headers);
 static void cli_connect_ip_on_request_close(cli_conn_t *conn);
+static void client_release_path_hold(mqvpn_client_t *c);
 
 /* Look up xquic per-path metrics by path_id in a stats snapshot.
  *
@@ -137,6 +138,9 @@ struct cli_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+    /* Server's mqvpn-scheduler echo from the deciding 200 (0 = none reported). */
+    int has_peer_sched;
+    int peer_sched;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* H2: lwIP TCP-lane stack. Created at tunnel-ready (needs the resolved
@@ -260,6 +264,9 @@ struct mqvpn_client_s {
     int n_paths;
     int64_t next_path_handle;
     int multipath_ready; /* 1 after cb_ready_to_create_path */
+    /* 1 from a scheduler request until TUNNEL_READY: secondary paths stay PENDING so
+     * the server sees only path 0 when it swaps its scheduler. */
+    int hold_extra_paths;
     /* Path index used for the QUIC handshake. Rotated on each reconnect so a
      * dead first path doesn't trap the client forever. */
     int primary_path_idx;
@@ -813,6 +820,29 @@ mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c)
     return c->conn->peer_reorder_supported;
 }
 
+MQVPN_INTERNAL
+int
+mqvpn_client_test_conn_peer_sched(mqvpn_client_t *c, int *out_sched)
+{
+    if (!c || !c->conn) return -1;
+    if (out_sched) *out_sched = c->conn->peer_sched;
+    return c->conn->has_peer_sched;
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_set_hold_extra_paths(mqvpn_client_t *c, int v)
+{
+    c->hold_extra_paths = v;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_hold_extra_paths(mqvpn_client_t *c)
+{
+    return c->hold_extra_paths;
+}
+
 /* Test-only: drive the real CONNECT-IP final-close handling
  * (cli_connect_ip_on_request_close) on the attached test conn. */
 MQVPN_INTERNAL
@@ -1036,6 +1066,7 @@ static void
 client_reset_paths_for_reconnect(mqvpn_client_t *c)
 {
     c->multipath_ready = 0;
+    c->hold_extra_paths = 0;
     for (int i = 0; i < c->n_paths; i++) {
         client_reset_path_runtime(c, &c->paths[i]);
     }
@@ -1495,7 +1526,7 @@ cli_masque_start_tunnel(cli_conn_t *conn)
 
     char auth_value[300];
 
-    xqc_http_header_t hdrs[8] = {
+    xqc_http_header_t hdrs[9] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -1531,7 +1562,18 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 8};
+    if (c->config.request_server_scheduler) {
+        const char *sn = mqvpn_sched_to_name(c->config.scheduler);
+        hdrs[hdr_count].name =
+            (struct iovec){.iov_base = MQVPN_SCHED_HDR_NAME,
+                           .iov_len = sizeof(MQVPN_SCHED_HDR_NAME) - 1};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = (void *)sn, .iov_len = strlen(sn)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+        c->hold_extra_paths = 1;
+    }
+    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 9};
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
@@ -1928,6 +1970,7 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
     int final_seen = conn->tunnel_ok || conn->tunnel_notified;
     int decided_200 = 0;  /* THIS section carried the deciding 200 */
     int reorder_echo = 0; /* THIS section carried the mqvpn-reorder echo */
+    int sched_echo = -1;  /* THIS section's mqvpn-scheduler value, -1 = none/invalid */
 
     for (int i = 0; i < (int)headers->count; i++) {
         xqc_http_header_t *h = &headers->headers[i];
@@ -1965,6 +2008,10 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
                                        h->value.iov_base, h->value.iov_len)) {
             reorder_echo = 1;
         }
+        if (h->name.iov_len == sizeof(MQVPN_SCHED_HDR_NAME) - 1 &&
+            memcmp(h->name.iov_base, MQVPN_SCHED_HDR_NAME, h->name.iov_len) == 0) {
+            sched_echo = mqvpn_sched_from_name_n(h->value.iov_base, h->value.iov_len);
+        }
     }
 
     /* §19.2/§19.3: the server echoes mqvpn-reorder in its 200 response
@@ -1974,6 +2021,11 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
     if (decided_200 && reorder_echo) {
         conn->peer_reorder_supported = 1;
         LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
+    }
+    /* Same rule for the scheduler echo: deciding 200 section only. */
+    if (decided_200 && sched_echo >= 0) {
+        conn->has_peer_sched = 1;
+        conn->peer_sched = sched_echo;
     }
 }
 
@@ -2137,6 +2189,8 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
                 (uint8_t)mqvpn_tunnel_prefix6_effective(conn->assigned_prefix6);
             info.has_v6 = 1;
         }
+        info.has_server_scheduler = conn->has_peer_sched;
+        info.server_scheduler = conn->has_peer_sched ? conn->peer_sched : 0;
 
         /* Primary path is now validated by handshake — drive
          * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
@@ -2158,6 +2212,15 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         LOG_D(c, "firing tunnel_config_ready callback");
         c->cbs.tunnel_config_ready(&info, c->user_ctx);
         c->reconnect_attempts = 0;
+        if (c->config.request_server_scheduler) {
+            const char *req = mqvpn_sched_to_name(c->config.scheduler);
+            if (info.has_server_scheduler)
+                LOG_I(c, "server scheduler: %s (requested %s)",
+                      mqvpn_sched_to_name((mqvpn_scheduler_t)info.server_scheduler), req);
+            else
+                LOG_I(c, "server did not report its scheduler (requested %s)", req);
+        }
+        client_release_path_hold(c);
     }
     return 0;
 }
@@ -2528,6 +2591,16 @@ activate_pending_paths(mqvpn_client_t *c)
     }
 }
 
+/* End the post-request hold (TUNNEL_READY): secondary paths may now activate.
+ * If multipath_ready is still 0, cb_ready_to_create_path activates later. */
+static void
+client_release_path_hold(mqvpn_client_t *c)
+{
+    if (!c->hold_extra_paths) return;
+    c->hold_extra_paths = 0;
+    if (c->multipath_ready && c->config.multipath) activate_pending_paths(c);
+}
+
 /* ─── Multipath callbacks ─── */
 
 static void
@@ -2538,9 +2611,30 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     mqvpn_client_t *c = conn->client;
 
     c->multipath_ready = 1;
-    if (!c->config.multipath) return;
+    if (!c->config.multipath || c->hold_extra_paths) return;
 
     activate_pending_paths(c);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_reset_paths_for_reconnect(mqvpn_client_t *c)
+{
+    client_reset_paths_for_reconnect(c);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_ready_to_create_path(mqvpn_client_t *c)
+{
+    cb_ready_to_create_path(NULL, c->conn);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_release_path_hold(mqvpn_client_t *c)
+{
+    client_release_path_hold(c);
 }
 
 /* PR4 — path_recreate_backoff relocated to path_state_machine.c
@@ -3436,7 +3530,7 @@ mqvpn_client_add_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc,
     path_on_event(c, p, PATH_EVENT_ADD, &add_ctx);
 
     if (outcome) *outcome = MQVPN_ADD_PATH_OK;
-    if (c->multipath_ready && c->config.multipath && c->conn) {
+    if (c->multipath_ready && c->config.multipath && c->conn && !c->hold_extra_paths) {
         activate_pending_paths(c);
         if (outcome) *outcome = add_path_outcome_from_state(p->state);
     }

@@ -52,6 +52,9 @@ object NativeBridge {
     /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN) */
     external fun configSetScheduler(cfg: Long, scheduler: Int): Int
 
+    /** mqvpn_config_set_request_server_scheduler(cfg, enable) */
+    external fun configSetRequestServerScheduler(cfg: Long, enable: Boolean): Int
+
     /**
      * mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR). On success it
      * also stores the process-wide threshold of the library's global log lines
