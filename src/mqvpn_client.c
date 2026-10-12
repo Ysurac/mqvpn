@@ -143,6 +143,7 @@ struct cli_conn_s {
      * cfg.redundant is set, freed on conn teardown. */
     mqvpn_redundant_tx_t *redundant_tx;
     uint64_t redundant_refresh_us; /* last 100 ms srtt/slot refresh */
+    int redundant_full_warned; /* "tracking table full" logged, until select recovers */
     /* Test seam: NULL in production (the real xquic sends). */
     mqvpn_test_send_fn test_send;
     void *test_send_ud;
@@ -2934,16 +2935,16 @@ cli_start_connection(mqvpn_client_t *c)
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
 
+    if (c->config.redundant) {
+        conn->redundant_tx = mqvpn_redundant_tx_new();
+        if (!conn->redundant_tx)
+            LOG_W(c, "redundant mode alloc failed; sending without redundancy");
+    }
     /* §5: create the reorder shim engines when locally enabled. TX stamping
      * stays gated on peer_reorder_supported (set later by negotiation), so until
      * then everything is sent RAW. RX is created so we can accept stamped
      * datagrams as soon as the peer advertises support. The hash seeds need not
      * match the peer (§6.2); derive them from wall-clock time + conn_id. */
-    if (c->config.redundant) {
-        conn->redundant_tx = mqvpn_redundant_tx_new();
-        if (!conn->redundant_tx)
-            LOG_W(c, "redundant mode alloc failed; sending on one path");
-    }
     if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
         conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
@@ -3731,7 +3732,7 @@ hybrid_tcp_syn_policy(const mqvpn_client_t *c)
 /* Reorder STAMP/RAW/DROP_MTU decision + both ICMP PTB paths (stamped
  * over-MTU and RAW over-MTU). Computes udp_mss internally. Caller must
  * zero-initialize *do_stamp, *redundant and *peek: early returns (drops before the gate)
- * leave both untouched; the gate itself sets *do_stamp from the verdict and
+ * leave all three untouched; the gate itself sets *do_stamp from the verdict and
  * fills peek->hdr only on STAMP. */
 static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
@@ -3962,6 +3963,13 @@ tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, si
     uint64_t ids[MQVPN_MAX_PATHS];
     int nu = redundant_usable_paths(c, conn, usable);
     int k = nu ? mqvpn_redundant_tx_select(conn->redundant_tx, usable, nu, sel) : 0;
+    if (nu && !k) { /* a usable path always yields a pick unless the tables are full */
+        if (!conn->redundant_full_warned)
+            LOG_W(c, "redundant mode: tracking table full; sending without redundancy");
+        conn->redundant_full_warned = 1;
+    } else if (k) {
+        conn->redundant_full_warned = 0;
+    }
     int accepted = 0, eagain = 0;
     for (int j = 0; j < k; j++) {
         uint64_t id = 0;
