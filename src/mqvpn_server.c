@@ -920,8 +920,12 @@ svr_masque_send_409(xqc_h3_request_t *h3_request)
     return xqc_h3_request_send_headers(h3_request, &hdrs, 1) < 0 ? -1 : 0;
 }
 
+static void svr_negotiate_scheduler(mqvpn_server_t *s, svr_conn_t *conn,
+                                    const svr_req_headers_t *hdrs);
+
 static int
-svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
+svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream,
+                         const svr_req_headers_t *req_hdrs)
 {
     svr_conn_t *conn = stream->conn;
     mqvpn_server_t *s = conn->server;
@@ -932,6 +936,10 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream)
         svr_masque_send_403(h3_request);
         return -1;
     }
+
+    /* Only a connection that gets the 200 may swap its scheduler; the echo
+     * below carries the post-swap value. */
+    svr_negotiate_scheduler(s, conn, req_hdrs);
 
     /* 1. Send 200 response headers */
     xqc_http_header_t resp_hdrs[4] = {
@@ -1474,10 +1482,8 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
      * tunnel that did not negotiate it. */
     stream->conn->peer_reorder_supported = hdrs->has_reorder_hdr;
 
-    svr_negotiate_scheduler(s, stream->conn, hdrs);
-
     LOG_I(s, "Extended CONNECT for connect-ip received");
-    if (svr_masque_send_response(h3_request, stream) < 0) return -1;
+    if (svr_masque_send_response(h3_request, stream, hdrs) < 0) return -1;
     return 0;
 }
 
