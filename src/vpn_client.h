@@ -39,7 +39,7 @@ typedef struct mqvpn_client_cfg_s {
     int reinj_hard_deadline_ms;        /* deadline mode */
     int reinj_deadline_lower_bound_ms; /* deadline mode */
     int redundant;                     /* send UDP on every path */
-    uint16_t redundant_ports[16];      /* MQVPN_REDUNDANT_MAX_PORTS; empty = all UDP */
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS]; /* empty = all UDP */
     int n_redundant_ports;
     mqvpn_reorder_config_t
         reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */

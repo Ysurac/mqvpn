@@ -264,7 +264,7 @@ arm_setup() {
         mqvpn-2path) run_vpn "$SCHEDULER" bench-a0 bench-b0 ;;
         mqvpn-1path) run_vpn "$SCHEDULER" bench-a0 ;;
         mq-*)
-            # mq-<scheduler>-<reinjection>; scheduler names contain no '-'
+            # mq-<scheduler>-<reinjection|redundant>; scheduler names contain no '-'
             local spec="${1#mq-}"
             VPN_SERVER_SCHED=wlb VPN_REINJ="${spec#*-}" \
                 run_vpn "${spec%%-*}" bench-a0 bench-b0

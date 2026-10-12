@@ -784,10 +784,10 @@ JNI_FN(configSetRedundant)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable
 {
     (void)thiz;
     jsize n = ports ? (*env)->GetArrayLength(env, ports) : 0;
-    if (n > 16) return MQVPN_ERR_INVALID_ARG;
-    uint16_t narrowed[16];
+    if (n > MQVPN_REDUNDANT_MAX_PORTS) return MQVPN_ERR_INVALID_ARG;
+    uint16_t narrowed[MQVPN_REDUNDANT_MAX_PORTS];
     if (n > 0) {
-        jint raw[16];
+        jint raw[MQVPN_REDUNDANT_MAX_PORTS];
         (*env)->GetIntArrayRegion(env, ports, 0, n, raw);
         if ((*env)->ExceptionCheck(env)) return MQVPN_ERR_INVALID_ARG;
         for (jsize i = 0; i < n; i++) {

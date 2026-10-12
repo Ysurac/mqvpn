@@ -3711,8 +3711,9 @@ TEST(redundant_tables_full_fall_back)
     rt_stub_init(&s, 1);
     uint8_t pkt[100];
     rt_udp_pkt(pkt, sizeof(pkt), 5000);
-    /* Copies are never notified, so they stay tracked: 16384 copies = 8192
-     * packets of two copies. */
+    /* Copies are never notified, so they stay tracked. Once the path has
+     * about 300 outstanding (pps is 0, so the floor limit applies) the guard
+     * sends one copy per packet, so the copy table fills at 16384 ids. */
     uint64_t sent = 0;
     while (s.next_id <= 16384) {
         ASSERT_EQ(mqvpn_client_test_redundant_send(c, pkt, sizeof(pkt), rt_send, &s),
