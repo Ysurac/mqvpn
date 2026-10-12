@@ -104,6 +104,8 @@ cleanup() {
     teardown_netns
     if [ "$BENCH_HAD_FAILURE" -ne 0 ]; then
         echo "NOTE: at least one run failed — keeping ${WORK_DIR} for diagnosis"
+    elif [ "${SRT_BENCH_KEEP:-0}" = "1" ]; then
+        echo "NOTE: SRT_BENCH_KEEP=1 — keeping ${WORK_DIR} (per-run client logs)"
     else
         rm -rf "$WORK_DIR"
     fi
@@ -310,6 +312,10 @@ run_arm() {
         return 0
     fi
     arm_teardown "$arm"
+    # SRT_BENCH_KEEP=1: keep each run's client log (the next run overwrites it)
+    if [ "${SRT_BENCH_KEEP:-0}" = "1" ] && [ -f "${WORK_DIR}/client.log" ]; then
+        mv "${WORK_DIR}/client.log" "${WORK_DIR}/${run_id}.client.log"
+    fi
 
     local raw="${OUT_DIR}/raw"
     local sent recvu rcvdrop snddrop retrans rtt rate belated

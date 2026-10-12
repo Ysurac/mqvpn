@@ -93,6 +93,8 @@ generate_cert() {
 # run_vpn <scheduler> <path-iface>...
 # Starts server+client, waits for the tunnel, pings through it.
 # VPN_SERVER_SCHED overrides the server's scheduler (default: <scheduler>).
+# SRT_BENCH_CLIENT_LOG sets the client's --log-level (default info; debug
+# exposes xquic's per-path state, e.g. path_bw, at a cost in log volume).
 # SRT_BENCH_REORDER=on enables the tunnel reorder shim on both sides.
 # Default OFF: under sustained real loss the shim head-of-line blocks on
 # gaps that will never fill (measured 87-93% stream loss vs ~1% without);
@@ -156,7 +158,7 @@ run_vpn() {
         --insecure \
         --scheduler "$scheduler" \
         "${client_args[@]}" \
-        --log-level info >"${WORK_DIR}/client.log" 2>&1 &
+        --log-level "${SRT_BENCH_CLIENT_LOG:-info}" >"${WORK_DIR}/client.log" 2>&1 &
     CLIENT_PID=$!
     sleep 5
     if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
