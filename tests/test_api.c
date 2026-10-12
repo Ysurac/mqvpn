@@ -385,13 +385,23 @@ TEST(config_load_json_reinjection)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_json_reinjection_dgram_rejected)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"reinjection\":\"dgram\"}"),
+              MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_reinjection)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_DEADLINE), MQVPN_OK);
     ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_DEADLINE);
-    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_DGRAM), MQVPN_OK);
-    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_DGRAM);
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_DEADLINE), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_reinjection(cfg, (mqvpn_reinjection_t)3),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_DEADLINE); /* previous value kept */
     ASSERT_EQ(mqvpn_config_set_reinjection(cfg, MQVPN_REINJ_OFF), MQVPN_OK);
     ASSERT_EQ(cfg->reinjection, MQVPN_REINJ_OFF);
     ASSERT_EQ(mqvpn_config_set_reinjection(cfg, (mqvpn_reinjection_t)99),
@@ -3398,6 +3408,7 @@ main(void)
     run_config_set_scheduler();
     run_config_set_cc();
     run_config_load_json_reinjection();
+    run_config_json_reinjection_dgram_rejected();
     run_config_set_reinjection();
     run_config_set_reinjection_deadline_params();
     run_config_set_init_max_path_id();

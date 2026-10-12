@@ -127,7 +127,7 @@ throughput vs WLB across loss rates 1%–10%.
 |----------|-------------|
 | General use, bandwidth aggregation | **WLB + [Hybrid Mode](./hybrid-mode)** |
 | Inner UDP needing single-path delivery | **`wlb_udp_pin`** |
-| Latency-sensitive applications | MinRTT (trades off bandwidth aggregation; if latency matters most, consider adding Reinjection (`dgram`)) |
+| Latency-sensitive applications | MinRTT (trades off bandwidth aggregation; for live streams, consider [redundant mode](#redundant-mode)) |
 | Combinations of poor-quality links | MinRTT + [Hybrid Mode](./hybrid-mode) (consider adding Reinjection or the reorder buffer as needed) |
 | Lossy primary + reliable standby (experimental) | `backup_fec` |
 
@@ -144,14 +144,13 @@ Ref: [XLINK (SIGCOMM 2021)](https://conferences.sigcomm.org/sigcomm/2021/files/p
 
 ```ini
 [Multipath]
-Reinjection = deadline   # off | deadline | idle | dgram
+Reinjection = deadline   # off | deadline | idle
 ```
 
 | Mode | What gets copied | Use it for |
 |------|------------------|------------|
 | `deadline` | Stream-lane (TCP-side) data still awaiting delivery confirmation that is running late, plus everything sent on a link judged unhealthy | Insurance for tunnels running [Hybrid Mode](./hybrid-mode), which carries TCP over QUIC streams: does nothing (and costs nothing) most of the time, and minimizes the hiccup at the moment a link suddenly goes bad |
 | `idle` | Recent still-unconfirmed stream data (TCP side only), in moments when the tunnel has nothing else to send | Low-cost smoothing of occasional hiccups in interactive use (SSH, browsing). No tuning needed |
-| `dgram` | Every packet on the datagram lane, always — hybrid-mode TCP is not copied | Tunnels dedicated to real-time traffic (VoIP, gaming): a lost packet or a dying link no longer causes dropouts or lag spikes. Note: since everything is always copied, this trades off against bandwidth aggregation |
 
 **Why a hiccup can happen at all**: when a link goes bad, the scheduler does
 steer new data to the healthy link — but data already sent on the failing
@@ -175,10 +174,6 @@ Notes:
 - Reinjection is sender-side: each side's setting protects the traffic it
   *sends*, so enable it on the **server** to protect download traffic (and on
   the client for upload).
-- `dgram` uses double the bandwidth for that traffic and is not recommended
-  for mixed tunnels: it duplicates *all* inner UDP — including HTTP/3 video
-  streams — so the usable speed of the datagram lane drops to a single
-  path's capacity.
 - Per-path duplicated bytes are reported as `reinject_tx_bytes` in the
   control API `get_status` response.
 - Requires two or more active paths; silently inactive otherwise.

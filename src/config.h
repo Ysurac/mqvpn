@@ -68,7 +68,7 @@ typedef struct mqvpn_file_config_s {
     char scheduler[16];
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
-    char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
+    char reinjection[16];                    /* "off" | "deadline" | "idle" */
     int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */
     int reinjection_hard_deadline_ms;        /* deadline mode only; [1,60000] */
     int reinjection_deadline_lower_bound_ms; /* deadline mode only; [1,60000] */

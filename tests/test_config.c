@@ -2203,6 +2203,7 @@ test_sched_cc_name_roundtrip(void)
     ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name("bogus"), -1, "reinj from_name(bogus)");
     ASSERT_EQ_INT(mqvpn_reinj_from_name(NULL), -1, "reinj from_name(NULL)");
+    ASSERT_EQ_INT(mqvpn_reinj_from_name("dgram"), -1, "reinj from_name(dgram)");
 }
 
 int

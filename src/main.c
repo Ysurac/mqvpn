@@ -491,7 +491,7 @@ main(int argc, char *argv[])
     if (reinj_lookup < 0) {
         fprintf(stderr,
                 "warning: [Multipath] Reinjection '%s' not recognized "
-                "(expected 'off', 'deadline', 'idle', or 'dgram'); using 'off'\n",
+                "(expected 'off', 'deadline', or 'idle'); using 'off'\n",
                 file_cfg.reinjection);
     } else {
         reinjection = reinj_lookup;

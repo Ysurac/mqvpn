@@ -217,7 +217,6 @@ typedef enum {
     MQVPN_REINJ_OFF = 0,
     MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
     MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
-    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
 } mqvpn_reinjection_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).

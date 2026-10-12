@@ -2852,14 +2852,9 @@ cli_start_connection(mqvpn_client_t *c)
             LOG_W(c, "reinjection mode=deadline protects only stream traffic; hybrid "
                      "lane is disabled, effect limited to control streams");
         }
-    } else if (c->config.reinjection == MQVPN_REINJ_IDLE ||
-               c->config.reinjection == MQVPN_REINJ_DGRAM) {
+    } else if (c->config.reinjection == MQVPN_REINJ_IDLE) {
         LOG_I(c, "reinjection enabled: mode=%s",
               mqvpn_reinj_to_name(c->config.reinjection));
-        if (c->config.reinjection == MQVPN_REINJ_DGRAM) {
-            LOG_I(c, "reinjection mode=dgram duplicates every datagram: datagram-lane "
-                     "goodput is capped at one path's capacity");
-        }
     }
 
     /* One owner of the certificate decision, readable from the config alone:
