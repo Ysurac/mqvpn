@@ -178,6 +178,44 @@ Notes:
   control API `get_status` response.
 - Requires two or more active paths; silently inactive otherwise.
 
+## Redundant Mode
+
+Redundant mode sends every outgoing UDP packet over every connected path at
+once. If one connection drops for a few seconds, the same packets are already
+arriving over the others, so a live stream does not stall. Off by default.
+
+```ini
+[Multipath]
+Redundant = on
+RedundantPorts = 4200    # optional: only UDP to these destination ports
+```
+
+On Android, turn on the **Redundant Mode** switch (the port list is the
+**Redundant Ports** field).
+
+- **When to use it**: live streaming such as SRT over phone connections,
+  especially with a short latency setting, and connections that drop out for a
+  few seconds at a time.
+- **What it costs**: the traffic it covers uses as much data as the number of
+  paths in use (twice with two paths, three times with three). Set
+  `RedundantPorts` to cover only your stream, for example `4200`, or a
+  comma-separated list such as `4200,9000` (up to 16 ports). Without it, all
+  UDP is duplicated. TCP is never duplicated by this mode.
+- **Duplicates reach the application**: mqvpn does not remove the extra
+  copies, so the receiving application sees every packet more than once. SRT
+  and similar protocols discard duplicates; check that your application does
+  before using this mode for other UDP traffic.
+- **Upload only**: it applies to what the client sends. Download traffic is
+  unchanged. The server ignores the setting.
+- A path that is still starting up or has gone down gets no copies; if only
+  one path is usable, packets are sent once on it.
+- Redundant mode has no effect with `Scheduler = backup_fec`, because the
+  second path stays on standby.
+
+This replaces the former `Reinjection = dgram` mode, which has been removed.
+A config file that still says `dgram` prints a warning and runs with
+`Reinjection = off`; use `Redundant = on` instead.
+
 ## Path Weighting
 
 WLB automatically updates path weights from live transport metrics. You do not need to configure weights manually.
