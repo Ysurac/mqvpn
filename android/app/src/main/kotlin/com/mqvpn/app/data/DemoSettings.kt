@@ -21,6 +21,8 @@ data class DemoSettings(
     val reorderEnabled: Boolean = false,
     val reorderProfile: String = MqvpnConfig.ReorderProfile.CELLULAR_BOND.name,
     val reorderPorts: String = "443",
+    val redundantEnabled: Boolean = false,
+    val redundantPorts: String = "",
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: String = MqvpnConfig.HybridTcpMode.AUTO.name,
     val bluetoothPathEnabled: Boolean = false,
@@ -37,6 +39,22 @@ data class DemoSettings(
         reorderPorts.split(",")
             .mapNotNull { it.trim().toIntOrNull() }
             .filter { it in 1..65535 }
+
+    private fun redundantTokens(): List<String> = redundantPorts.split(",").map { it.trim() }
+
+    /** Distinct valid ports; call only when [redundantPortsValid]. */
+    fun parsedRedundantPorts(): List<Int> =
+        if (redundantPorts.isBlank()) emptyList()
+        else redundantTokens().mapNotNull { it.toIntOrNull() }.filter { it in 1..65535 }.distinct()
+
+    /** Same rule as the C parser: all-or-nothing, never degrades to "all UDP". */
+    fun redundantPortsValid(): Boolean {
+        if (redundantPorts.isBlank()) return true
+        val t = redundantPorts.trim()
+        val tokens = redundantTokens()
+        return t.length < 255 && tokens.size <= MAX_REDUNDANT_PORTS &&
+            tokens.all { (it.toIntOrNull() ?: -1) in 1..65535 }
+    }
 
     fun distinctValidPortCount(): Int = parsedReorderPorts().distinct().size
 
@@ -56,6 +74,8 @@ data class DemoSettings(
         reorderEnabled = reorderEnabled,
         reorderProfile = reorderProfileEnum(),
         reorderPorts = parsedReorderPorts(),
+        redundantEnabled = redundantEnabled,
+        redundantPorts = parsedRedundantPorts(),
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeEnum(),
         bluetoothPathEnabled = bluetoothPathEnabled,
@@ -67,7 +87,8 @@ data class DemoSettings(
 
     fun reorderPortsValid(): Boolean = !reorderEnabled || parsedReorderPorts().isNotEmpty()
 
-    fun isValid(): Boolean = hostValid() && portValid() && reorderPortsValid()
+    fun isValid(): Boolean = hostValid() && portValid() && reorderPortsValid() &&
+        (!redundantEnabled || redundantPortsValid())
 
     companion object {
         /**
@@ -78,5 +99,8 @@ data class DemoSettings(
          * `MQVPN_REORDER_MAX_RULES` if either side changes.
          */
         const val MAX_REORDER_PORTS = 16
+
+        /** Mirrors `MQVPN_REDUNDANT_MAX_PORTS` in libmqvpn. */
+        const val MAX_REDUNDANT_PORTS = 16
     }
 }

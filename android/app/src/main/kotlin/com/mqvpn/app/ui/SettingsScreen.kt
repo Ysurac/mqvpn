@@ -85,6 +85,8 @@ fun SettingsScreen(
         mutableStateOf(MqvpnConfig.ReorderProfile.CELLULAR_BOND.name)
     }
     var reorderPorts by rememberSaveable { mutableStateOf("") }
+    var redundantEnabled by rememberSaveable { mutableStateOf(false) }
+    var redundantPorts by rememberSaveable { mutableStateOf("") }
     var hybridEnabled by rememberSaveable { mutableStateOf(false) }
     var hybridTcpModeName by rememberSaveable {
         mutableStateOf(MqvpnConfig.HybridTcpMode.AUTO.name)
@@ -104,6 +106,8 @@ fun SettingsScreen(
         reorderEnabled = current.reorderEnabled
         reorderProfileName = current.reorderProfile
         reorderPorts = current.reorderPorts
+        redundantEnabled = current.redundantEnabled
+        redundantPorts = current.redundantPorts
         hybridEnabled = current.hybridEnabled
         hybridTcpModeName = current.hybridTcpMode
         bluetoothPathEnabled = current.bluetoothPathEnabled
@@ -120,6 +124,8 @@ fun SettingsScreen(
         reorderEnabled = reorderEnabled,
         reorderProfile = reorderProfileName,
         reorderPorts = reorderPorts,
+        redundantEnabled = redundantEnabled,
+        redundantPorts = redundantPorts,
         hybridEnabled = hybridEnabled,
         hybridTcpMode = hybridTcpModeName,
         bluetoothPathEnabled = bluetoothPathEnabled,
@@ -308,6 +314,40 @@ fun SettingsScreen(
                         "Invalid ports ignored: " + invalidTokens.joinToString(", "),
                         style = MaterialTheme.typography.bodySmall,
                         color = WarningColor,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            LabeledSwitchRow(
+                label = "Redundant Mode",
+                checked = redundantEnabled,
+                onCheckedChange = { redundantEnabled = it },
+                enabled = fieldsEnabled,
+            )
+            Text(
+                "Sends each UDP packet over every connection at once, so a dropped connection " +
+                    "does not interrupt live streams. Uses as much mobile data as the number of " +
+                    "connections (twice with two).",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (redundantEnabled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = redundantPorts,
+                    onValueChange = { redundantPorts = it },
+                    label = { Text("Redundant Ports (blank = all UDP)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = fieldsEnabled,
+                    singleLine = true,
+                    isError = !draft.redundantPortsValid(),
+                )
+                if (!draft.redundantPortsValid()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Enter up to ${DemoSettings.MAX_REDUNDANT_PORTS} ports (1-65535), separated by commas",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
