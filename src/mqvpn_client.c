@@ -51,6 +51,7 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#include "redundant_tx.h"
 
 /* ─── Constants ─── */
 
@@ -137,6 +138,14 @@ struct cli_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+
+    /* Redundant mode (client TX): created on connect when
+     * cfg.redundant is set, freed on conn teardown. */
+    mqvpn_redundant_tx_t *redundant_tx;
+    uint64_t redundant_refresh_us; /* last 100 ms srtt/slot refresh */
+    /* Test seam: NULL in production (the real xquic sends). */
+    mqvpn_test_send_fn test_send;
+    void *test_send_ud;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* H2: lwIP TCP-lane stack. Created at tunnel-ready (needs the resolved
@@ -2417,28 +2426,39 @@ cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
     }
 }
 
+/* Shared by the xquic callbacks and the test hook. With redundant mode the
+ * counters stay "one per original": the tracker returns 1 on the first ack /
+ * the last loss of an original, -1 for an ordinary (untracked) datagram. */
+static void
+cli_dgram_notify(cli_conn_t *conn, uint64_t id, int acked)
+{
+    if (!conn) return;
+    if (conn->redundant_tx) {
+        int r = acked ? mqvpn_redundant_tx_on_acked(conn->redundant_tx, id)
+                      : mqvpn_redundant_tx_on_lost(conn->redundant_tx, id);
+        if (r != 1 && r != -1) return;
+    }
+    if (acked) {
+        conn->dgram_acked_cnt++;
+        conn->client->dgram_acked++;
+    } else {
+        conn->dgram_lost_cnt++;
+        conn->client->dgram_lost++;
+    }
+}
+
 static void
 cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
     (void)h;
-    (void)id;
-    cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) {
-        conn->dgram_acked_cnt++;
-        conn->client->dgram_acked++;
-    }
+    cli_dgram_notify((cli_conn_t *)ud, id, 1);
 }
 
 static int
 cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
     (void)h;
-    (void)id;
-    cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) {
-        conn->dgram_lost_cnt++;
-        conn->client->dgram_lost++;
-    }
+    cli_dgram_notify((cli_conn_t *)ud, id, 0);
     return 0;
 }
 
@@ -2755,6 +2775,8 @@ cli_conn_destroy(mqvpn_client_t *c)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+    mqvpn_redundant_tx_free(conn->redundant_tx);
+    conn->redundant_tx = NULL;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Teardown contract: tcp_lane BEFORE lwip_ctx — flow teardown will
@@ -2857,6 +2879,17 @@ cli_start_connection(mqvpn_client_t *c)
               mqvpn_reinj_to_name(c->config.reinjection));
     }
 
+    if (c->config.redundant) {
+        char ports[MQVPN_REDUNDANT_MAX_PORTS * 6 + 4] = "all";
+        for (int i = 0, o = 0; i < c->config.n_redundant_ports; i++)
+            o += snprintf(ports + o, sizeof(ports) - (size_t)o, "%s%u", i ? "," : "",
+                          (unsigned)c->config.redundant_ports[i]);
+        LOG_I(c, "redundant mode enabled: ports=%s", ports);
+        if (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
+            LOG_W(c, "redundant mode has no effect with scheduler backup_fec (the "
+                     "second path stays on standby)");
+    }
+
     /* One owner of the certificate decision, readable from the config alone:
      * insecure → none (xquic never calls cb_cert_verify); verifier → the
      * platform, on every handshake (APP_VERIFY); otherwise the library's root
@@ -2906,6 +2939,11 @@ cli_start_connection(mqvpn_client_t *c)
      * then everything is sent RAW. RX is created so we can accept stamped
      * datagrams as soon as the peer advertises support. The hash seeds need not
      * match the peer (§6.2); derive them from wall-clock time + conn_id. */
+    if (c->config.redundant) {
+        conn->redundant_tx = mqvpn_redundant_tx_new();
+        if (!conn->redundant_tx)
+            LOG_W(c, "redundant mode alloc failed; sending on one path");
+    }
     if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
         conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
@@ -3692,12 +3730,13 @@ hybrid_tcp_syn_policy(const mqvpn_client_t *c)
 
 /* Reorder STAMP/RAW/DROP_MTU decision + both ICMP PTB paths (stamped
  * over-MTU and RAW over-MTU). Computes udp_mss internally. Caller must
- * zero-initialize *do_stamp and *peek: early returns (drops before the gate)
+ * zero-initialize *do_stamp, *redundant and *peek: early returns (drops before the gate)
  * leave both untouched; the gate itself sets *do_stamp from the verdict and
  * fills peek->hdr only on STAMP. */
 static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
-                uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek)
+                uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek,
+                int *redundant)
 {
     /* Hybrid H2: classify, then route TCP-lane candidates through the
      * sticky per-flow table — feed lwIP or fall to RAW. `break` out of the
@@ -3850,9 +3889,20 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
         udp_mss = xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
 
     size_t ptb_mtu = 0;
-    mqvpn_rgate_verdict_t rv = mqvpn_rgate_decide(
-        conn->reorder_tx, conn->peer_reorder_supported, c->config.reorder.mode, pkt, len,
-        client_now_us(c), (uint32_t)udp_mss, peek, &ptb_mtu);
+    mqvpn_rgate_verdict_t rv;
+    if (conn->redundant_tx &&
+        mqvpn_redundant_match(c->config.redundant_ports, c->config.n_redundant_ports, pkt,
+                              len)) {
+        /* Redundant packets go out RAW on every path: no stamp, no reorder
+         * peek, so no sequence is consumed or committed. */
+        *redundant = 1;
+        rv = mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, len, client_now_us(c),
+                                (uint32_t)udp_mss, peek, &ptb_mtu);
+    } else {
+        rv = mqvpn_rgate_decide(conn->reorder_tx, conn->peer_reorder_supported,
+                                c->config.reorder.mode, pkt, len, client_now_us(c),
+                                (uint32_t)udp_mss, peek, &ptb_mtu);
+    }
     *do_stamp = (rv == MQVPN_RGATE_STAMP);
     if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
         int addr_ok = ip_ver == 4 ? conn->addr_assigned : conn->addr6_assigned;
@@ -3865,11 +3915,82 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
     return TUN_INGRESS_PROCEED;
 }
 
+/* One xquic datagram send. path_id UINT64_MAX = the ordinary scheduled send
+ * (with the flow-hash hint), anything else pins the copy to that xquic path.
+ * conn->test_send (tests only) replaces both. */
+static xqc_int_t
+tun_xqc_send(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *buf, size_t n,
+             uint64_t *dgram_id, uint32_t flow_hash, uint64_t path_id)
+{
+    if (conn->test_send)
+        return conn->test_send(conn->test_send_ud, path_id, buf, n, dgram_id);
+    if (path_id != UINT64_MAX)
+        return xqc_h3_ext_datagram_send_on_path(
+            conn->h3_conn, (void *)buf, n, dgram_id,
+            mqvpn_dgram_qos_level(c->config.scheduler), path_id);
+    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(conn->h3_conn), flow_hash);
+    return xqc_h3_ext_datagram_send(conn->h3_conn, (void *)buf, n, dgram_id,
+                                    mqvpn_dgram_qos_level(c->config.scheduler));
+}
+
+/* Usable slots for a redundant copy; also keeps the tracker's slot bindings in
+ * step (the FSM owns liveness, so this is the one place it is read). Returns
+ * the count written to out[]. */
+static int
+redundant_usable_paths(mqvpn_client_t *c, cli_conn_t *conn, int *out)
+{
+    int n = 0;
+    for (int i = 0; i < c->n_paths; i++) {
+        const path_entry_t *p = &c->paths[i];
+        if (p->xquic_path_live && p->state == PATH_LC_ACTIVE) {
+            mqvpn_redundant_tx_bind_path(conn->redundant_tx, i, p->xqc_path_id);
+            out[n++] = i;
+        } else {
+            mqvpn_redundant_tx_detach_path(conn->redundant_tx, i);
+        }
+    }
+    return n;
+}
+
+/* Send one framed redundant packet on every selected path. Returns 1 when at
+ * least one copy was accepted (counted), -1 for backpressure (latched), 0 to
+ * fall back to the ordinary send. */
+static int
+tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, size_t n)
+{
+    int usable[MQVPN_MAX_PATHS], sel[MQVPN_MAX_PATHS], paths[MQVPN_MAX_PATHS];
+    uint64_t ids[MQVPN_MAX_PATHS];
+    int nu = redundant_usable_paths(c, conn, usable);
+    int k = nu ? mqvpn_redundant_tx_select(conn->redundant_tx, usable, nu, sel) : 0;
+    int accepted = 0, eagain = 0;
+    for (int j = 0; j < k; j++) {
+        uint64_t id = 0;
+        xqc_int_t r =
+            tun_xqc_send(c, conn, frame, n, &id, 0, c->paths[sel[j]].xqc_path_id);
+        if (r >= 0) {
+            ids[accepted] = id;
+            paths[accepted++] = sel[j];
+        } else if (r == -XQC_EAGAIN) {
+            eagain++;
+        }
+    }
+    mqvpn_redundant_tx_commit(conn->redundant_tx, ids, paths, accepted, client_now_us(c));
+    if (accepted) {
+        c->dgram_sent++;
+        return 1;
+    }
+    if (eagain) {
+        c->backpressure = 1; /* as the ordinary send: this packet is dropped */
+        return -1;
+    }
+    return 0;
+}
+
 /* MASQUE framing + flow-hash hint + datagram send + reorder commit +
  * backpressure latch. Returns the mqvpn error code. */
 static int
 tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
-                  int do_stamp, mqvpn_reorder_tx_peek_t *peek)
+                  int do_stamp, mqvpn_reorder_tx_peek_t *peek, int redundant)
 {
     /* On STAMP, prepend the 8-byte reorder header to the inner IP packet; the
      * framed payload is then [hdr || pkt]. On RAW, frame the bare packet. */
@@ -3895,12 +4016,17 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
         return MQVPN_ERR_ENGINE;
     }
 
+    if (redundant) {
+        int rr = tun_send_redundant(c, conn, frame_buf, frame_written);
+        if (rr > 0) return MQVPN_OK;
+        if (rr < 0) return MQVPN_ERR_AGAIN;
+        /* nothing accepted and no backpressure: one ordinary, untracked send */
+    }
+
     uint64_t dgram_id;
     uint32_t fh =
         flow_hash_pkt(pkt, (int)len, c->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
-    xqc_conn_set_dgram_flow_hash(xqc_h3_conn_get_xqc_conn(conn->h3_conn), fh);
-    xret = xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
-                                    mqvpn_dgram_qos_level(c->config.scheduler));
+    xret = tun_xqc_send(c, conn, frame_buf, frame_written, &dgram_id, fh, UINT64_MAX);
 
     if (xret == -XQC_EAGAIN) {
         /* Backpressure: xquic returns -XQC_EAGAIN before writing any datagram
@@ -3946,14 +4072,14 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     if (tun_validate_src(c, conn, pkt, len, ip_ver) != TUN_INGRESS_PROCEED)
         return MQVPN_OK;
 
-    int do_stamp = 0;
+    int do_stamp = 0, redundant = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
-    if (tun_decide_lane(c, conn, pkt, len, ip_ver, &do_stamp, &peek) !=
+    if (tun_decide_lane(c, conn, pkt, len, ip_ver, &do_stamp, &peek, &redundant) !=
         TUN_INGRESS_PROCEED) {
         return MQVPN_OK;
     }
 
-    return tun_send_datagram(c, conn, pkt, len, do_stamp, &peek);
+    return tun_send_datagram(c, conn, pkt, len, do_stamp, &peek, redundant);
 }
 
 int
@@ -4174,6 +4300,30 @@ tick_handshake_watchdog(mqvpn_client_t *c)
 
 /* ─── Tick ─── */
 
+/* Redundant mode, every 100 ms: re-sync the tracker's slot bindings and feed it
+ * each usable path's smoothed RTT (it sizes the per-path guard limit). */
+static void
+tick_redundant_refresh(mqvpn_client_t *c)
+{
+    cli_conn_t *conn = c->conn;
+    if (!conn || !conn->redundant_tx) return;
+    uint64_t now = client_now_us(c);
+    if (conn->redundant_refresh_us && now - conn->redundant_refresh_us < 100000) return;
+    conn->redundant_refresh_us = now ? now : 1;
+
+    int usable[MQVPN_MAX_PATHS];
+    int nu = redundant_usable_paths(c, conn, usable);
+    if (nu == 0 || !c->engine || !c->multipath_ready) return;
+
+    xqc_conn_stats_t st = xqc_conn_get_stats(c->engine, &conn->cid);
+    for (int j = 0; j < nu; j++) {
+        const xqc_path_metrics_t *pm =
+            xqc_find_path_metrics(&st, c->paths[usable[j]].xqc_path_id);
+        if (pm) mqvpn_redundant_tx_set_srtt(conn->redundant_tx, usable[j], pm->path_srtt);
+    }
+    free(st.paths_info);
+}
+
 int
 mqvpn_client_tick(mqvpn_client_t *c)
 {
@@ -4184,6 +4334,8 @@ mqvpn_client_tick(mqvpn_client_t *c)
     if (c->engine) xqc_engine_main_logic(c->engine);
     tick_path_recovery(c);
     tick_reconnect(c);
+
+    tick_redundant_refresh(c);
 
     /* §5/§11.1: drive reorder RX gap timeouts + idle eviction. */
     if (c->conn && c->conn->reorder_rx)
@@ -4423,4 +4575,99 @@ mqvpn_client_set_server_addr(mqvpn_client_t *c, const struct sockaddr *addr,
     memcpy(&c->server_addr, addr, addrlen);
     c->server_addrlen = addrlen;
     return MQVPN_OK;
+}
+
+/* ── Redundant-mode test hooks (declared in mqvpn_internal.h) ── */
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths, size_t dgram_mss,
+                                    int reorder_peer)
+{
+    if (!c || !c->config.redundant || n_paths < 0 || n_paths > MQVPN_MAX_PATHS) return -1;
+    if (!c->conn && mqvpn_client_test_conn_alloc(c) != 0) return -1;
+    cli_conn_t *conn = c->conn;
+    conn->redundant_tx = mqvpn_redundant_tx_new();
+    if (!conn->redundant_tx) return -1;
+    conn->tunnel_ok = 1;
+    conn->dgram_mss = dgram_mss;
+    conn->masque_stream_id = 4;
+    if (reorder_peer) {
+        conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, 1);
+        if (!conn->reorder_tx) return -1;
+        conn->peer_reorder_supported = 1;
+    }
+    for (int i = 0; i < n_paths; i++) {
+        path_entry_t *p = &c->paths[i];
+        p->xquic_path_live = 1;             /* LINT-ALLOW: test wrapper seed */
+        p->state = PATH_LC_ACTIVE;          /* LINT-ALLOW: test wrapper seed */
+        p->xqc_path_id = 100 + (uint64_t)i; /* LINT-ALLOW: test wrapper seed */
+    }
+    if (c->n_paths < n_paths) c->n_paths = n_paths; /* LINT-ALLOW: test wrapper seed */
+    return 0;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_reorder_peek_hdr(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                                   uint8_t hdr_out[MQVPN_REORDER_HDR_LEN])
+{
+    cli_conn_t *conn = c ? c->conn : NULL;
+    if (!conn || !conn->reorder_tx) return -1;
+    size_t udp_mss = xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+    mqvpn_reorder_tx_peek_t peek = {0};
+    int act = (int)mqvpn_reorder_tx_peek(conn->reorder_tx, pkt, len, client_now_us(c),
+                                         (uint32_t)udp_mss, &peek);
+    if (act == MQVPN_REORDER_TX_STAMP) memcpy(hdr_out, peek.hdr, MQVPN_REORDER_HDR_LEN);
+    return act;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_redundant_send(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                                 mqvpn_test_send_fn send, void *ud)
+{
+    if (!c || !c->conn) return -1;
+    c->conn->test_send = send;
+    c->conn->test_send_ud = ud;
+    int r = mqvpn_client_on_tun_packet(c, pkt, len);
+    c->conn->test_send = NULL;
+    c->conn->test_send_ud = NULL;
+    return r;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_decide_lane(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                              int *do_stamp, int *redundant)
+{
+    mqvpn_reorder_tx_peek_t peek = {0};
+    *do_stamp = 0;
+    *redundant = 0;
+    return (int)tun_decide_lane(c, c->conn, pkt, len, pkt[0] >> 4, do_stamp, &peek,
+                                redundant);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_dgram_notify(mqvpn_client_t *c, uint64_t dgram_id, int acked)
+{
+    cli_dgram_notify(c ? c->conn : NULL, dgram_id, acked);
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_redundant_outstanding(mqvpn_client_t *c, int idx)
+{
+    if (!c || !c->conn || !c->conn->redundant_tx) return -1;
+    return mqvpn_redundant_tx_outstanding(c->conn->redundant_tx, idx);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live, uint64_t xqc_path_id)
+{
+    path_entry_t *p = &c->paths[idx];
+    p->xquic_path_live = live ? 1 : 0; /* LINT-ALLOW: test wrapper seed */
+    p->xqc_path_id = xqc_path_id;      /* LINT-ALLOW: test wrapper seed */
 }
