@@ -208,6 +208,29 @@ test_limit_scales(void)
 }
 
 static void
+test_limit_first_second_rate(void)
+{
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_srtt(t, 0, 300000);
+    for (int i = 0; i < 190; i++) /* 5000000 .. 5099000 */
+        add_copy(t, 1, 5000000 + (uint64_t)i * 99000 / 189);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 300); /* < 100 ms: no estimate */
+    for (int i = 1; i <= 190; i++)                 /* up to 5200000 */
+        add_copy(t, 1, 5099000 + (uint64_t)i * 101000 / 190);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 1900 * 550000 / 1000000); /* 1045 */
+    add_copy(t, 1, 6100000); /* roll: 10 pps now, prev 380 -> 209, floored */
+    assert(mqvpn_redundant_tx_limit(t, 0) == 300);
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_srtt(t, 0, 300000);
+    for (int i = 0; i < 20; i++) /* 20 pkt/s */
+        add_copy(t, 1, (uint64_t)i * 50000);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 300);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
 test_ack_lost_accounting(void)
 {
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
@@ -319,6 +342,7 @@ main(void)
     RUN(test_select_all_full_least_loaded);
     RUN(test_select_single_path);
     RUN(test_limit_scales);
+    RUN(test_limit_first_second_rate);
     RUN(test_ack_lost_accounting);
     RUN(test_no_eviction_of_live_copies);
     RUN(test_capacity_truncates);

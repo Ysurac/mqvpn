@@ -13,6 +13,9 @@
 #define RTX_SLOTS     (2 * RTX_CAP)
 #define RTX_LIMIT_MIN 300
 #define RTX_RTT_SLACK 250000u /* us added to srtt in the limit */
+#define RTX_RATE_MIN_ELAPSED                                   \
+    100000u /* us of the current second before its rate counts \
+             */
 
 /* ---- port list / packet matching ---- */
 
@@ -106,6 +109,7 @@ struct mqvpn_redundant_tx_s {
     int have_win;
     uint64_t win_sec;
     uint32_t win_count, prev_count; /* originals in win_sec / the second before */
+    uint64_t win_start_us, last_us; /* first/latest counted commit time in win_sec */
 };
 
 static uint32_t
@@ -223,10 +227,16 @@ uint32_t
 mqvpn_redundant_tx_limit(const mqvpn_redundant_tx_t *t, int path)
 {
     if (!t || !path_ok(path)) return RTX_LIMIT_MIN;
-    /* shortcut: pps is the second before the latest commit; an idle gap keeps the
-     * last value until the next commit rolls the window. */
-    uint64_t v =
-        (uint64_t)t->prev_count * (t->path[path].srtt_us + RTX_RTT_SLACK) / 1000000u;
+    /* shortcut: pps is the larger of the previous second and the current second's
+     * rate (once >= 100 ms of it has elapsed); an idle gap keeps the last value
+     * until the next commit rolls the window. */
+    uint64_t pps = t->prev_count;
+    uint64_t elapsed = t->last_us - t->win_start_us;
+    if (elapsed >= RTX_RATE_MIN_ELAPSED) {
+        uint64_t cur = (uint64_t)t->win_count * 1000000u / elapsed;
+        if (cur > pps) pps = cur;
+    }
+    uint64_t v = pps * (t->path[path].srtt_us + RTX_RTT_SLACK) / 1000000u;
     if (v < RTX_LIMIT_MIN) v = RTX_LIMIT_MIN;
     return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
 }
@@ -259,12 +269,15 @@ mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
     if (!t || k <= 0 || t->origs.n >= RTX_CAP || t->copies.n + k > RTX_CAP) return;
     uint64_t sec = now_us / 1000000u;
     if (!t->have_win || sec != t->win_sec) {
-        t->prev_count = (t->have_win && sec == t->win_sec + 1) ? t->win_count : 0;
+        int contiguous = t->have_win && sec == t->win_sec + 1;
+        t->prev_count = contiguous ? t->win_count : 0;
+        t->win_start_us = contiguous ? sec * 1000000u : now_us;
         t->have_win = 1;
         t->win_sec = sec;
         t->win_count = 0;
     }
     t->win_count++;
+    t->last_us = now_us;
 
     rtx_ent_t *o = tab_insert(&t->origs, ++t->next_orig);
     o->a = (uint64_t)k;
