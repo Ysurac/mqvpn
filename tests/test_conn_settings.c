@@ -403,6 +403,30 @@ test_stream_unsent_cap_both_sides(void)
     return 0;
 }
 
+/* Both sides cap their datagram backlog too: tunnelled IP packets are
+ * DATAGRAMs, so the stream cap alone leaves the tunnel unbounded. */
+static int
+test_dgram_unsent_cap_both_sides(void)
+{
+    for (int server = 0; server <= 1; server++) {
+        xqc_conn_settings_t cs;
+        mqvpn_conn_settings_input_t in = {
+            .is_server = server,
+            .enable_multipath = true,
+            .scheduler = MQVPN_SCHED_WLB,
+        };
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_dgram_unsent_packets, MQVPN_DGRAM_UNSENT_PACKETS);
+        ASSERT_EQ(cs.max_dgram_unsent_delay_ms, MQVPN_DGRAM_UNSENT_DELAY_MS);
+        if (cs.max_dgram_unsent_packets == 0 ||
+            cs.max_dgram_unsent_packets >= cs.sndq_packets_used_max)
+            FAIL("dgram cap %u not below sndq_packets_used_max %llu",
+                 cs.max_dgram_unsent_packets,
+                 (unsigned long long)cs.sndq_packets_used_max);
+    }
+    return 0;
+}
+
 /* Not conn settings proper, but this is the unit test that links mqvpn_lib
  * with the internal config layout: a user added into a slot vacated by
  * mqvpn_config_remove_user() must not inherit the old occupant's fixed IP,
@@ -450,6 +474,7 @@ main(void)
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();
     failed += test_stream_unsent_cap_both_sides();
+    failed += test_dgram_unsent_cap_both_sides();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;

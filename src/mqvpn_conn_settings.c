@@ -160,6 +160,26 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * so BBR stops raising its bandwidth estimate. */
     out->max_stream_unsent_packets = MQVPN_STREAM_UNSENT_PACKETS;
 
+    /* --- datagram backlog cap ---
+     * Tunnelled IP packets are DATAGRAMs, and they were only bounded by
+     * sndq_packets_used_max. When the paths left carry less than the
+     * tunnel is offered, e.g. after the busy WAN goes down and a slow one
+     * remains, up to 16384 packets (~23 MB) waited unsent: over a minute
+     * of tunnel delay at 3 Mbit/s, with no loss for the inner transports
+     * to react to, until something restarted the client. At the cap
+     * xquic returns -XQC_EAGAIN and the TUN read stops, so the excess is
+     * dropped at the TUN queue instead.
+     *
+     * A fixed count could not serve both ends: on 2x500 Mbit/s netns
+     * paths, 256 packets lost 35-45% of the uncapped UDP and TCP
+     * throughput, while 1024 still meant ~4 s of wait on a 3 Mbit/s
+     * path. So the cap follows the paths' bandwidth estimate: 50 ms of
+     * it, never under 64 packets, never over 4096. 20, 50 and 100 ms all
+     * kept the 2x500 Mbit/s throughput; with 50 ms the 3 Mbit/s case
+     * kept tunnel ping at ~0.7 s instead of growing to 40 s and more. */
+    out->max_dgram_unsent_packets = MQVPN_DGRAM_UNSENT_PACKETS;
+    out->max_dgram_unsent_delay_ms = MQVPN_DGRAM_UNSENT_DELAY_MS;
+
     /* Caller-gated, never derived here: see the field comment in
      * mqvpn_conn_settings.h for why this must equal the batched-send
      * registration decision rather than any locally recomputed condition.

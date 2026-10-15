@@ -20,6 +20,13 @@
  * mqvpn_conn_settings.c explains the number. */
 #define MQVPN_STREAM_UNSENT_PACKETS 1024
 
+/* The same cap for DATAGRAM writes, lowered to what the paths send in
+ * MQVPN_DGRAM_UNSENT_DELAY_MS (xqc_conn_settings_t.max_dgram_unsent_packets
+ * and max_dgram_unsent_delay_ms); mqvpn_conn_settings.c explains the
+ * numbers. */
+#define MQVPN_DGRAM_UNSENT_PACKETS 4096
+#define MQVPN_DGRAM_UNSENT_DELAY_MS 50
+
 /* Caller-driven inputs. The bools are parameterised (not a single
  * `is_server` flag) so each call site documents its intent. */
 typedef struct {
