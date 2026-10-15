@@ -788,6 +788,48 @@ overflow_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
      * active. */
 }
 
+/* §13.4 window slide: `seq` lies at or beyond expected + cap. Dropping it left
+ * the window where it was, and expected only moves when buffered packets
+ * drain: a flow that lost cap or more packets in a row with nothing buffered
+ * then dropped every later packet, and under heavy loss the window crawled one
+ * gap per wait_ms while nearly every arrival fell beyond it. The flow keeps
+ * sending, so idle eviction never rescued it. Move the window instead so that
+ * seq is its last slot: deliver every buffered packet below the new origin in
+ * ascending order, giving up their gaps as a timeout does, then drain the run
+ * that starts at the origin. Like overflow_flush, the slide ends the armed
+ * period only when it empties the buffer. */
+static void
+slide_window_to(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
+                uint64_t now_us)
+{
+    uint64_t origin = seq - f->buffer.cap + 1;
+    int was_armed = f->gap_timer_active;
+    /* Every buffered seq lies in [expected, expected + size), so the scan
+     * stops at the ring size however far the window moves. */
+    uint64_t end = origin;
+    if (end - f->expected > f->buffer.size) {
+        end = f->expected + f->buffer.size;
+    }
+    for (uint64_t s = f->expected; s < end && !ring_empty(&f->buffer); s++) {
+        uint16_t len = 0;
+        uint64_t enq = 0;
+        void *pkt = ring_remove(&f->buffer, s, &len, &enq);
+        if (pkt != NULL) {
+            deliver_pkt(rx, (const uint8_t *)pkt, len, f, now_us, enq);
+            pool_release(rx, pkt, len);
+        }
+    }
+    f->expected = origin;
+    drain_contiguous(rx, f, now_us);
+    f->last_progress_us = now_us;
+    if (ring_empty(&f->buffer)) {
+        if (was_armed) {
+            f->stats.gap_overflow_count++; /* §17: period ended by this slide */
+        }
+        stop_gap_timer(f);
+    }
+}
+
 /* ─────────────────── §11.6: FLOW_RESET buffer discard + reset ──────────────
  *
  * FLOW_RESET is a seq-space discontinuity: the old epoch's buffered packets must
@@ -1108,6 +1150,13 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         return REORDER_DELIVERED;
     }
 
+    /* far ahead: move the window so seq is its last slot (§13.4). With cap 1
+     * that makes seq the expected one; otherwise it is admitted below. Works
+     * even when slots==NULL (§24.9). */
+    if (seq > f->expected && ring_far_ahead(&f->buffer, seq, f->expected)) {
+        slide_window_to(rx, f, seq, now_us);
+    }
+
     if (seq == f->expected) { /* in-order */
         deliver_pkt(rx, pkt, len, f, now_us, now_us);
         f->expected++;
@@ -1125,11 +1174,7 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         return REORDER_DROPPED_LATE; /* last_progress NOT updated */
     }
 
-    /* --- ahead --- §13.4 off-by-one; works even when slots==NULL (§24.9). */
-    if (ring_far_ahead(&f->buffer, seq, f->expected)) {
-        f->stats.too_far_ahead_drop_count++;
-        return REORDER_DROPPED_FAR_AHEAD;
-    }
+    /* --- ahead, in-window --- */
     return buffer_admit(rx, f, seq, pkt, len, now_us);
 }
 

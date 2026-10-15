@@ -382,32 +382,125 @@ test_rx_late_drop(void)
 }
 
 static void
-test_rx_far_ahead_drop(void)
+test_rx_far_ahead_slides_window(void)
 {
-    /* seq - expected >= cap dropped (too_far_ahead). */
+    /* §13.4: seq - expected >= cap moves the window so seq is its last slot.
+     * Buffered packets below the new origin are delivered in ascending order
+     * and nothing is dropped. */
     recorder_t rec = {0};
     mqvpn_reorder_config_t c = rx_cfg();
     c.cap_packets_per_flow = 16;
     mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
     uint8_t buf[256];
 
-    /* cold-start seq 0 → expected=1 */
+    /* cold-start seq 0 → expected=1; seqs 3 and 5 wait behind gaps 1, 2, 4. */
     size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
     mqvpn_reorder_flow_t *f = only_flow(rx);
-
-    /* seq 17: 17 - 1 = 16 >= cap 16 → far-ahead drop. */
-    n = build_reorder_dgram(buf, 0, 17, 2, 5000, 443, 100);
+    n = build_reorder_dgram(buf, 0, 3, 3, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
-    ASSERT_EQ_INT(rec.n, 1, "far-ahead not delivered");
-    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 1, "too_far_ahead counted");
-    ASSERT_TRUE(ring_empty(&f->buffer), "not buffered");
-    ASSERT_TRUE(invariant_holds(rx), "invariant after far-ahead drop");
-
-    /* boundary: seq 16: 16 - 1 = 15 = cap-1 → buffered (accepted). */
-    n = build_reorder_dgram(buf, 0, 16, 3, 5000, 443, 100);
+    n = build_reorder_dgram(buf, 0, 5, 5, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
+    ASSERT_EQ_INT(rec.n, 1, "3 and 5 held behind the gap");
+
+    /* boundary: seq 16: 16 - 1 = 15 = cap-1 → buffered, no slide. */
+    n = build_reorder_dgram(buf, 0, 16, 16, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 4);
     ASSERT_TRUE(ring_contains(&f->buffer, 16), "cap-1 boundary buffered");
+    ASSERT_EQ_INT(f->expected, 1, "no slide at cap-1");
+
+    /* seq 20: 20 - 1 = 19 >= cap 16 → origin 5: 3 delivered, then the run
+     * from 5; 16 and 20 stay buffered. */
+    n = build_reorder_dgram(buf, 0, 20, 20, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 5);
+    ASSERT_EQ_INT(rec.n, 3, "slide delivered 3 and 5");
+    ASSERT_EQ_INT(rec.tags[1], 3, "3 first");
+    ASSERT_EQ_INT(rec.tags[2], 5, "then 5");
+    ASSERT_EQ_INT(f->expected, 6, "expected past the drained run");
+    ASSERT_TRUE(ring_contains(&f->buffer, 20), "far-ahead seq buffered");
+    ASSERT_TRUE(ring_contains(&f->buffer, 16), "in-window seq kept");
+    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 0, "nothing dropped");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after slide");
+
+    /* seq 40 → origin 25: 16 and 20 delivered, buffer empty until 40 is
+     * admitted, so the period that held 16 ended by overflow. */
+    n = build_reorder_dgram(buf, 0, 40, 40, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 6);
+    ASSERT_EQ_INT(rec.n, 5, "slide delivered 16 and 20");
+    ASSERT_EQ_INT(rec.tags[3], 16, "16 before 20");
+    ASSERT_EQ_INT(rec.tags[4], 20, "20 last");
+    ASSERT_EQ_INT(f->expected, 25, "expected at the new origin");
+    ASSERT_EQ_INT(f->stats.gap_overflow_count, 1, "emptying slide ends the period");
+    ASSERT_TRUE(ring_contains(&f->buffer, 40), "40 waits for 25..39");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after emptying slide");
+    mqvpn_reorder_rx_free(rx);
+}
+
+/* Regression: a flow that lost cap or more packets in a row with nothing
+ * buffered dropped every later packet as far-ahead, forever: expected only
+ * moved when buffered packets drained, and the flow never idled out. */
+static void
+test_rx_far_ahead_after_loss_burst_recovers(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.cap_packets_per_flow = 16;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+
+    size_t n = build_reorder_dgram(buf, 0, 0, 0, 5000, 443, 100);
+    mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);
+    mqvpn_reorder_flow_t *f = only_flow(rx);
+
+    /* seqs 1..99 lost, then 100..139 arrive in order. */
+    for (uint64_t s = 100; s < 140; s++) {
+        n = build_reorder_dgram(buf, 0, s, (uint16_t)s, 5000, 443, 100);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, 1000 + s);
+        ASSERT_TRUE(invariant_holds(rx), "invariant while recovering");
+    }
+    mqvpn_reorder_rx_tick(rx, 1000 + 140 + (uint64_t)c.max_wait_ms * 1000ULL);
+
+    ASSERT_EQ_INT(rec.n, 41, "every packet after the burst delivered");
+    int ordered = 1;
+    for (int i = 1; i < rec.n; i++) {
+        if (rec.tags[i] != 99 + i) ordered = 0;
+    }
+    ASSERT_TRUE(ordered, "delivered in order");
+    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 0, "nothing dropped far-ahead");
+    ASSERT_TRUE(ring_empty(&f->buffer), "buffer drained");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after recovery");
+    mqvpn_reorder_rx_free(rx);
+}
+
+/* Regression: with every other packet lost, the window used to crawl one gap
+ * per wait_ms while nearly every arrival fell beyond it (~1% delivered). */
+static void
+test_rx_far_ahead_heavy_loss_keeps_delivering(void)
+{
+    recorder_t rec = {0};
+    mqvpn_reorder_config_t c = rx_cfg();
+    c.cap_packets_per_flow = 64;
+    mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
+    uint8_t buf[256];
+    uint64_t now = 1000, arrived = 0;
+
+    for (uint64_t s = 0; s < 20000; s += 2, now += 160) {
+        size_t n = build_reorder_dgram(buf, 0, s, (uint16_t)s, 5000, 443, 100);
+        mqvpn_reorder_rx_on_packet(rx, buf, n, now);
+        mqvpn_reorder_rx_tick(rx, now);
+        arrived++;
+    }
+    /* a timeout skips one gap per wait_ms: tick until the tail has drained. */
+    for (int i = 0; i < 64; i++) {
+        now += (uint64_t)c.max_wait_ms * 1000ULL;
+        mqvpn_reorder_rx_tick(rx, now);
+    }
+
+    mqvpn_reorder_stats_t st;
+    mqvpn_reorder_rx_get_stats(rx, &st);
+    ASSERT_EQ_INT(st.delivered_count, arrived, "every arrival delivered");
+    ASSERT_EQ_INT(st.too_far_ahead_drop_count, 0, "nothing dropped far-ahead");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after heavy loss");
     mqvpn_reorder_rx_free(rx);
 }
 
@@ -473,7 +566,7 @@ static void
 test_rx_lazy_cap_check_before_slots(void)
 {
     /* §24.9 line 1131: seq-expected >= cap check works when slots==NULL (ring
-     * never grown). Use a far-ahead first-after-coldstart so slots stay NULL. */
+     * never grown). Use a far-ahead first-after-coldstart so slots start NULL. */
     recorder_t rec = {0};
     mqvpn_reorder_config_t c = rx_cfg();
     c.cap_packets_per_flow = 8;
@@ -486,12 +579,15 @@ test_rx_lazy_cap_check_before_slots(void)
     mqvpn_reorder_flow_t *f = only_flow(rx);
     ASSERT_TRUE(f->buffer.slots == NULL, "slots still NULL after cold start");
 
-    /* seq 100: 100-1 = 99 >= cap 8 → far-ahead drop, no crash, slots stay NULL. */
+    /* seq 100: 100-1 = 99 >= cap 8 → slide to origin 93, no crash; 100 is
+     * buffered at the end of the new window. */
     n = build_reorder_dgram(buf, 0, 100, 2, 5000, 443, 100);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
-    ASSERT_EQ_INT(rec.n, 1, "far-ahead with NULL slots not delivered");
-    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 1, "far-ahead counted (NULL slots)");
-    ASSERT_TRUE(f->buffer.slots == NULL, "slots remain NULL (never allocated)");
+    ASSERT_EQ_INT(rec.n, 1, "far-ahead with NULL slots held, not delivered");
+    ASSERT_EQ_INT(f->expected, 93, "window slid with NULL slots");
+    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 0, "not dropped (NULL slots)");
+    ASSERT_TRUE(ring_contains(&f->buffer, 100), "buffered at the window end");
+    ASSERT_TRUE(invariant_holds(rx), "invariant after slide from NULL slots");
     mqvpn_reorder_rx_free(rx);
 }
 
@@ -1082,10 +1178,10 @@ static void
 test_rx_anomalous_drop_not_demote(void)
 {
     /* §24.9 line 1122: the classify-window-FINAL packet being an anomalous drop
-     * (here too_far_ahead) must NOT demote; a late drop in that slot DOES count.
+     * (here a duplicate) must NOT demote; a late drop in that slot DOES count.
      * Two sub-cases. */
 
-    /* sub-case A: final packet is too_far_ahead → not counted → window not closed
+    /* sub-case A: final packet is a duplicate → not counted → window not closed
      * → no demote. */
     {
         recorder_t rec = {0};
@@ -1095,21 +1191,21 @@ test_rx_anomalous_drop_not_demote(void)
         mqvpn_reorder_rx_t *rx = mqvpn_reorder_rx_new(&c, 0x1, mock_deliver, &rec);
         uint8_t buf[256];
 
-        /* two small in-order (classify_seen=2). */
+        /* cold-start seq 0, then seq 2 buffered behind gap 1 (classify_seen=2). */
         size_t n = build_reorder_dgram(buf, 0, 0, 1, 5000, 443, 50);
         mqvpn_reorder_rx_on_packet(rx, buf, n, 1);
-        n = build_reorder_dgram(buf, 0, 1, 2, 5000, 443, 50);
+        n = build_reorder_dgram(buf, 0, 2, 2, 5000, 443, 50);
         mqvpn_reorder_rx_on_packet(rx, buf, n, 2);
         mqvpn_reorder_flow_t *f = only_flow(rx);
         ASSERT_EQ_INT(f->classify_seen, 2, "two real packets counted");
 
-        /* third packet is far-ahead (seq 100, cap 8) → anomalous drop, NOT
-         * counted, NOT demote, classify_seen stays 2. */
-        n = build_reorder_dgram(buf, 0, 100, 3, 5000, 443, 50);
+        /* third packet repeats seq 2 → duplicate drop, NOT counted, NOT demote,
+         * classify_seen stays 2. */
+        n = build_reorder_dgram(buf, 0, 2, 3, 5000, 443, 50);
         mqvpn_reorder_rx_on_packet(rx, buf, n, 3);
         ASSERT_EQ_INT(f->classify_seen, 2, "anomalous drop not counted toward classify");
         ASSERT_TRUE(!f->pass_through, "anomalous final packet did NOT demote");
-        ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 1, "far-ahead drop recorded");
+        ASSERT_EQ_INT(f->stats.duplicate_drop_count, 1, "duplicate drop recorded");
         mqvpn_reorder_rx_free(rx);
     }
 
@@ -1954,9 +2050,11 @@ test_rx_cap_clamped(void)
     mqvpn_reorder_rx_on_packet(rx, buf, n, 1000);
     mqvpn_reorder_flow_t *f = only_flow(rx);
     ASSERT_EQ_INT(f->buffer.cap, MQVPN_REORDER_CAP_MAX, "flow window clamped");
+    /* one past the clamped window moves it (origin 2); an unclamped cap would
+     * have left expected at 1. */
     n = build_reorder_dgram(buf, 0, 1 + MQVPN_REORDER_CAP_MAX, 2, 5000, 443, 10);
     mqvpn_reorder_rx_on_packet(rx, buf, n, 1001);
-    ASSERT_EQ_INT(f->stats.too_far_ahead_drop_count, 1, "beyond the clamped window");
+    ASSERT_EQ_INT(f->expected, 2, "beyond the clamped window");
     mqvpn_reorder_rx_free(rx);
 }
 
@@ -2110,7 +2208,9 @@ main(void)
     test_rx_cold_start_first_observed();
     test_rx_buffer_then_fill();
     test_rx_late_drop();
-    test_rx_far_ahead_drop();
+    test_rx_far_ahead_slides_window();
+    test_rx_far_ahead_after_loss_burst_recovers();
+    test_rx_far_ahead_heavy_loss_keeps_delivering();
     test_rx_duplicate_drop();
     test_rx_invariant_timer_iff_nonempty();
     test_rx_lazy_cap_check_before_slots();

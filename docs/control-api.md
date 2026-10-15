@@ -601,12 +601,12 @@ mode.
 | `gap_count`                    | uint64  | Gap episodes opened (an out-of-order arrival started a hold) |
 | `gap_filled_count`             | uint64  | Gaps closed by the missing packet arriving in time        |
 | `gap_timeout_count`            | uint64  | Gaps closed by the hold timer expiring                    |
-| `gap_overflow_count`           | uint64  | Gaps closed because the reorder buffer pool overflowed     |
+| `gap_overflow_count`           | uint64  | Gaps closed because the reorder buffer overflowed (pool or per-flow byte budget), or because a packet arrived beyond the window and moved it |
 | `gap_demote_count`             | uint64  | Gaps closed by an ACK-driven demotion                      |
 | `gap_reset_count`              | uint64  | Gaps closed by a connection/flow reset                     |
 | `ack_demote_count`             | uint64  | Flows demoted by ACK signal (not gap-scoped)                |
 | `too_late_drop_count`          | uint64  | Packets dropped: arrived after their sequence window closed |
-| `too_far_ahead_drop_count`     | uint64  | Packets dropped: too far ahead of the expected sequence      |
+| `too_far_ahead_drop_count`     | uint64  | Always 0: a packet too far ahead of the expected sequence moves the window instead of being dropped. Kept for compatibility |
 | `duplicate_drop_count`         | uint64  | Duplicate packets dropped                                    |
 | `pool_drop_count`              | uint64  | Packets dropped: reorder buffer pool exhausted                |
 | `per_flow_limit_drop_count`    | uint64  | Packets dropped: per-flow buffering cap reached                |
