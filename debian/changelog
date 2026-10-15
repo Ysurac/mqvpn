@@ -1,3 +1,129 @@
+mqvpn (0.17.0+20261015-1) UNRELEASED; urgency=medium
+
+  * fix(reorder): a packet that arrived CapPackets (1024) or more sequence
+    numbers ahead of the one the reorder buffer waited for was dropped,
+    and nothing moved the window again while the flow kept sending: after
+    one burst of lost packets the flow delivered nothing at all, and with
+    half the packets lost about 1% got through. Flooding the tunnel with
+    150 Mbit/s over ~70 Mbit/s of uplinks made the server receive almost
+    nothing after the first second. The window now moves forward and the
+    packet is kept. Only configs with [Reorder] Enabled are affected
+    (OpenMPTCProuter enables it). get_reorder_stats keeps
+    too_far_ahead_drop_count, now always 0.
+  * fix(tunnel): cap the tunnel packets waiting unsent in xquic at 50 ms
+    of the paths' estimated bandwidth (64 to 4096 packets). When the busy
+    WAN went down and a 3 Mbit/s one remained, up to ~23 MB queued: tunnel
+    ping grew past 40 s, DNS through the tunnel failed and
+    OpenMPTCProuter's tracker restarted the client 83 s after the cut.
+    Ping now stays near 0.7 s and the tunnel stays up; 2x500 Mbit/s
+    throughput is unchanged (OpenMPTCProuter issue 4401).
+  * fix(server): one slow or stalled client paused TUN reading for every
+    client, forever if it disconnected before draining. Backpressure is
+    now per session: that client's packets are dropped and the others
+    keep flowing.
+  * fix(server): authentication: removing the last user of a server
+    without a global key no longer opens it to anyone (every request is
+    refused, with a warning); PSKs are compared in constant time; the
+    Bearer scheme matches case-insensitively; a connection is closed
+    after 3 failed auth attempts; shared-key x-user names can no longer
+    fill the lease table and evict configured users' leases;
+    peer-triggered log lines are rate limited (new lines "<what>: N
+    similar log lines suppressed" and "closing connection after N
+    authentication failures").
+  * feat(server): [Auth] MaxSessionsPerUser (JSON max_sessions_per_user)
+    caps the established tunnels per credential; default 0 = unlimited.
+    Over the cap the client gets the same 403 as from a full server.
+  * fix(server): addresses: an exhausted pool is answered with 503 on the
+    stream instead of closing the connection; a pinned user reconnecting
+    at max_clients supersedes its old tunnel instead of being refused;
+    set_user_fixed_ip is transactional (a refused move keeps the old pin,
+    the server's own address is refused); a Subnet6 too small for the
+    IPv4 pool now stops startup (it handed out unroutable IPv6
+    addresses); a non-aligned Subnet (10.0.0.5/24) no longer spills past
+    its prefix.
+  * fix(server): protocol: capsules split by stream flow control are
+    queued instead of cut in half; ADDRESS_REQUEST is answered per entry
+    in the requested family (RFC 9484 section 4.7.2); a refused request
+    closing after the tunnel was up no longer stops path label pushes;
+    connected clients get a CONNECTION_CLOSE on shutdown, so they
+    reconnect at once instead of waiting for their idle timeout;
+    get_status reports connected_sec for clients of a server without
+    auth.
+  * fix(icmp): ICMP errors are rate limited per client session (one
+    client could starve the others' path MTU discovery), and none are
+    sent about ICMP errors, non-first fragments or multicast and
+    broadcast destinations (RFC 1122, RFC 4443).
+  * fix(client): close the connection when the CONNECT-IP tunnel is
+    refused (403) or goes away, so the reconnect logic runs instead of
+    the client sitting in AUTHENTICATING forever, which a 15 s watchdog
+    now bounds. A malformed ADDRESS_ASSIGN aborts the request; datagrams
+    of another request or Context ID are dropped; an expiring downlink
+    packet no longer injects an ICMP error from the client's own address
+    into the TUN; a stack overflow with both Key and Username on the
+    hybrid lane is fixed.
+  * fix(client): backup paths (BackupPath, add_path "backup":true) are
+    held in standby and report "standby" instead of "active". With the
+    xquic bump below, WLB, minrtt and the other schedulers keep them idle
+    while a primary path works.
+  * fix(client): a PATH_ABANDON refused for the last active path is
+    retried once another path validates, instead of leaving the dead path
+    live next to its replacement.
+  * fix: client and server timers run on a monotonic clock, so an NTP
+    step no longer fires or stalls watchdogs, reconnect backoff, reorder
+    gaps and idle deadlines; reorder gap timeouts now wake the event loop
+    instead of firing late on a quiet tunnel.
+  * fix(api): mqvpn_client_get_stats, get_interest and get_paths honour
+    struct_size (callers should set it). No layout change.
+  * fix(control): the control socket accepts only requests that start
+    with '{' (a browser POST could run add_user), uses an absolute 5 s
+    deadline, writes replies in full and refuses over-long or malformed
+    arguments. New error replies: "invalid request", "request too large",
+    "dscp_mask must be a non-negative integer". A refused ninth
+    connection now receives its "too many connections" reply before the
+    close. Commands and reply fields are unchanged.
+  * fix(config): "Key = value  # comment" works; booleans accept
+    true/false/yes/no/on/off/1/0 and warn on anything else; over-long
+    values are refused instead of truncated; a key file readable by group
+    or others gets a warning. ManageRoutes (JSON manage_routes) and
+    --no-manage-routes are restored (upstream 0.16.0). [Control] Listen,
+    Port and Addr work in both modes. CLI numbers and --user names are
+    checked strictly (--max-clients 12abc now fails). A user added after
+    a removal no longer inherits the removed user's fixed IP.
+  * fix(path_label): a peer interface name with control bytes, '"' or '\'
+    is refused (it could forge log lines or break control API JSON).
+  * fix(hybrid): TCP lane: use-after-free on re-entrant teardown fixed;
+    bodies of refused or still-connecting connect-tcp requests are
+    bounded; egress to the server's own addresses and to IPv4 through
+    NAT64 or 6to4 addresses is denied by default (an EgressAllow entry
+    restores it), Teredo and NAT64 local-use are denied; uplink queue
+    memory is accounted per packet; SYNs lwIP drops no longer pin flow
+    slots; a 4-tuple reused while in TIME_WAIT connects again; a clean
+    close no longer truncates downlink data.
+  * feat(hybrid): a paused TCP-lane flow pushes back through QUIC flow
+    control (256 KiB high-water mark) instead of buffering without bound.
+  * fix(linux): resolv.conf is rewritten in place where the systemd
+    sandbox forbids the atomic rename (DNS setup failed under the unit);
+    route discovery polls every 200 ms instead of sleeping 1 s per retry
+    (new log line "route discovery failed for <ip>, retrying for up to
+    <n> ms").
+  * fix(windows): the DNS override adds a crash-safe NRPT rule, so
+    Windows stops also asking other adapters' DNS servers.
+  * fix(ios): the PoC keeps its auth key in the keychain instead of
+    providerConfiguration.
+  * xquic: bump to 6c84281:
+    - WLB, minrtt, wrr, wrtt, dscp and rap keep new data off a standby
+      path while a usable path exists;
+    - h3 recv_body_buf_high_water, used by the hybrid flow control above;
+    - max_dgram_unsent_packets and max_dgram_unsent_delay_ms, used by the
+      datagram cap above.
+    Two xquic structs grew: rebuild everything linked against libxquic.
+  * build/test/docs: sanitizer builds use -Wall -Wextra; new
+    test_server_hardening drives a real server over raw xquic; the docs
+    cover the parsed config keys and the control API framing and
+    commands.
+
+ -- mqvpn maintainers <maintainers@example.com>  Thu, 15 Oct 2026 18:51:26 +0200
+
 mqvpn (0.17.0-1) UNRELEASED; urgency=medium
 
   * fix: removing the initial path (path_id 0) through the control API
