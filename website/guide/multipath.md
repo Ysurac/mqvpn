@@ -202,12 +202,15 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   comma-separated list such as `4200,9000` (up to 16 ports). Without it, all
   UDP is duplicated. TCP is never duplicated by this mode.
 - **Every connection must carry the whole stream**: each connection sends a
-  full copy, so each one needs enough upload speed for the stream on its own.
-  For a 20 Mbps stream, every connection must manage at least 20 Mbps up. If
-  one connection is slower than the stream, redundant mode makes things worse:
-  the copies fill that connection and the stream loses far more packets than
-  with `Redundant = off`, which combines the connections instead. In that case
-  leave it off.
+  full copy, so each one needs enough upload speed for the stream on its own,
+  with some room to spare. For a 20 Mbps stream, every connection must manage
+  at least 20 Mbps up. One connection slowing down for a while is fine as long
+  as another can still carry the stream. When none can, mqvpn stops copying
+  and sends each packet once, as with `Redundant = off`, and tries copying
+  again later once a connection looks fast enough; the log notes each switch
+  (`redundant mode: ...`). The stream can still lose more packets than with
+  `Redundant = off`, so if your connections are often slower than the stream,
+  leave redundant mode off.
 - **Duplicates reach the application**: mqvpn does not remove the extra
   copies, so the receiving application sees every packet more than once. SRT
   and similar protocols discard duplicates; check that your application does
