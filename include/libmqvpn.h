@@ -463,6 +463,12 @@ typedef struct {
      * in on_client_connected. */
     uint8_t assigned_prefix6;
     int has_v6; /* 1 = IPv6 assigned */
+    /* Server's effective scheduler for this connection — appended under ABI 3.
+     * Client only (the server leaves both 0). has_server_scheduler = 0: the
+     * server did not report one (older server). Read only when struct_size
+     * covers these fields. */
+    int has_server_scheduler;
+    int server_scheduler; /* mqvpn_scheduler_t */
 } mqvpn_tunnel_info_t;
 
 typedef struct {
@@ -752,6 +758,12 @@ MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
  * MQVPN_ERR_INVALID_ARG, leaving the config unchanged, on a malformed list. */
 MQVPN_API int mqvpn_config_set_pinned_pubkey(mqvpn_config_t *cfg, const char *pins);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
+/* Server only: when non-zero, a client that asks for a scheduler gets it for its
+ * own connection's download direction. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_allow_client_scheduler(mqvpn_config_t *cfg, int enabled);
+/* Client only: when non-zero, ask the server to use this config's scheduler for the
+ * download direction too. Needs a server with the knob above on. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_request_server_scheduler(mqvpn_config_t *cfg, int enabled);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 MQVPN_API int mqvpn_config_set_fec(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_fec_scheme(mqvpn_config_t *cfg, mqvpn_fec_scheme_t scheme);

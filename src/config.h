@@ -94,6 +94,8 @@ typedef struct mqvpn_file_config_s {
     char reinjection_mode[16]; /* default|deadline|dgram */
     int fec_enable; /* 1=enable FEC, 0=off */
     char fec_scheme[32]; /* galois_calculation|packet_mask|reed_solomon|xor */
+    int allow_client_scheduler;   /* server */
+    int request_server_scheduler; /* client */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
     /* Server-only: auto-adopt the client's self-announced PATH_LABEL

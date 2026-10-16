@@ -2482,6 +2482,8 @@ test_ini_json_scalar_parity(void)
                       "Listen = 127.0.0.2:9091\n"
                       "[Multipath]\n"
                       "Scheduler = min_srtt\n"
+                      "AllowClientScheduler = true\n"
+                      "RequestServerScheduler = true\n"
                       "CC = cubic\n"
                       "InitMaxPathId = 16\n"
                       "Reinjection = deadline\n"
@@ -2542,6 +2544,8 @@ test_ini_json_scalar_parity(void)
                        "\"max_sessions_per_user\":3,"
                        "\"control_listen\":\"127.0.0.2:9091\","
                        "\"scheduler\":\"min_srtt\","
+                       "\"allow_client_scheduler\":true,"
+                       "\"request_server_scheduler\":true,"
                        "\"cc\":\"cubic\","
                        "\"init_max_path_id\":16,"
                        "\"reinjection\":\"deadline\","
@@ -2626,6 +2630,12 @@ test_ini_json_scalar_parity(void)
                   "parity has_explicit_cap");
     ASSERT_EQ_INT((int)a.reorder.classify_window, (int)b.reorder.classify_window,
                   "parity classify_window");
+    ASSERT_EQ_INT(a.allow_client_scheduler, 1, "parity ini allow_client_scheduler");
+    ASSERT_EQ_INT(a.request_server_scheduler, 1, "parity ini request_server_scheduler");
+    ASSERT_EQ_INT(a.allow_client_scheduler, b.allow_client_scheduler,
+                  "parity allow_client_scheduler");
+    ASSERT_EQ_INT(a.request_server_scheduler, b.request_server_scheduler,
+                  "parity request_server_scheduler");
     ASSERT_EQ_INT(a.hybrid.enabled, b.hybrid.enabled, "parity hybrid enabled");
     ASSERT_EQ_INT(a.hybrid.tcp_mode, b.hybrid.tcp_mode, "parity hybrid tcp_mode");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_flows, (int)b.hybrid.tcp_max_flows,

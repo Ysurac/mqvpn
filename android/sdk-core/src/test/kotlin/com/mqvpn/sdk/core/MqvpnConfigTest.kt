@@ -26,6 +26,7 @@ class MqvpnConfigTest {
         assertFalse(config.insecure)
         assertTrue(config.multipathEnabled)
         assertEquals(MqvpnConfig.Scheduler.MIN_RTT, config.scheduler)
+        assertFalse(config.requestServerScheduler)
         assertEquals(MqvpnConfig.LogLevel.INFO, config.logLevel)
         assertTrue(config.reconnect)
         assertEquals(5, config.reconnectIntervalSec)

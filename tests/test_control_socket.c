@@ -63,6 +63,7 @@ static int g_client_fec_rc = -1; /* -1 = not built, 0 = not found, 1 = found */
 static mqvpn_internal_fec_stats_t g_client_fec_tmpl;
 
 static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
+static int g_sched_n = 1; /* entries the sched getter returns */
 
 
 static int g_reorder_rc = 0;
@@ -215,6 +216,18 @@ int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user,
              iface ? iface : "");
     g_srv_set_weight_iface_weight = weight;
     return g_srv_set_weight_iface_rc;
+}
+
+int
+mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sched_t *out,
+                              int max)
+{
+    (void)s;
+    if (g_sched_n < 0) return -1;
+    int n = g_sched_n < max ? g_sched_n : max;
+    for (int i = 0; i < n; i++)
+        snprintf(out[i].scheduler, sizeof(out[i].scheduler), "wlb");
+    return n;
 }
 
 static int g_srv_set_dscp_mask_iface_rc = MQVPN_OK;
@@ -729,6 +742,24 @@ TEST(get_status_one_client_with_path)
     ASSERT_CONTAINS(resp, "\"endpoint\":\"1.2.3.4:443\"");
     ASSERT_CONTAINS(resp, "\"path_id\":7");
     ASSERT_CONTAINS(resp, "\"state_label\":\"active\"");
+    ASSERT_CONTAINS(resp, "\"endpoint\":\"1.2.3.4:443\",\"scheduler\":\"wlb\"");
+    g_client_info_n = 0;
+}
+
+/* Sched getter shorter than the client list (or failing): unknown. */
+TEST(get_status_scheduler_missing)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_n = 1;
+    for (int n = 0; n >= -1; n--) {
+        g_sched_n = n;
+        char resp[8192];
+        call_dispatch("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
+        ASSERT_CONTAINS(resp, "\"scheduler\":\"unknown\"");
+    }
+    g_sched_n = 1;
     g_client_info_n = 0;
 }
 
@@ -1825,6 +1856,7 @@ main(void)
     run_get_stats_client_mode_not_connected();
     run_get_status_empty();
     run_get_status_one_client_with_path();
+    run_get_status_scheduler_missing();
     run_get_status_reinject_matched_path_id();
     run_get_status_reinject_mismatched_path_id();
     run_get_status_client_mode_not_connected();

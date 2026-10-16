@@ -18,6 +18,7 @@
 #define MQVPN_SERVER_INTERNAL_H
 
 #include "libmqvpn.h"          /* mqvpn_server_t */
+#include "mqvpn_internal.h"    /* MQVPN_INTERNAL */
 #include "hybrid/classifier.h" /* mqvpn_cidr_entry_t */
 
 #include <stddef.h>
@@ -41,12 +42,18 @@ typedef struct {
     const char *auth_token; /* Bearer payload, not NUL-terminated */
     size_t auth_token_len;
     char x_user[64]; /* x-user header value, NUL-terminated */
+    int has_sched_hdr; /* request carried mqvpn-scheduler */
+    const char *sched; /* raw value, not NUL-terminated */
+    size_t sched_len;
     int has_reorder_hdr; /* request advertised mqvpn-reorder (§19.3). Applied to
                           * conn->peer_reorder_supported ONLY when this request
                           * establishes the CONNECT-IP tunnel — a rejected
                           * duplicate or unrelated request must not mutate the
                           * live tunnel's negotiated stamping. */
 } svr_req_headers_t;
+
+/* Test hook (mqvpn_server.c). */
+MQVPN_INTERNAL const char *mqvpn_server_test_sched_refusal_reason(int xqc_rc);
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on

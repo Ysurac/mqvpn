@@ -92,6 +92,13 @@ usage(const char *prog)
         "--config)\n"
         "  --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|\n"
         "              redundant|dscp   Multipath scheduler (default wlb)\n"
+        "  --allow-client-scheduler  Let clients pick the download scheduler for their "
+        "own\n"
+        "                            connection (server mode)\n"
+        "  --request-server-scheduler\n"
+        "                            Ask the server to use --scheduler for the download "
+        "too\n"
+        "                            (client mode)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
         "                            TP (default = xquic default 8; set lower, "
@@ -230,6 +237,8 @@ main(int argc, char *argv[])
         {"pinned-pubkey", required_argument, NULL, 0x107},
         {"no-sync-path-labels", no_argument, NULL, 0x105},
         {"push-path-labels", no_argument, NULL, 0x106},
+        {"allow-client-scheduler", no_argument, NULL, 0x108},
+        {"request-server-scheduler", no_argument, NULL, 0x109},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -249,6 +258,8 @@ main(int argc, char *argv[])
     const char *key_file = NULL;
     const char *cipher_list = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
+    int allow_client_sched = -1;
+    int request_server_sched = -1;
     const char *tls_server_name = NULL;
     const char *pinned_pubkey = NULL;
     const char *auth_key = NULL;
@@ -425,6 +436,8 @@ main(int argc, char *argv[])
         case 0x107: pinned_pubkey = optarg; break;
         case 0x105: sync_path_labels = 0; break;
         case 0x106: push_path_labels = 1; break;
+        case 0x108: allow_client_sched = 1; break;
+        case 0x109: request_server_sched = 1; break;
         case 'X':
             if (parse_cli_int(optarg, 0, 65535, &control_port) < 0) {
                 fprintf(stderr, "error: --control-port must be 0..65535 (0 disables)\n");
@@ -513,6 +526,11 @@ main(int argc, char *argv[])
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
     const char *eff_tls_ciphers = cipher_list ? cipher_list : file_cfg.tls_ciphers;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
+    int eff_allow_client_sched =
+        allow_client_sched >= 0 ? allow_client_sched : file_cfg.allow_client_scheduler;
+    int eff_request_server_sched = request_server_sched >= 0
+                                       ? request_server_sched
+                                       : file_cfg.request_server_scheduler;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
     int eff_sync_path_labels =
@@ -756,6 +774,7 @@ main(int argc, char *argv[])
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
+            .request_server_scheduler = eff_request_server_sched,
             .auth_key = eff_auth_key_client,
             .auth_username = eff_auth_username,
             .n_dns = n_dns,
@@ -841,6 +860,7 @@ main(int argc, char *argv[])
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
+            .allow_client_scheduler = eff_allow_client_sched,
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,

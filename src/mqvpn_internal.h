@@ -114,6 +114,8 @@ struct mqvpn_config_s {
     int n_pinned_pubkeys;
 
     mqvpn_scheduler_t scheduler;
+    int allow_client_scheduler;   /* server: honour a client scheduler request */
+    int request_server_scheduler; /* client: ask the server to use our scheduler */
     mqvpn_cc_t        cc;
     int fec_enable;
     mqvpn_fec_scheme_t fec_scheme;
@@ -430,5 +432,18 @@ MQVPN_INTERNAL int mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
  * possibly n_paths==0) or 0 (not connected); -1 only for bad arguments. */
 MQVPN_INTERNAL int mqvpn_client_get_reinject(const mqvpn_client_t *c,
                                              mqvpn_internal_client_reinject_t *out);
+
+/* Per-client effective downlink scheduler name, for get_status. Side
+ * channel like the reinject snapshot: mqvpn_client_info_t is unchanged. */
+typedef struct {
+    char scheduler[16];
+} mqvpn_internal_client_sched_t;
+
+/* Same session-iteration order and tunnel_established guard as
+ * mqvpn_server_get_client_info() (index-aligned within one control-command
+ * handler). Returns the number of entries filled, or -1 on bad arguments. */
+MQVPN_INTERNAL int mqvpn_server_get_client_sched(const mqvpn_server_t *s,
+                                                 mqvpn_internal_client_sched_t *out,
+                                                 int max);
 
 #endif /* MQVPN_INTERNAL_H */

@@ -357,7 +357,7 @@ Return per-client and per-path detail for all currently connected clients.
   "n_clients":1,
   "clients":[
     {
-      "user":"alice","endpoint":"1.2.3.4:443",
+      "user":"alice","endpoint":"1.2.3.4:443","scheduler":"wlb",
       "connected_sec":42,
       "bytes_tx":1000,"bytes_rx":2000,
       "n_paths":1,"paths":[
@@ -388,6 +388,7 @@ Return per-client and per-path detail for all currently connected clients.
 |-----------------|--------|----------------------------------------------------|
 | `user`          | string | Username                                           |
 | `endpoint`      | string | Client's remote address and port (`ip:port`)       |
+| `scheduler`     | string | Scheduler this client's connection uses for the server-to-client direction. Equals the server default unless the client asked for another one, `AllowClientScheduler` is on, and none of the exceptions in the configuration guide applied. Added in v0.18.0. |
 | `connected_sec` | uint64 | Seconds since the session was established          |
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
@@ -439,7 +440,7 @@ support was compiled in.
 | Field        | Type    | Description                                                    |
 |--------------|---------|----------------------------------------------------------------|
 | `version`    | string  | Version string from `mqvpn_version_string()`                   |
-| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown`. Client mode: the client's own configured `Scheduler`/`scheduler` setting (previously always reported `"unknown"` regardless of the real configured value — fixed, see §7). |
+| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown`. Server mode: the server default (`Scheduler`); per-client values are in `get_status`. Client mode: the client's own configured `Scheduler`/`scheduler` setting (previously always reported `"unknown"` regardless of the real configured value — fixed, see §7). |
 | `fec_enabled`| integer | `1` if built with `XQC_ENABLE_FEC`; `0` otherwise             |
 
 ---
@@ -794,6 +795,9 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
+  struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
+  consumers remain unaffected.
 - `get_status` path objects gained `reinject_tx_bytes` in v0.15.0 — the
   per-path bytes speculatively duplicated by reinjection. Additive; existing
   JSON consumers remain unaffected. The value is read from the server's

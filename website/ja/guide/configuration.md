@@ -228,6 +228,8 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Scheduler` | スケジューラアルゴリズム: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant`, `dscp` のいずれか | `wlb` |
+| `AllowClientScheduler` | サーバーのみ (JSON では `allow_client_scheduler`、コマンドラインでは `--allow-client-scheduler`)。`true` にすると、スケジューラを指定してきたクライアントには、そのクライアント自身の接続のダウンロード方向でそのスケジューラを使います。ほかのクライアントはサーバーの `Scheduler` のままです。クライアントが `backup_fec` を指定した場合、サーバーの `Scheduler` が `backup_fec` の場合、同じ接続ですでに一度スケジューラを変更した場合、接続がすでに複数のパスを使っている場合は、リクエストは適用されず、その接続は現在のスケジューラ（最初はサーバーの `Scheduler`）のままです。 | `false` |
+| `RequestServerScheduler` | クライアントのみ (JSON では `request_server_scheduler`、コマンドラインでは `--request-server-scheduler`)。`true` にすると、このクライアントの `Scheduler` をダウンロード方向にも使うようサーバーに依頼します。`Scheduler` だけを設定した場合は、従来どおりアップロード方向にのみ影響します。`AllowClientScheduler = true` のサーバーでのみ有効です。 | `false` |
 | `CC`（別名 `CongestionControl`） | 輻輳制御アルゴリズム: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited`, `none` のいずれか | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可、クライアントのみ、最大 8 個） | デフォルトインターフェース |
 | `BackupPath` | フェイルオーバー用のインターフェース（複数指定可、クライアントのみ）。スタンバイ状態で接続され、動作している `Path` がある間はトラフィックを流しません。すべての `Path` がダウンまたは不調になると引き継ぎます。例外：`redundant` はこのインターフェースにも複製を送信し、`backup_fec` は修復用データを送信します。`backup` は `Path` が低速または過負荷のときにも使用することがあります | — |
@@ -240,6 +242,8 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
+
+このバージョンのサーバーは、`AllowClientScheduler` が `false` の場合でも、接続中の各クライアントに、そのクライアントに対して使っているスケジューラを通知します。`RequestServerScheduler` を設定したクライアントは、接続後に `server scheduler: <name> (requested <name>)` とログに出力します。
 
 スケジューラの詳細は[マルチパス](./multipath)、Reinjection のモード別ガイドは
 [マルチパスの Reinjection 節](./multipath)を参照してください。
@@ -276,7 +280,7 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 ACK 方向のデモートは自動です。ACK / 制御ストリームのように見える（ほとんどが小さいパケットの）フローはパススルーへ移され、遅延されることがなくなります。これは内部的な挙動であり設定可能なつまみではありません — `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold` を通じて間接的に調整します。
 
-reorder はスループットとレイテンシのトレードオフで、bulk 転送には効きますが、対象になるすべてのフローに最大 `MaxWaitMs` の遅延を上乗せします。1 本のトンネルは通常その両方のトラフィックを運ぶため、ポート単位の `[ReorderRule]` で、効く所（bulk な内側 QUIC）だけ有効にし、低遅延トラフィック（DNS, NTP, リアルタイム UDP）はパススルーさせられます。マッチしない UDP はデフォルトでパススルーなので、reorder したいポートだけルールを書けば済みます:
+reorder はスループットとレイテンシのトレードオフで、bulk 転送には効きますが、対象になるすべてのフローに遅延を上乗せします。`MaxWaitMs` は欠落データグラムをスキップするまで受信側が待つ時間で、待っている最中に新たに開いたギャップは次の待ちに回されるため、保持時間は名目上 `MaxWaitMs` の 2 倍までです（バッファ上限によるフラッシュで早く解放されることがあり、期限は定期的に確認されるため、少し超過することがあります）。順序どおりに届いたデータグラムは遅延しません。1 本のトンネルは通常その両方のトラフィックを運ぶため、ポート単位の `[ReorderRule]` で、効く所（bulk な内側 QUIC）だけ有効にし、低遅延トラフィック（DNS, NTP, リアルタイム UDP）はパススルーさせられます。マッチしない UDP はデフォルトでパススルーなので、reorder したいポートだけルールを書けば済みます:
 
 ```ini
 [Reorder]

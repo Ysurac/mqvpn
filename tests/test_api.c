@@ -491,6 +491,31 @@ TEST(config_set_scheduler)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_sched_knob_setters)
+{
+    ASSERT_EQ(mqvpn_config_set_allow_client_scheduler(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_request_server_scheduler(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg->allow_client_scheduler, 0);
+    ASSERT_EQ(cfg->request_server_scheduler, 0);
+    ASSERT_EQ(mqvpn_config_set_allow_client_scheduler(cfg, 5), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_request_server_scheduler(cfg, 5), MQVPN_OK);
+    ASSERT_EQ(cfg->allow_client_scheduler, 1);
+    ASSERT_EQ(cfg->request_server_scheduler, 1);
+    mqvpn_config_free(cfg);
+}
+
+TEST(config_sched_knobs_from_json)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"allow_client_scheduler\":true,"
+                                          "\"request_server_scheduler\":true}"),
+              MQVPN_OK);
+    ASSERT_EQ(cfg->allow_client_scheduler, 1);
+    ASSERT_EQ(cfg->request_server_scheduler, 1);
+    mqvpn_config_free(cfg);
+}
+
 TEST(config_set_cc)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
@@ -2907,6 +2932,152 @@ TEST(reorder_echo_in_deciding_200_section_sets_flag)
     mqvpn_client_destroy(c);
 }
 
+/* ── Per-user scheduler negotiation (client side) ── */
+extern int mqvpn_client_test_conn_peer_sched(mqvpn_client_t *c, int *out_sched);
+extern void mqvpn_client_test_set_hold_extra_paths(mqvpn_client_t *c, int v);
+extern int mqvpn_client_test_hold_extra_paths(mqvpn_client_t *c);
+extern void mqvpn_client_test_reset_paths_for_reconnect(mqvpn_client_t *c);
+extern void mqvpn_client_test_ready_to_create_path(mqvpn_client_t *c);
+extern void mqvpn_client_test_release_path_hold(mqvpn_client_t *c);
+extern int mqvpn_client_test_force_established(mqvpn_client_t *c);
+
+/* Scan an optional interim section, then the final section; return
+ * has_peer_sched. NULL = header absent. */
+static int
+sched_echo_scan(const char *interim, const char *status, const char *sched_in_interim,
+                const char *sched, int *out_sched)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    if (mqvpn_client_test_conn_alloc(c) != 0) return -99;
+    const char *n[] = {":status", "mqvpn-scheduler"};
+    if (interim) {
+        const char *v[] = {interim, sched_in_interim ? sched_in_interim : ""};
+        mqvpn_client_test_scan_headers(c, n, v, sched_in_interim ? 2 : 1);
+    }
+    const char *v[] = {status, sched ? sched : ""};
+    mqvpn_client_test_scan_headers(c, n, v, sched ? 2 : 1);
+    int has = mqvpn_client_test_conn_peer_sched(c, out_sched);
+    mqvpn_client_test_conn_free(c);
+    mqvpn_client_destroy(c);
+    return has;
+}
+
+TEST(scan_headers_sched_echo_on_200)
+{
+    int s = -1;
+    ASSERT_EQ(sched_echo_scan(NULL, "200", NULL, "minrtt", &s), 1);
+    ASSERT_EQ(s, MQVPN_SCHED_MINRTT);
+}
+
+TEST(scan_headers_sched_echo_ignored_on_403)
+{
+    int s = -1;
+    ASSERT_EQ(sched_echo_scan(NULL, "403", NULL, "minrtt", &s), 0);
+}
+
+TEST(scan_headers_sched_echo_interim_ignored)
+{
+    int s = -1;
+    ASSERT_EQ(sched_echo_scan("103", "200", "minrtt", NULL, &s), 0);
+}
+
+TEST(scan_headers_no_sched_echo)
+{
+    int s = -1;
+    ASSERT_EQ(sched_echo_scan(NULL, "200", NULL, NULL, &s), 0);
+}
+
+TEST(scan_headers_sched_echo_invalid)
+{
+    int s = -1;
+    ASSERT_EQ(sched_echo_scan(NULL, "200", NULL, "bogus", &s), 0);
+}
+
+static int
+slot_is_pending(mqvpn_client_t *c, mqvpn_path_handle_t h)
+{
+    const char *n = mqvpn_client_test_get_path_state_name(c, h, NULL);
+    return n && strcmp(n, "PENDING") == 0;
+}
+
+TEST(add_path_held_stays_pending)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    mqvpn_client_test_set_hold_extra_paths(c, 1);
+    mqvpn_path_handle_t h = add_fake_path(c, NULL, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(slot_is_pending(c, h), 1);
+    mqvpn_client_test_conn_free(c);
+    mqvpn_client_destroy(c);
+}
+
+TEST(client_reset_clears_hold)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    mqvpn_client_test_set_hold_extra_paths(c, 1);
+    mqvpn_client_test_reset_paths_for_reconnect(c);
+    ASSERT_EQ(mqvpn_client_test_hold_extra_paths(c), 0);
+    mqvpn_client_destroy(c);
+}
+
+TEST(ready_to_create_path_held_stays_pending)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    mqvpn_client_test_reset_paths_for_reconnect(c); /* multipath_ready = 0 */
+    mqvpn_path_handle_t h = add_fake_path(c, NULL, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(slot_is_pending(c, h), 1);
+    mqvpn_client_test_set_hold_extra_paths(c, 1);
+    mqvpn_client_test_ready_to_create_path(c);
+    ASSERT_EQ(slot_is_pending(c, h), 1);
+    mqvpn_client_test_conn_free(c);
+    mqvpn_client_destroy(c);
+}
+
+TEST(release_before_multipath_ready_only_clears)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    ASSERT_EQ(mqvpn_client_test_force_established(c), 0);
+    mqvpn_client_test_reset_paths_for_reconnect(c); /* multipath_ready = 0 */
+    mqvpn_path_handle_t h = add_fake_path(c, NULL, NULL);
+    ASSERT_NE(h, (mqvpn_path_handle_t)-1);
+    mqvpn_client_test_set_hold_extra_paths(c, 1);
+    mqvpn_client_test_release_path_hold(c);
+    ASSERT_EQ(mqvpn_client_test_hold_extra_paths(c), 0);
+    ASSERT_EQ(slot_is_pending(c, h), 1);
+    mqvpn_client_test_conn_free(c);
+    mqvpn_client_destroy(c);
+}
+
+TEST(release_without_echo_clears_hold)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    int s = -1;
+    ASSERT_EQ(mqvpn_client_test_conn_peer_sched(c, &s), 0);
+    mqvpn_client_test_set_hold_extra_paths(c, 1);
+    mqvpn_client_test_release_path_hold(c);
+    ASSERT_EQ(mqvpn_client_test_hold_extra_paths(c), 0);
+    mqvpn_client_test_conn_free(c);
+    mqvpn_client_destroy(c);
+}
+
+TEST(no_request_never_holds)
+{
+    mqvpn_client_t *c = make_test_client_with_closed_cb();
+    ASSERT_EQ(mqvpn_client_test_conn_alloc(c), 0);
+    mqvpn_client_test_ready_to_create_path(c);
+    ASSERT_EQ(mqvpn_client_test_hold_extra_paths(c), 0);
+    mqvpn_client_test_conn_free(c);
+    mqvpn_client_destroy(c);
+}
+
+
 TEST(request_close_during_local_shutdown_keeps_closed_reason)
 {
     mqvpn_client_t *c = make_test_client_with_closed_cb();
@@ -4272,6 +4443,8 @@ main(void)
     run_config_set_insecure();
     run_config_set_tun_mtu();
     run_config_set_scheduler();
+    run_config_sched_knob_setters();
+    run_config_sched_knobs_from_json();
     run_config_set_cc();
     run_config_load_json_reinjection();
     run_config_set_reinjection();
@@ -4414,6 +4587,17 @@ main(void)
     run_headers_malformed_status_length_latches_failure();
     run_reorder_echo_ignored_outside_deciding_200_section();
     run_reorder_echo_in_deciding_200_section_sets_flag();
+    run_scan_headers_sched_echo_on_200();
+    run_scan_headers_sched_echo_ignored_on_403();
+    run_scan_headers_sched_echo_interim_ignored();
+    run_scan_headers_no_sched_echo();
+    run_scan_headers_sched_echo_invalid();
+    run_add_path_held_stays_pending();
+    run_client_reset_clears_hold();
+    run_ready_to_create_path_held_stays_pending();
+    run_release_before_multipath_ready_only_clears();
+    run_release_without_echo_clears_hold();
+    run_no_request_never_holds();
     run_request_close_during_local_shutdown_keeps_closed_reason();
     run_request_close_server_rst_still_signals_protocol();
     run_connect_fail_requests_conn_close();

@@ -27,6 +27,7 @@ typedef struct mqvpn_client_cfg_s {
     int n_paths;                /* number of path interfaces (0 = single-path) */
     const char *backup_ifaces[MQVPN_MAX_PATH_IFACES]; /* failover-only interfaces */
     int n_backup_paths;         /* number of backup interfaces */
+    int request_server_scheduler; /* 1=ask the server to use our scheduler (default 0) */
     int scheduler;              /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin, 6=wrtt, 7=wrr, 8=redundant, 9=dscp */
     int fec_enable;             /* 1=enable FEC */
     int fec_scheme;             /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */

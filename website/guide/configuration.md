@@ -233,6 +233,8 @@ Enables the [Control API](#control-api), in both client and server mode. Disable
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Scheduler` | Scheduler algorithm: `minrtt`, `wlb`, `backup`, `wlb_udp_pin`, `backup_fec`, `rap`, `wrtt`, `wrr`, `redundant` or `dscp` | `wlb` |
+| `AllowClientScheduler` | Server only (`allow_client_scheduler` in JSON, or pass `--allow-client-scheduler`). When `true`, a client that asks for a scheduler gets it for its own connection's download direction; other clients keep the server's `Scheduler`. The request is not applied, and the connection keeps the scheduler it already has (at first, the server's `Scheduler`), when the client asks for `backup_fec`, when the server's `Scheduler` is `backup_fec`, when the same connection already changed its scheduler once, or when the connection already uses more than one path. | `false` |
+| `RequestServerScheduler` | Client only (`request_server_scheduler` in JSON, or pass `--request-server-scheduler`). When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` (alias `CongestionControl`) | Congestion control algorithm: `bbr2`, `bbr`, `cubic`, `new_reno`, `copa`, `unlimited` or `none` | `bbr2` |
 | `Path` | Network interface to bind (repeatable, client only, up to 8) | Default interface |
 | `BackupPath` | Failover interface (repeatable, client only). It is brought up in standby and carries no traffic while a `Path` interface works; it takes over when every `Path` is down or failing. Exceptions: `redundant` also sends its copies over it, `backup_fec` sends its repair data over it, and `backup` may also use it while the `Path` interfaces are slow or overloaded | — |
@@ -245,6 +247,8 @@ Enables the [Control API](#control-api), in both client and server mode. Disable
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
+
+A server of this version tells each connected client which scheduler it uses for that client, even when `AllowClientScheduler` is `false`. A client that sets `RequestServerScheduler` logs `server scheduler: <name> (requested <name>)` after it connects.
 
 See [Multipath](./multipath) for scheduler details and
 [Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.
@@ -281,7 +285,7 @@ A flow-aware reorder buffer for inner UDP traffic. It targets a single inner con
 
 Demotion in the ACK direction is automatic: a flow that looks like an ACK/control stream (mostly small packets) is moved to pass-through so it is never delayed. This is internal behaviour, not a configurable knob — tune it indirectly via `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold`.
 
-Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but adds up to `MaxWaitMs` of delay to every flow it touches. Since one tunnel usually carries both kinds of traffic, per-port `[ReorderRule]` sections let you enable it where it helps (bulk inner QUIC) and pass latency-sensitive traffic through (DNS, NTP, real-time UDP). Unmatched UDP is pass-through by default, so you only need rules for the ports you want reordered:
+Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but delays every flow it touches: `MaxWaitMs` is how long the receiver waits for a missing datagram before skipping it; a gap that opens while another is already being waited for is deferred to the next wait, so a hold is nominally at most twice `MaxWaitMs` (buffer-limit flushes can release a gap earlier, and because the deadline is checked periodically, a wait can run slightly past it). Datagrams that arrive in order are never delayed. Since one tunnel usually carries both kinds of traffic, per-port `[ReorderRule]` sections let you enable it where it helps (bulk inner QUIC) and pass latency-sensitive traffic through (DNS, NTP, real-time UDP). Unmatched UDP is pass-through by default, so you only need rules for the ports you want reordered:
 
 ```ini
 [Reorder]
