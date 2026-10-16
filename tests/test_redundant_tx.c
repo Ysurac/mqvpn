@@ -124,16 +124,16 @@ enter_overload(mqvpn_redundant_tx_t *t)
     assert(at == 2900);
 }
 
-/* A stream of one original every step_ms from step_ms to 6000 ms, copies on paths
+/* A stream of one original every step_ms from step_ms to to_ms, copies on paths
  * {0, 1} (no select, nothing acked), update_mode() at every multiple of 100 ms.
  * Stops at the first non-zero update result, returns it and its time in *at_ms
  * (0 if none). */
 static int
-drive_every(mqvpn_redundant_tx_t *t, uint64_t step_ms, uint64_t *at_ms)
+drive_every(mqvpn_redundant_tx_t *t, uint64_t step_ms, uint64_t to_ms, uint64_t *at_ms)
 {
     const int paths[2] = {0, 1};
     *at_ms = 0;
-    for (uint64_t ms = step_ms; ms <= 6000; ms += step_ms) {
+    for (uint64_t ms = step_ms; ms <= to_ms; ms += step_ms) {
         uint64_t ids[2];
         ids[0] = g_next_id++;
         ids[1] = g_next_id++;
@@ -548,16 +548,16 @@ test_probe_base_is_lowest_second(void)
     /* 1000 pps worth of bytes: no fit at base 999 or 1000, a fit at base 900 */
     mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1400000, 0);
     enter_overload(t);
-    assert(drive(t, 2901, 11999, 0, &at) == 0);
-    for (uint64_t ms = 12000; ms < 13000; ms++) { /* second 12 carries 900 packets */
+    assert(drive(t, 2901, 4999, 0, &at) == 0);
+    for (uint64_t ms = 5000; ms < 6000; ms++) { /* second 5 carries 900 packets */
         if (ms % 10) assert(mqvpn_redundant_tx_overload_bypass(t, ms * 1000) == 1);
-        /* at 12900 the hold is over, but the base is still 1000: no fit */
         if (ms % 100 == 0)
             assert(mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) == 0);
     }
-    /* the first packet of second 13 records second 12: base 900 */
-    assert(drive(t, 13000, 14000, 0, &at) == -1);
-    assert(at == 13100);
+    /* the hold ends at 12900, when the history holds seconds 2-11: base 900, not the
+     * 1000 of the last second */
+    assert(drive(t, 6000, 13000, 0, &at) == -1);
+    assert(at == 12900);
     mqvpn_redundant_tx_free(t);
 }
 
@@ -660,19 +660,11 @@ test_mode_resets_after_total_outage(void)
 static void
 test_short_needs_fed(void)
 {
-    const int u[2] = {0, 1}, paths[2] = {0, 1};
     uint64_t at;
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
     for (int p = 0; p < 2; p++) /* in flight covers the outstanding copies */
         mqvpn_redundant_tx_set_path_metrics(t, p, 0, 0, 100000000);
-    for (uint64_t ms = 1; ms <= 3000; ms++) { /* no select: no path hits its limit */
-        uint64_t ids[2];
-        ids[0] = g_next_id++;
-        ids[1] = g_next_id++;
-        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000, 1400);
-        if (ms % 100 == 0)
-            assert(mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) == 0);
-    }
+    assert(drive_every(t, 1, 3000, &at) == 0); /* no select: no path hits its limit */
     assert(drive(t, 3001, 6000, 0, &at) == 1); /* select skips both paths: fed */
     assert(at == 3900);
     mqvpn_redundant_tx_free(t);
@@ -683,11 +675,11 @@ test_overload_needs_enough_copies(void)
 {
     uint64_t at;
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
-    assert(drive_every(t, 20, &at) == 0); /* 50 pps: 10 copies per window, too few */
+    assert(drive_every(t, 20, 6000, &at) == 0); /* 50 pps: 10 copies per window */
     mqvpn_redundant_tx_free(t);
 
     t = mqvpn_redundant_tx_new();
-    assert(drive_every(t, 4, &at) == 1); /* 250 pps: 50 copies per window */
+    assert(drive_every(t, 4, 6000, &at) == 1); /* 250 pps: 50 copies per window */
     assert(at == 2900);
     mqvpn_redundant_tx_free(t);
 }
