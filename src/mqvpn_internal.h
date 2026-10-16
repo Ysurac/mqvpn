@@ -233,6 +233,8 @@ MQVPN_INTERNAL int mqvpn_client_test_decide_lane(mqvpn_client_t *c, const uint8_
 MQVPN_INTERNAL void mqvpn_client_test_dgram_notify(mqvpn_client_t *c, uint64_t dgram_id,
                                                    int acked);
 MQVPN_INTERNAL int mqvpn_client_test_redundant_outstanding(mqvpn_client_t *c, int idx);
+MQVPN_INTERNAL struct mqvpn_redundant_tx_s *
+mqvpn_client_test_redundant_tx(mqvpn_client_t *c);
 MQVPN_INTERNAL void mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live,
                                                uint64_t xqc_path_id);
 

@@ -3962,6 +3962,9 @@ tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, si
     int usable[MQVPN_MAX_PATHS], sel[MQVPN_MAX_PATHS], paths[MQVPN_MAX_PATHS];
     uint64_t ids[MQVPN_MAX_PATHS];
     int nu = redundant_usable_paths(c, conn, usable);
+    /* overload mode: one ordinary send, still counted toward the stream rate */
+    if (nu && mqvpn_redundant_tx_overload_bypass(conn->redundant_tx, client_now_us(c)))
+        return 0;
     int k = nu ? mqvpn_redundant_tx_select(conn->redundant_tx, usable, nu, sel) : 0;
     if (nu && !k) { /* a usable path always yields a pick unless the tables are full */
         if (!conn->redundant_full_warned)
@@ -4308,8 +4311,10 @@ tick_handshake_watchdog(mqvpn_client_t *c)
 
 /* ─── Tick ─── */
 
-/* Redundant mode, every 100 ms: re-sync the tracker's slot bindings and feed it
- * each usable path's smoothed RTT (it sizes the per-path guard limit). */
+/* Redundant mode, every 100 ms while some path is usable: re-sync the tracker's
+ * slot bindings, feed it each usable path's smoothed RTT (guard limit) and load,
+ * and update overload mode (a total outage of 1 s or more resets the mode when a
+ * path returns). */
 static void
 tick_redundant_refresh(mqvpn_client_t *c)
 {
@@ -4333,6 +4338,13 @@ tick_redundant_refresh(mqvpn_client_t *c)
                                                 pm->path_bytes_in_flight);
     }
     free(st.paths_info);
+
+    int mode = mqvpn_redundant_tx_update_mode(conn->redundant_tx, usable, nu, now);
+    if (mode > 0)
+        LOG_I(c, "redundant mode: no path can carry the stream alone; "
+                 "sending without copies");
+    else if (mode < 0)
+        LOG_I(c, "redundant mode: sending copies on every path again");
 }
 
 int
@@ -4672,6 +4684,13 @@ mqvpn_client_test_redundant_outstanding(mqvpn_client_t *c, int idx)
 {
     if (!c || !c->conn || !c->conn->redundant_tx) return -1;
     return mqvpn_redundant_tx_outstanding(c->conn->redundant_tx, idx);
+}
+
+MQVPN_INTERNAL
+struct mqvpn_redundant_tx_s *
+mqvpn_client_test_redundant_tx(mqvpn_client_t *c)
+{
+    return (c && c->conn) ? c->conn->redundant_tx : NULL;
 }
 
 MQVPN_INTERNAL

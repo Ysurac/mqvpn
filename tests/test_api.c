@@ -3445,6 +3445,7 @@ TEST(transport_send_mapping_partial_would_block_zero_bogus)
 /* ── Redundant mode: client send path ── */
 
 #include <xquic/xqc_http3.h>
+#include "redundant_tx.h"
 
 #define RT_STREAM_ID 4 /* masque_stream_id the fixture installs */
 #define RT_MAX_CALLS 20000
@@ -3631,6 +3632,34 @@ TEST(redundant_send_mixed_error_eagain)
     ASSERT_EQ(s.n, 2);
     ASSERT_EQ(rt_count_path(&s, UINT64_MAX), 0);
     ASSERT_EQ(rt_stat(c, 0), 0);
+    rt_done(c);
+}
+
+TEST(redundant_overload_sends_once)
+{
+    mqvpn_client_t *c = rt_client(NULL, 0, 0, 0);
+    mqvpn_redundant_tx_t *t = mqvpn_client_test_redundant_tx(c);
+    ASSERT_NOT_NULL(t);
+    int u[2] = {0, 1}, entered = 0;
+    for (uint64_t ms = 100; ms <= 4000 && !entered; ms += 100) { /* every path short */
+        uint64_t ids[2] = {1000000 + 2 * ms, 1000001 + 2 * ms};
+        mqvpn_redundant_tx_commit(t, ids, u, 2, ms * 1000);
+        entered = mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) > 0;
+    }
+    ASSERT_EQ(entered, 1);
+    int o0 = mqvpn_client_test_redundant_outstanding(c, 0);
+    int o1 = mqvpn_client_test_redundant_outstanding(c, 1);
+    rt_stub_t s;
+    rt_stub_init(&s, 10);
+    uint8_t pkt[100];
+    rt_udp_pkt(pkt, sizeof(pkt), 5000);
+    ASSERT_EQ(mqvpn_client_test_redundant_send(c, pkt, sizeof(pkt), rt_send, &s),
+              MQVPN_OK);
+    ASSERT_EQ(s.n, 1);
+    ASSERT_EQ(s.path[0], UINT64_MAX); /* one ordinary send */
+    ASSERT_EQ(rt_stat(c, 0), 1);
+    ASSERT_EQ(mqvpn_client_test_redundant_outstanding(c, 0), o0); /* not tracked */
+    ASSERT_EQ(mqvpn_client_test_redundant_outstanding(c, 1), o1);
     rt_done(c);
 }
 
@@ -4007,6 +4036,7 @@ main(void)
     run_redundant_send_partial_eagain();
     run_redundant_send_hard_errors_fall_back();
     run_redundant_send_mixed_error_eagain();
+    run_redundant_overload_sends_once();
     run_redundant_counters_per_original();
     run_redundant_slot_reuse_old_notifications();
     run_redundant_non_matching_untouched();
