@@ -64,17 +64,26 @@ teardown_netns() {
     ip link del bench-b0 2>/dev/null || true
 }
 
+# shape_dev <netns> <dev> <rate> <netem> — netem under a tbf root. netem counts
+# its limit in skbs, and a UDP GSO send is one skb carrying many packets, so on
+# its own a "limit 600" queue held ~3.5x the intended bytes (measured). The tbf
+# root only splits GSO skbs into wire packets (burst 2000 is below any
+# multi-packet GSO skb); its 10gbit rate never shapes. Path rate, delay, loss
+# and limit stay on netem.
+shape_dev() {
+    local ns="$1" dev="$2" rate="$3" netem="$4"
+    ip netns exec "$ns" tc qdisc add dev "$dev" root handle 1: tbf rate 10gbit burst 2000 latency 1ms &&
+        # shellcheck disable=SC2086  # netem args are intentionally word-split
+        ip netns exec "$ns" tc qdisc add dev "$dev" parent 1:1 handle 10: netem $netem rate "$rate"
+}
+
 apply_tc_full() {
     local rate_a="$1" netem_a="$2" rate_b="$3" netem_b="$4"
     clear_tc
-    # shellcheck disable=SC2086  # netem args are intentionally word-split
-    ip netns exec "$NS_CLIENT" tc qdisc add dev bench-a0 root netem $netem_a rate "$rate_a"
-    # shellcheck disable=SC2086
-    ip netns exec "$NS_SERVER" tc qdisc add dev bench-a1 root netem $netem_a rate "$rate_a"
-    # shellcheck disable=SC2086
-    ip netns exec "$NS_CLIENT" tc qdisc add dev bench-b0 root netem $netem_b rate "$rate_b"
-    # shellcheck disable=SC2086
-    ip netns exec "$NS_SERVER" tc qdisc add dev bench-b1 root netem $netem_b rate "$rate_b"
+    shape_dev "$NS_CLIENT" bench-a0 "$rate_a" "$netem_a"
+    shape_dev "$NS_SERVER" bench-a1 "$rate_a" "$netem_a"
+    shape_dev "$NS_CLIENT" bench-b0 "$rate_b" "$netem_b"
+    shape_dev "$NS_SERVER" bench-b1 "$rate_b" "$netem_b"
 }
 
 clear_tc() {
@@ -202,10 +211,10 @@ rx_bytes() {
 set_path_a() {
     local rate="$1" netem="$2"
     # shellcheck disable=SC2086  # netem args are intentionally word-split
-    ip netns exec "$NS_CLIENT" tc qdisc change dev bench-a0 root netem $netem rate "$rate" \
+    ip netns exec "$NS_CLIENT" tc qdisc change dev bench-a0 parent 1:1 handle 10: netem $netem rate "$rate" \
         || return 1
     # shellcheck disable=SC2086
-    ip netns exec "$NS_SERVER" tc qdisc change dev bench-a1 root netem $netem rate "$rate"
+    ip netns exec "$NS_SERVER" tc qdisc change dev bench-a1 parent 1:1 handle 10: netem $netem rate "$rate"
 }
 
 # flap_path_a <down-s> <period-s> <duration-s> <rate> <netem> — blackhole
