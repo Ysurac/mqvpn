@@ -23,7 +23,7 @@
 #define RTX_START_GRACE 2000000u  /* us: from the start, no judgement counts as short */
 #define RTX_ENTER_N     5         /* all-short judgements in a row to enter */
 #define RTX_REENTER_N   2         /* the same during a probe */
-#define RTX_HOLD_FIRST  10000000u /* us: overload mode lasts this long before a probe */
+#define RTX_HOLD_FIRST  10000000u /* us: first overload hold; a probe also needs a fit */
 #define RTX_HOLD_MAX    32000000u /* us: the hold doubles per failed probe, up to this */
 #define RTX_PROBE_OK    10000000u /* us: a probe this long resets the hold */
 #define RTX_HIST        10        /* whole seconds of rate history */
@@ -126,16 +126,14 @@ struct mqvpn_redundant_tx_s {
     int have_win;
     uint64_t win_sec;
     uint32_t win_count, prev_count;     /* originals in win_sec / the second before */
-    uint64_t last_us;                   /* latest counted commit time */
+    uint64_t last_us;                   /* latest counted packet time */
     uint64_t bkt_id;                    /* now_us / RTX_RATE_BUCKET of the open bucket */
     uint32_t bkt_count, prev_bkt_count; /* originals in bkt_id / bkt_id - 1 */
     /* overload mode */
     int mode, short_n;                    /* RTX_*; all-short judgements in a row */
     uint64_t win_start_us, flow_since_us; /* window, stream start (0 = unset) */
-    uint64_t since_us, hold_us;           /* last mode change; overload hold */
+    uint64_t since_us, hold_us;           /* OVERLOAD / PROBE start; overload hold */
     uint32_t sec_hist[RTX_HIST];          /* originals per whole second, a ring */
-    /* a counted packet came RTX_IDLE or more after the previous one */
-    int idle_seen;
 };
 
 static uint32_t
@@ -193,7 +191,6 @@ rtx_mode_reset(mqvpn_redundant_tx_t *t)
     t->win_start_us = 0;
     t->flow_since_us = 0;
     t->hold_us = RTX_HOLD_FIRST;
-    t->idle_seen = 0;
     memset(t->sec_hist, 0, sizeof(t->sec_hist));
 }
 
@@ -267,7 +264,7 @@ mqvpn_redundant_tx_outstanding(const mqvpn_redundant_tx_t *t, int path)
 }
 
 /* shortcut: pps is the larger of the previous second and the last complete
- * 100 ms bucket x10; an idle gap keeps the last value until the next commit. */
+ * 100 ms bucket x10; an idle gap keeps the last value until the next counted packet. */
 static uint64_t
 rtx_stream_pps(const mqvpn_redundant_tx_t *t)
 {
@@ -309,17 +306,11 @@ mqvpn_redundant_tx_select(mqvpn_redundant_tx_t *t, const int *usable, int n_usab
     return n < room ? n : room;
 }
 
-/* Count one original toward the stream rate: the whole second (recorded in sec_hist
- * once complete) and the 100 ms bucket. */
+/* Count one original toward the stream rate: the whole second and the 100 ms bucket. */
 static void
 rtx_count_rate(mqvpn_redundant_tx_t *t, uint64_t now_us)
 {
     uint64_t sec = now_us / 1000000u;
-    /* a total outage skips the refresh, so the gap is seen when the next packet is
-     * counted (a tracker without a window, e.g. just reset, has nothing to restart) */
-    if (t->win_start_us && t->have_win && now_us >= t->last_us &&
-        now_us - t->last_us >= RTX_IDLE)
-        t->idle_seen = 1;
     /* the clock stepped back, so restart the window */
     if (t->have_win && now_us < t->last_us) t->have_win = 0;
     int fresh = !t->have_win;
@@ -413,17 +404,18 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
                                uint64_t now_us)
 {
     if (!t || !usable || n_usable <= 0) return 0;
-    /* start afresh when no packet was counted for RTX_IDLE (now, or before the last
-     * one: idle_seen) or the clock stepped back */
-    if (t->idle_seen || !t->have_win || now_us < t->last_us ||
-        now_us - t->last_us >= RTX_IDLE || now_us < t->win_start_us) {
+    /* start afresh when no packet was counted, or no judgement ran (a total outage
+     * skips the update), for RTX_IDLE, or the clock stepped back */
+    if (!t->have_win || now_us < t->last_us || now_us - t->last_us >= RTX_IDLE ||
+        now_us < t->win_start_us ||
+        (t->win_start_us && now_us - t->win_start_us >= RTX_IDLE)) {
         int was_overload = t->mode == RTX_OVERLOAD;
         rtx_mode_reset(t);
         return was_overload ? -1 : 0;
     }
     if (t->win_start_us == 0) {
         rtx_window_start(t, now_us);
-        if (t->flow_since_us == 0) t->flow_since_us = now_us ? now_us : 1;
+        t->flow_since_us = t->win_start_us;
         return 0;
     }
     uint64_t el = now_us - t->win_start_us;

@@ -38,9 +38,9 @@ void mqvpn_redundant_tx_detach_path(mqvpn_redundant_tx_t *t, int path);
 
 /* Choose the paths (indices from `usable`, ascending) to send one packet on.
  * Skips paths at their limit; if all are at the limit, returns only the least
- * loaded one. Records the paths it skips at their limit (an input of
- * update_mode). Truncated to the free copy-table capacity; 0 when the original
- * table is full. Reserves nothing: call commit before the next select. */
+ * loaded one. Marks every path found at its limit (an input of update_mode).
+ * Truncated to the free copy-table capacity; 0 when the original table is full.
+ * Reserves nothing: call commit before the next select. */
 int mqvpn_redundant_tx_select(mqvpn_redundant_tx_t *t, const int *usable, int n_usable,
                               int *out);
 
