@@ -68,8 +68,9 @@ void mqvpn_redundant_tx_set_path_metrics(mqvpn_redundant_tx_t *t, int path,
 /* Overload mode: while no usable path can carry the stream alone, redundant
  * packets go out once through the ordinary send. Call from the 100 ms refresh
  * while some path is usable, after set_path_metrics. Returns 1 on entering
- * overload mode, -1 on leaving it (a probe, or a reset: the stream stopped or
- * the clock stepped back), 0 otherwise. */
+ * overload mode, -1 on leaving it (a probe, or a reset: this update found no
+ * packet counted, or no judgement, for 1 s, or the clock stepped back), 0
+ * otherwise. */
 int mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable,
                                    int n_usable, uint64_t now_us);
 

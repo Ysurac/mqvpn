@@ -19,7 +19,7 @@
  * needs a faster path to count as fitting; count the stream's bytes if that matters */
 #define RTX_PKT_BYTES   1400u
 #define RTX_MODE_WIN    200000u   /* us: window of one judgement */
-#define RTX_IDLE        1000000u  /* us: no packet counted this long, stream stopped */
+#define RTX_IDLE        1000000u  /* us: no packet counted, or no judgement, this long */
 #define RTX_START_GRACE 2000000u  /* us: from the start, no judgement counts as short */
 #define RTX_ENTER_N     5         /* all-short judgements in a row to enter */
 #define RTX_REENTER_N   2         /* the same during a probe */
@@ -415,8 +415,9 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
                                uint64_t now_us)
 {
     if (!t || !usable || n_usable <= 0) return 0;
-    /* start afresh when no packet was counted, or no judgement ran (a total outage
-     * skips the update), for RTX_IDLE, or the clock stepped back */
+    /* start afresh when this update finds no packet counted for RTX_IDLE, or no
+     * judgement for RTX_IDLE (a total outage skips the update), or the clock stepped
+     * back */
     if (!t->have_win || now_us < t->last_us || now_us - t->last_us >= RTX_IDLE ||
         now_us < t->win_start_us ||
         (t->win_start_us && now_us - t->win_start_us >= RTX_IDLE)) {
