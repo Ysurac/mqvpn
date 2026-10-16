@@ -37,12 +37,15 @@ override_dh_auto_configure:
 	# 1. BoringSSL (static, position-independent). The guard wipes a build
 	# dir produced from a different BoringSSL source (see
 	# scripts/bssl_build_guard.sh); CMAKE_BUILD_TYPE=Release is mandatory.
+	# -fno-lto: BoringSSL compiles with -Werror, and its LTO IR would carry
+	# that into the libxquic.so link, where GCC 11 (arm64) raises a false
+	# -Wfree-nonheap-object in BN_MONT_CTX_free.
 	$(BSSL_GUARD) bssl_guard_build_dir $(BORINGSSL_DIR) $(BORINGSSL_BUILD)
 	cmake -S $(BORINGSSL_DIR) -B $(BORINGSSL_BUILD) \
 		-DBUILD_SHARED_LIBS=0 \
 		-DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_C_FLAGS="$(HARDENED_CFLAGS) -fPIC" \
-		-DCMAKE_CXX_FLAGS="$(HARDENED_CXXFLAGS) -fPIC"
+		-DCMAKE_C_FLAGS="$(HARDENED_CFLAGS) -fPIC -fno-lto" \
+		-DCMAKE_CXX_FLAGS="$(HARDENED_CXXFLAGS) -fPIC -fno-lto"
 	$(MAKE) -C $(BORINGSSL_BUILD) -j$(JOBS) ssl crypto
 	$(BSSL_GUARD) bssl_stamp_build_dir $(BORINGSSL_DIR) $(BORINGSSL_BUILD)
 	bash $(CURDIR)/scripts/ci_check_bssl_optimized.sh $(BORINGSSL_BUILD)
