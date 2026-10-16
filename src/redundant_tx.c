@@ -132,6 +132,8 @@ struct mqvpn_redundant_tx_s {
     uint64_t win_start_us, flow_since_us; /* window, stream start (0 = unset) */
     uint64_t since_us, hold_us;           /* last mode change; overload hold */
     uint32_t sec_hist[RTX_HIST];          /* originals per whole second, a ring */
+    /* a counted packet came RTX_IDLE or more after the previous one */
+    int idle_seen;
 };
 
 static uint32_t
@@ -189,6 +191,7 @@ rtx_mode_reset(mqvpn_redundant_tx_t *t)
     t->win_start_us = 0;
     t->flow_since_us = 0;
     t->hold_us = RTX_HOLD_FIRST;
+    t->idle_seen = 0;
     memset(t->sec_hist, 0, sizeof(t->sec_hist));
 }
 
@@ -310,6 +313,11 @@ static void
 rtx_count_rate(mqvpn_redundant_tx_t *t, uint64_t now_us)
 {
     uint64_t sec = now_us / 1000000u;
+    /* a total outage skips the refresh, so the gap is seen when the next packet is
+     * counted (a tracker without a window, e.g. just reset, has nothing to restart) */
+    if (t->win_start_us && t->have_win && now_us >= t->last_us &&
+        now_us - t->last_us >= RTX_IDLE)
+        t->idle_seen = 1;
     /* the clock stepped back, so restart the window */
     if (t->have_win && now_us < t->last_us) t->have_win = 0;
     int fresh = !t->have_win;
@@ -403,8 +411,10 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
                                uint64_t now_us)
 {
     if (!t || !usable || n_usable <= 0) return 0;
-    if (!t->have_win || now_us < t->last_us || now_us - t->last_us >= RTX_IDLE ||
-        now_us < t->win_start_us) {
+    /* start afresh when no packet was counted for RTX_IDLE (now, or before the last
+     * one: idle_seen) or the clock stepped back */
+    if (t->idle_seen || !t->have_win || now_us < t->last_us ||
+        now_us - t->last_us >= RTX_IDLE || now_us < t->win_start_us) {
         int was_overload = t->mode == RTX_OVERLOAD;
         rtx_mode_reset(t);
         return was_overload ? -1 : 0;

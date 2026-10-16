@@ -552,6 +552,29 @@ test_mode_resets_when_stream_stops(void)
 }
 
 static void
+test_mode_resets_after_total_outage(void)
+{
+    const int u[2] = {0, 1};
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    enter_overload(t); /* the last packet is at 2900 ms */
+    /* no path until 6000: nothing is counted and no update runs, and the first packet
+     * of the returning path is counted before the next update */
+    assert(mqvpn_redundant_tx_overload_bypass(t, 6001000) == 1); /* still overload */
+    assert(mqvpn_redundant_tx_update_mode(t, u, 2, 6100000) == -1);
+    assert(drive(t, 6101, 12000, 0, &at) == 1);
+    assert(at == 9000); /* the window restarts at 6200, the grace ends at 8200 */
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    assert(drive(t, 1, 3000, 100, &at) == 0); /* path 1 keeps up: normal mode */
+    /* the same outage; the returning path has nothing acked yet */
+    assert(drive(t, 6001, 12000, 0, &at) == 1);
+    assert(at == 9000); /* a fresh grace */
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
 test_short_needs_fed(void)
 {
     const int u[2] = {0, 1}, paths[2] = {0, 1};
@@ -597,6 +620,7 @@ main(void)
     RUN(test_failed_probe_backs_off);
     RUN(test_probe_held_resets_hold);
     RUN(test_mode_resets_when_stream_stops);
+    RUN(test_mode_resets_after_total_outage);
     RUN(test_short_needs_fed);
     printf("\n=== test_redundant_tx: %d passed ===\n", g_run);
     return 0;
