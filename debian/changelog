@@ -110,19 +110,63 @@ mqvpn (0.17.0+20261015-1) UNRELEASED; urgency=medium
     Windows stops also asking other adapters' DNS servers.
   * fix(ios): the PoC keeps its auth key in the keychain instead of
     providerConfiguration.
-  * xquic: bump to 6c84281:
+  * feat(scheduler): per-connection download scheduler (upstream
+    0.18.0). A client with RequestServerScheduler = true (JSON
+    request_server_scheduler, --request-server-scheduler) asks the
+    server to use its own Scheduler for the download direction too; a
+    server with AllowClientScheduler = true (JSON allow_client_scheduler,
+    --allow-client-scheduler) applies it to that connection only. Both
+    default to false, so nothing changes until both ends opt in. The
+    request is not applied (the connection keeps the server's Scheduler)
+    when either side asks for backup_fec, when the connection already
+    changed it once, or when it already uses more than one path; a
+    requesting client therefore brings its other paths up only after the
+    server answered. The server always reports the scheduler a connection
+    runs: get_status client objects gain "scheduler", and in server mode
+    get_build_info's scheduler is the server default. New log lines:
+    server "client requested scheduler <s>: applied (user=<u>)" and
+    "client requested scheduler <s>: not applied (<reason>), using <s>
+    (user=<u>)"; client "server scheduler: <s> (requested <s>)" and
+    "server did not report its scheduler (requested <s>)". The Android
+    app can pick the scheduler and shows the server's. Older servers
+    ignore the request: checked against a 0.16.0 server, the tunnel and
+    both paths come up as without it.
+  * fix(reorder): a missing datagram is now waited for at least MaxWaitMs
+    and at most about twice that. The wait started when the buffer first
+    filled and a timeout gave up only the oldest gap, so with traffic
+    spread over several paths a gap opened just before the deadline was
+    given up almost at once (~0.8% of packets dropped as late), while a
+    packet behind a later gap could wait longer than MaxWaitMs. Counter
+    names are unchanged. Moving the window past a far-ahead packet
+    (above) ends and restarts these waits the same way.
+  * xquic: bump to 17d16b2:
     - WLB, minrtt, wrr, wrtt, dscp and rap keep new data off a standby
       path while a usable path exists;
     - h3 recv_body_buf_high_water, used by the hybrid flow control above;
     - max_dgram_unsent_packets and max_dgram_unsent_delay_ms, used by the
-      datagram cap above.
+      datagram cap above;
+    - xqc_conn_reapply_settings, used by the per-connection scheduler
+      above;
+    - a path that silently stops delivering while traffic is still sent
+      on it (an upstream outage, an LTE cell that stops passing traffic)
+      is now noticed and demoted, instead of minrtt and WLB still picking
+      it;
+    - WLB stops weighting a path at its old rate after the path slowed
+      down, and paths not given enough data no longer look saturated;
+    - BBRv2 lowers its rate estimate again after the link capacity drops;
+    - ACK frames are no longer protected by FEC repair (RFC 9221
+      section 5.2);
+    - transport parameters are decoded within their declared length, and
+      a max_ack_delay of 2^14 or more is refused (RFC 9000 section 18).
     Two xquic structs grew: rebuild everything linked against libxquic.
   * build/test/docs: sanitizer builds use -Wall -Wextra; new
     test_server_hardening drives a real server over raw xquic; the docs
     cover the parsed config keys and the control API framing and
-    commands.
+    commands; CI cross-builds for armhf and runs the unit tests there
+    (the formal-model struct size check now applies to 64-bit builds
+    only), and the fuzzers run alongside the e2e steps.
 
- -- mqvpn maintainers <maintainers@example.com>  Thu, 15 Oct 2026 18:51:26 +0200
+ -- mqvpn maintainers <maintainers@example.com>  Fri, 16 Oct 2026 12:50:53 +0200
 
 mqvpn (0.17.0-1) UNRELEASED; urgency=medium
 
