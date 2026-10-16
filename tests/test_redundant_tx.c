@@ -68,7 +68,7 @@ static uint64_t
 add_copy(mqvpn_redundant_tx_t *t, int path, uint64_t now_us)
 {
     uint64_t id = g_next_id++;
-    mqvpn_redundant_tx_commit(t, &id, &path, 1, now_us);
+    mqvpn_redundant_tx_commit(t, &id, &path, 1, now_us, 1400);
     return id;
 }
 
@@ -98,7 +98,7 @@ drive(mqvpn_redundant_tx_t *t, uint64_t from_ms, uint64_t to_ms, int ack_pct,
             uint64_t ids[2];
             for (int i = 0; i < k; i++)
                 ids[i] = g_next_id++;
-            mqvpn_redundant_tx_commit(t, ids, paths, k, now);
+            mqvpn_redundant_tx_commit(t, ids, paths, k, now, 1400);
             for (int i = 0; i < k; i++)
                 if (paths[i] == 1 && n1++ % 100 < (uint64_t)ack_pct)
                     mqvpn_redundant_tx_on_acked(t, ids[i]);
@@ -137,8 +137,45 @@ drive_every(mqvpn_redundant_tx_t *t, uint64_t step_ms, uint64_t *at_ms)
         uint64_t ids[2];
         ids[0] = g_next_id++;
         ids[1] = g_next_id++;
-        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000);
+        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000, 1400);
         if (ms % 100 == 0) {
+            int r = mqvpn_redundant_tx_update_mode(t, paths, 2, ms * 1000);
+            if (r) {
+                *at_ms = ms;
+                return r;
+            }
+        }
+    }
+    return 0;
+}
+
+/* 500 pps of 200 B copies on paths {0, 1} from from_ms to to_ms (inclusive, one original
+ * every 2 ms): 90% of each path's copies are acked at once, so every path is short by
+ * rate, and the rest stay unresolved. At every multiple of 100 ms, before update_mode(),
+ * each path's bytes in flight are set to inflight_pct % of its unresolved copies' bytes.
+ * Stops at the first non-zero update result, returns it and its time in *at_ms (0 if
+ * none). */
+static int
+drive_small(mqvpn_redundant_tx_t *t, uint64_t from_ms, uint64_t to_ms, int inflight_pct,
+            uint64_t *at_ms)
+{
+    const int paths[2] = {0, 1};
+    uint64_t n[2] = {0, 0};
+    *at_ms = 0;
+    for (uint64_t ms = from_ms; ms <= to_ms; ms += 2) {
+        uint64_t ids[2];
+        ids[0] = g_next_id++;
+        ids[1] = g_next_id++;
+        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000, 200);
+        for (int p = 0; p < 2; p++)
+            if (n[p]++ % 10 < 9) mqvpn_redundant_tx_on_acked(t, ids[p]);
+        if (ms % 100 == 0) {
+            for (int p = 0; p < 2; p++) {
+                uint64_t unresolved =
+                    (uint64_t)mqvpn_redundant_tx_outstanding(t, p) * 200;
+                mqvpn_redundant_tx_set_path_metrics(t, p, 0, 0,
+                                                    unresolved * inflight_pct / 100);
+            }
             int r = mqvpn_redundant_tx_update_mode(t, paths, 2, ms * 1000);
             if (r) {
                 *at_ms = ms;
@@ -269,9 +306,9 @@ test_limit_scales(void)
         add_copy(t, 1, 500000);
     int none = 0;
     uint64_t id = g_next_id++;
-    mqvpn_redundant_tx_commit(t, &id, &none, 0, 600000); /* k == 0: not counted */
-    assert(mqvpn_redundant_tx_limit(t, 0) == 300);       /* pps still 0 */
-    add_copy(t, 1, 1500000);                             /* second 1 */
+    mqvpn_redundant_tx_commit(t, &id, &none, 0, 600000, 1400); /* k == 0: not counted */
+    assert(mqvpn_redundant_tx_limit(t, 0) == 300);             /* pps still 0 */
+    add_copy(t, 1, 1500000);                                   /* second 1 */
     mqvpn_redundant_tx_set_path_metrics(t, 0, 150000, 0, 0);
     assert(mqvpn_redundant_tx_limit(t, 0) == 400);
     assert(mqvpn_redundant_tx_limit(t, 1) == 300);
@@ -348,9 +385,9 @@ test_ack_lost_accounting(void)
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
     uint64_t a[2] = {1, 2}, b[2] = {3, 4}, c[2] = {5, 6};
     int p[2] = {0, 1};
-    mqvpn_redundant_tx_commit(t, a, p, 2, 0);
-    mqvpn_redundant_tx_commit(t, b, p, 2, 0);
-    mqvpn_redundant_tx_commit(t, c, p, 2, 0);
+    mqvpn_redundant_tx_commit(t, a, p, 2, 0, 1400);
+    mqvpn_redundant_tx_commit(t, b, p, 2, 0, 1400);
+    mqvpn_redundant_tx_commit(t, c, p, 2, 0, 1400);
     assert(mqvpn_redundant_tx_outstanding(t, 0) == 3);
     assert(mqvpn_redundant_tx_on_acked(t, 1) == 1);
     assert(mqvpn_redundant_tx_on_acked(t, 2) == 0);
@@ -422,8 +459,8 @@ test_detach_and_rebind(void)
     mqvpn_redundant_tx_bind_path(t, 2, 7);
     uint64_t x[2] = {1, 2}, y[2] = {3, 4};
     int p[2] = {0, 2};
-    mqvpn_redundant_tx_commit(t, x, p, 2, 0);
-    mqvpn_redundant_tx_commit(t, y, p, 2, 0);
+    mqvpn_redundant_tx_commit(t, x, p, 2, 0, 1400);
+    mqvpn_redundant_tx_commit(t, y, p, 2, 0, 1400);
     assert(mqvpn_redundant_tx_outstanding(t, 2) == 2);
     mqvpn_redundant_tx_bind_path(t, 2, 7); /* same id: no detach */
     assert(mqvpn_redundant_tx_outstanding(t, 2) == 2);
@@ -632,7 +669,7 @@ test_short_needs_fed(void)
         uint64_t ids[2];
         ids[0] = g_next_id++;
         ids[1] = g_next_id++;
-        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000);
+        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000, 1400);
         if (ms % 100 == 0)
             assert(mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) == 0);
     }
@@ -652,6 +689,19 @@ test_overload_needs_enough_copies(void)
     t = mqvpn_redundant_tx_new();
     assert(drive_every(t, 4, &at) == 1); /* 250 pps: 50 copies per window */
     assert(at == 2900);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_fed_counts_bytes(void)
+{
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    /* everything sent is in flight: nothing is queued, so no path is fed */
+    assert(drive_small(t, 2, 6000, 100, &at) == 0);
+    /* half of it is: the copies queue, and every path is short by rate */
+    assert(drive_small(t, 6002, 8000, 50, &at) == 1);
+    assert(at == 6900); /* five fed judgements from 6100 ms, past the grace */
     mqvpn_redundant_tx_free(t);
 }
 
@@ -683,6 +733,7 @@ main(void)
     RUN(test_mode_resets_when_stream_stops);
     RUN(test_mode_resets_after_total_outage);
     RUN(test_short_needs_fed);
+    RUN(test_fed_counts_bytes);
     RUN(test_overload_needs_enough_copies);
     printf("\n=== test_redundant_tx: %d passed ===\n", g_run);
     return 0;

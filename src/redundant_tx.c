@@ -15,8 +15,8 @@
 #define RTX_RTT_SLACK 250000u /* us added to srtt in the limit */
 /* us per rate bucket; the last complete bucket estimates the current rate */
 #define RTX_RATE_BUCKET 100000u
-/* shortcut: nominal full-size datagram (SRT); count bytes if small-packet streams
- * matter */
+/* shortcut: the fit check assumes full-size datagrams (SRT), so a small-packet stream
+ * needs a faster path to count as fitting; count the stream's bytes if that matters */
 #define RTX_PKT_BYTES   1400u
 #define RTX_MODE_WIN    200000u   /* us: window of one judgement */
 #define RTX_IDLE        1000000u  /* us: no packet counted this long, stream stopped */
@@ -95,13 +95,14 @@ mqvpn_redundant_match(const uint16_t *ports, int n_ports, const uint8_t *pkt, si
 /* ---- guard ---- */
 
 /* Open-addressing table (linear probe, backward-shift delete, no eviction).
- * Copies: key = dgram_id, a = original key, b = path (-1 detached).
+ * Copies: key = dgram_id, a = original key, b = path (-1 detached), len = bytes.
  * Originals: key = internal counter, a = unresolved copies, b = acked flag. */
 typedef struct {
     uint64_t key;
     uint64_t a;
     int32_t b;
     uint8_t used;
+    uint16_t len;
 } rtx_ent_t;
 
 typedef struct {
@@ -113,6 +114,7 @@ typedef struct {
     int bound;
     uint64_t xqc_id;
     int outstanding;
+    uint64_t out_bytes; /* bytes of the unresolved copies */
     uint64_t srtt_us;
     uint64_t acked;            /* copies acked since the judgement window start */
     uint64_t est_bw, inflight; /* bytes/s (congestion estimate), bytes in flight */
@@ -235,6 +237,7 @@ mqvpn_redundant_tx_detach_path(mqvpn_redundant_tx_t *t, int path)
     for (int i = 0; i < RTX_SLOTS; i++)
         if (t->copies.e[i].used && t->copies.e[i].b == path) t->copies.e[i].b = -1;
     t->path[path].outstanding = 0;
+    t->path[path].out_bytes = 0;
 }
 
 void
@@ -335,10 +338,11 @@ rtx_count_rate(mqvpn_redundant_tx_t *t, uint64_t now_us)
 
 void
 mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
-                          const int *paths, int k, uint64_t now_us)
+                          const int *paths, int k, uint64_t now_us, size_t len)
 {
     if (!t || k <= 0 || t->origs.n >= RTX_CAP || t->copies.n + k > RTX_CAP) return;
     rtx_count_rate(t, now_us);
+    uint16_t bytes = len > UINT16_MAX ? UINT16_MAX : (uint16_t)len;
 
     rtx_ent_t *o = tab_insert(&t->origs, ++t->next_orig);
     o->a = (uint64_t)k;
@@ -346,7 +350,11 @@ mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
         rtx_ent_t *c = tab_insert(&t->copies, dgram_ids[i]);
         c->a = o->key;
         c->b = path_ok(paths[i]) ? paths[i] : -1;
-        if (c->b >= 0) t->path[c->b].outstanding++;
+        c->len = bytes;
+        if (c->b >= 0) {
+            t->path[c->b].outstanding++;
+            t->path[c->b].out_bytes += bytes;
+        }
     }
 }
 
@@ -357,8 +365,11 @@ resolve(mqvpn_redundant_tx_t *t, uint64_t dgram_id, int *last, int acked)
     rtx_ent_t *c = tab_find(&t->copies, dgram_id);
     if (!c) return NULL;
     rtx_ent_t *o = tab_find(&t->origs, c->a);
-    if (c->b >= 0) t->path[c->b].outstanding--;
-    if (acked && c->b >= 0) t->path[c->b].acked++;
+    if (c->b >= 0) {
+        t->path[c->b].outstanding--;
+        t->path[c->b].out_bytes -= c->len;
+        if (acked) t->path[c->b].acked++;
+    }
     tab_remove(&t->copies, c);
     *last = (--o->a == 0);
     return o;
@@ -434,8 +445,7 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
         /* short: backed up (at the guard limit, or copies queued in xquic) yet
          * delivering under 95% of the stream */
         uint64_t acked_pps = p->acked * 1000000u / el;
-        uint64_t queued = (uint64_t)p->outstanding * RTX_PKT_BYTES;
-        int fed = p->hit || queued > p->inflight + p->inflight / 10;
+        int fed = p->hit || p->out_bytes > p->inflight + p->inflight / 10;
         if (!fed || acked_pps * 100 >= pps * 95) all_short = 0;
         if (p->est_bw / RTX_PKT_BYTES * 100 >= base * 105) fit = 1;
     }

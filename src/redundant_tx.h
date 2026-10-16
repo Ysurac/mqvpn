@@ -44,9 +44,11 @@ void mqvpn_redundant_tx_detach_path(mqvpn_redundant_tx_t *t, int path);
 int mqvpn_redundant_tx_select(mqvpn_redundant_tx_t *t, const int *usable, int n_usable,
                               int *out);
 
-/* Record one original and its k >= 1 accepted copies; k == 0 is a no-op. */
+/* Record one original and its k >= 1 accepted copies, each len bytes (the framed
+ * packet; the overload judgement compares a path's unresolved copy bytes with its
+ * bytes in flight); k == 0 is a no-op. */
 void mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
-                               const int *paths, int k, uint64_t now_us);
+                               const int *paths, int k, uint64_t now_us, size_t len);
 
 /* -1 not tracked; 1 first ack of its original; 0 original already acked. */
 int mqvpn_redundant_tx_on_acked(mqvpn_redundant_tx_t *t, uint64_t dgram_id);

@@ -3985,7 +3985,8 @@ tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, si
             eagain++;
         }
     }
-    mqvpn_redundant_tx_commit(conn->redundant_tx, ids, paths, accepted, client_now_us(c));
+    mqvpn_redundant_tx_commit(conn->redundant_tx, ids, paths, accepted, client_now_us(c),
+                              n);
     if (accepted) {
         c->dgram_sent++;
         return 1;
