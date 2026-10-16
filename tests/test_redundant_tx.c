@@ -114,7 +114,8 @@ drive(mqvpn_redundant_tx_t *t, uint64_t from_ms, uint64_t to_ms, int ack_pct,
     return 0;
 }
 
-/* An all-short stream (nothing acked) enters overload mode at 2900 ms. */
+/* An all-short stream (nothing acked) enters overload mode at 2900 ms: five
+ * judgements from 2100 ms, the first outside the grace. */
 static void
 enter_overload(mqvpn_redundant_tx_t *t)
 {
@@ -447,9 +448,7 @@ static void
 test_overload_enters_when_every_path_short(void)
 {
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
-    uint64_t at;
-    assert(drive(t, 1, 6000, 0, &at) == 1);
-    assert(at == 2900); /* five judgements from 2100 ms, the first outside the grace */
+    enter_overload(t);
     int o0 = mqvpn_redundant_tx_outstanding(t, 0);
     int o1 = mqvpn_redundant_tx_outstanding(t, 1);
     assert(mqvpn_redundant_tx_overload_bypass(t, 2901000) == 1);
@@ -500,6 +499,28 @@ test_probe_needs_hold_and_fit(void)
     mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1500000, 0);
     assert(drive(t, 32901, 40000, 0, &at) == -1);
     assert(at == 33100);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_probe_base_is_lowest_second(void)
+{
+    const int u[2] = {0, 1};
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    /* 1000 pps worth of bytes: no fit at base 999 or 1000, a fit at base 900 */
+    mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1400000, 0);
+    enter_overload(t);
+    assert(drive(t, 2901, 11999, 0, &at) == 0);
+    for (uint64_t ms = 12000; ms < 13000; ms++) { /* second 12 carries 900 packets */
+        if (ms % 10) assert(mqvpn_redundant_tx_overload_bypass(t, ms * 1000) == 1);
+        /* at 12900 the hold is over, but the base is still 1000: no fit */
+        if (ms % 100 == 0)
+            assert(mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) == 0);
+    }
+    /* the first packet of second 13 records second 12: base 900 */
+    assert(drive(t, 13000, 14000, 0, &at) == -1);
+    assert(at == 13100);
     mqvpn_redundant_tx_free(t);
 }
 
@@ -656,6 +677,7 @@ main(void)
     RUN(test_overload_not_while_one_path_keeps_up);
     RUN(test_overload_bypass_counts_rate);
     RUN(test_probe_needs_hold_and_fit);
+    RUN(test_probe_base_is_lowest_second);
     RUN(test_failed_probe_backs_off);
     RUN(test_probe_held_resets_hold);
     RUN(test_mode_resets_when_stream_stops);
