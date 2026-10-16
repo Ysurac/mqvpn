@@ -3,7 +3,7 @@
 
 /*
  * test_redundant_tx.c — unit tests for the redundant-mode TX module
- * (port-list parsing, packet matching, per-path outstanding-copy guard).
+ * (port-list parsing, packet matching, per-path outstanding-copy guard, overload mode).
  */
 
 /* Keep assert() live even in Release builds (CI-checked). */
@@ -76,6 +76,51 @@ static int
 sel(mqvpn_redundant_tx_t *t, const int *usable, int n, int *out)
 {
     return mqvpn_redundant_tx_select(t, usable, n, out);
+}
+
+/* Mirror the client at 1000 pps from from_ms to to_ms (inclusive, 1 ms apart)
+ * on paths {0, 1}. Each ms, first the packet: if overload_bypass() returns 0,
+ * select + commit (ids from g_next_id), acking path 1's copy at once when
+ * (path-1 copies so far in this call % 100) < ack_pct; then, when ms % 100 == 0,
+ * update_mode(). Stops at the first non-zero update result, returns it and
+ * its time in *at_ms (0 if none). */
+static int
+drive(mqvpn_redundant_tx_t *t, uint64_t from_ms, uint64_t to_ms, int ack_pct,
+      uint64_t *at_ms)
+{
+    const int usable[2] = {0, 1};
+    uint64_t n1 = 0;
+    *at_ms = 0;
+    for (uint64_t ms = from_ms; ms <= to_ms; ms++) {
+        uint64_t now = ms * 1000;
+        if (!mqvpn_redundant_tx_overload_bypass(t, now)) {
+            int paths[2], k = mqvpn_redundant_tx_select(t, usable, 2, paths);
+            uint64_t ids[2];
+            for (int i = 0; i < k; i++)
+                ids[i] = g_next_id++;
+            mqvpn_redundant_tx_commit(t, ids, paths, k, now);
+            for (int i = 0; i < k; i++)
+                if (paths[i] == 1 && n1++ % 100 < (uint64_t)ack_pct)
+                    mqvpn_redundant_tx_on_acked(t, ids[i]);
+        }
+        if (ms % 100 == 0) {
+            int r = mqvpn_redundant_tx_update_mode(t, usable, 2, now);
+            if (r) {
+                *at_ms = ms;
+                return r;
+            }
+        }
+    }
+    return 0;
+}
+
+/* An all-short stream (nothing acked) enters overload mode at 2900 ms. */
+static void
+enter_overload(mqvpn_redundant_tx_t *t)
+{
+    uint64_t at;
+    assert(drive(t, 1, 6000, 0, &at) == 1);
+    assert(at == 2900);
 }
 
 /* ---- parse ---- */
@@ -201,7 +246,7 @@ test_limit_scales(void)
     mqvpn_redundant_tx_commit(t, &id, &none, 0, 600000); /* k == 0: not counted */
     assert(mqvpn_redundant_tx_limit(t, 0) == 300);       /* pps still 0 */
     add_copy(t, 1, 1500000);                             /* second 1 */
-    mqvpn_redundant_tx_set_srtt(t, 0, 150000);
+    mqvpn_redundant_tx_set_path_metrics(t, 0, 150000, 0, 0);
     assert(mqvpn_redundant_tx_limit(t, 0) == 400);
     assert(mqvpn_redundant_tx_limit(t, 1) == 300);
     mqvpn_redundant_tx_free(t);
@@ -211,7 +256,7 @@ static mqvpn_redundant_tx_t *
 fresh_tracker(void)
 {
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
-    mqvpn_redundant_tx_set_srtt(t, 0, 300000);
+    mqvpn_redundant_tx_set_path_metrics(t, 0, 300000, 0, 0);
     return t;
 }
 
@@ -323,7 +368,7 @@ test_capacity_truncates(void)
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
     for (int i = 0; i < 1000; i++)
         add_copy(t, 2, 0); /* gives pps 1000 */
-    mqvpn_redundant_tx_set_srtt(t, 2, 1000000000ull);
+    mqvpn_redundant_tx_set_path_metrics(t, 2, 1000000000ull, 0, 0);
     for (int i = 0; i < 16383 - 1000; i++)
         add_copy(t, 2, 1000000);
     int u[3] = {0, 1, 2}, out[8];
@@ -371,6 +416,162 @@ test_detach_and_rebind(void)
     mqvpn_redundant_tx_free(t);
 }
 
+/* ---- overload mode ---- */
+
+static void
+test_overload_enters_when_every_path_short(void)
+{
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    uint64_t at;
+    assert(drive(t, 1, 6000, 0, &at) == 1);
+    assert(at == 2900); /* five judgements from 2100 ms, the first outside the grace */
+    int o0 = mqvpn_redundant_tx_outstanding(t, 0);
+    int o1 = mqvpn_redundant_tx_outstanding(t, 1);
+    assert(mqvpn_redundant_tx_overload_bypass(t, 2901000) == 1);
+    assert(mqvpn_redundant_tx_outstanding(t, 0) == o0);
+    assert(mqvpn_redundant_tx_outstanding(t, 1) == o1);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_overload_not_while_one_path_keeps_up(void)
+{
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    assert(drive(t, 1, 6000, 100, &at) == 0);
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    assert(drive(t, 1, 6000, 97, &at) == 0); /* 970 pps: not under 95% of the stream */
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    assert(drive(t, 1, 6000, 90, &at) == 1); /* 900 pps: short */
+    assert(at == 2900);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_overload_bypass_counts_rate(void)
+{
+    mqvpn_redundant_tx_t *t = fresh_tracker();
+    enter_overload(t);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 550); /* 1000 pps */
+    for (uint64_t i = 1; i <= 4000; i++)           /* 2000 pps for 2 s, none committed */
+        assert(mqvpn_redundant_tx_overload_bypass(t, 2900000 + i * 500) == 1);
+    assert(mqvpn_redundant_tx_limit(t, 0) == 1100); /* an uncounted bypass leaves 550 */
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_probe_needs_hold_and_fit(void)
+{
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    /* 1000 pps worth of bytes: under 1.05 x the stream's lowest second */
+    mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1400000, 0);
+    enter_overload(t);
+    assert(drive(t, 2901, 32900, 0, &at) == 0); /* the hold ended at 12900 */
+    mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1500000, 0);
+    assert(drive(t, 32901, 40000, 0, &at) == -1);
+    assert(at == 33100);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_failed_probe_backs_off(void)
+{
+    static const struct {
+        uint64_t to_ms;
+        int r;
+        uint64_t at;
+    } step[] = {
+        {6000, 1, 2900},    /* entry */
+        {13000, -1, 12900}, /* probe after the 10 s hold */
+        {14000, 1, 13300},  /* two short judgements: hold 20 s */
+        {34000, -1, 33300}, /* probe */
+        {35000, 1, 33700},  /* hold 40 s, capped at 32 s */
+        {66000, -1, 65700}, /* probe */
+        {67000, 1, 66100},  /* hold stays 32 s */
+        {99000, -1, 98100}, /* probe */
+    };
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1500000, 0); /* fits from the start */
+    uint64_t from = 1, at;
+    for (size_t i = 0; i < sizeof(step) / sizeof(step[0]); i++) {
+        assert(drive(t, from, step[i].to_ms, 0, &at) == step[i].r);
+        assert(at == step[i].at);
+        from = at + 1;
+    }
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_probe_held_resets_hold(void)
+{
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    mqvpn_redundant_tx_set_path_metrics(t, 1, 0, 1500000, 0);
+    enter_overload(t);
+    assert(drive(t, 2901, 13000, 0, &at) == -1 && at == 12900);
+    assert(drive(t, 12901, 14000, 0, &at) == 1 && at == 13300); /* hold 20 s */
+    assert(drive(t, 13301, 34000, 0, &at) == -1 && at == 33300);
+    /* path 1 carries the stream; at 43300 the probe has lasted 10 s: hold 10 s */
+    assert(drive(t, 33301, 43300, 100, &at) == 0);
+    assert(drive(t, 43301, 45000, 0, &at) == 1 && at == 44300);  /* five judgements */
+    assert(drive(t, 44301, 55000, 0, &at) == -1 && at == 54300); /* 64300 at hold 20 s */
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_mode_resets_when_stream_stops(void)
+{
+    const int u[2] = {0, 1};
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    enter_overload(t); /* the last packet is at 2900 ms */
+    for (uint64_t ms = 3000; ms < 3900; ms += 100)
+        assert(mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) == 0);
+    assert(mqvpn_redundant_tx_update_mode(t, u, 2, 3900000) == -1);
+    assert(drive(t, 3901, 10000, 0, &at) == 1);
+    assert(at == 6800); /* the grace starts again */
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    enter_overload(t);
+    /* the clock is below the last counted packet */
+    assert(mqvpn_redundant_tx_update_mode(t, u, 2, 2800000) == -1);
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    enter_overload(t);
+    /* a judgement restarts the window at 3100; 3000 is below it, not below the packet */
+    assert(mqvpn_redundant_tx_update_mode(t, u, 2, 3100000) == 0);
+    assert(mqvpn_redundant_tx_update_mode(t, u, 2, 3000000) == -1);
+    mqvpn_redundant_tx_free(t);
+}
+
+static void
+test_short_needs_fed(void)
+{
+    const int u[2] = {0, 1}, paths[2] = {0, 1};
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    for (int p = 0; p < 2; p++) /* in flight covers the outstanding copies */
+        mqvpn_redundant_tx_set_path_metrics(t, p, 0, 0, 100000000);
+    for (uint64_t ms = 1; ms <= 3000; ms++) { /* no select: no path hits its limit */
+        uint64_t ids[2];
+        ids[0] = g_next_id++;
+        ids[1] = g_next_id++;
+        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000);
+        if (ms % 100 == 0)
+            assert(mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) == 0);
+    }
+    assert(drive(t, 3001, 6000, 0, &at) == 1); /* select skips both paths: fed */
+    assert(at == 3900);
+    mqvpn_redundant_tx_free(t);
+}
+
 int
 main(void)
 {
@@ -389,6 +590,14 @@ main(void)
     RUN(test_capacity_truncates);
     RUN(test_full_table_unknown_lookup);
     RUN(test_detach_and_rebind);
+    RUN(test_overload_enters_when_every_path_short);
+    RUN(test_overload_not_while_one_path_keeps_up);
+    RUN(test_overload_bypass_counts_rate);
+    RUN(test_probe_needs_hold_and_fit);
+    RUN(test_failed_probe_backs_off);
+    RUN(test_probe_held_resets_hold);
+    RUN(test_mode_resets_when_stream_stops);
+    RUN(test_short_needs_fed);
     printf("\n=== test_redundant_tx: %d passed ===\n", g_run);
     return 0;
 }

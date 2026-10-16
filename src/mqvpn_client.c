@@ -4327,7 +4327,10 @@ tick_redundant_refresh(mqvpn_client_t *c)
     for (int j = 0; j < nu; j++) {
         const xqc_path_metrics_t *pm =
             xqc_find_path_metrics(&st, c->paths[usable[j]].xqc_path_id);
-        if (pm) mqvpn_redundant_tx_set_srtt(conn->redundant_tx, usable[j], pm->path_srtt);
+        if (pm)
+            mqvpn_redundant_tx_set_path_metrics(conn->redundant_tx, usable[j],
+                                                pm->path_srtt, pm->path_est_bw,
+                                                pm->path_bytes_in_flight);
     }
     free(st.paths_info);
 }

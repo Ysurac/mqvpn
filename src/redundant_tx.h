@@ -2,8 +2,9 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /*
- * redundant_tx.h — redundant-mode uplink: port-list parsing, packet matching
- * and the per-path outstanding-copy guard. Pure logic (no xquic, no sockets).
+ * redundant_tx.h — redundant-mode uplink: port-list parsing, packet matching,
+ * the per-path outstanding-copy guard and overload mode. Pure logic (no xquic,
+ * no sockets).
  */
 #ifndef MQVPN_REDUNDANT_TX_H
 #define MQVPN_REDUNDANT_TX_H
@@ -37,7 +38,8 @@ void mqvpn_redundant_tx_detach_path(mqvpn_redundant_tx_t *t, int path);
 
 /* Choose the paths (indices from `usable`, ascending) to send one packet on.
  * Skips paths at their limit; if all are at the limit, returns only the least
- * loaded one. Truncated to the free copy-table capacity; 0 when the original
+ * loaded one. Records the paths it skips at their limit (an input of
+ * update_mode). Truncated to the free copy-table capacity; 0 when the original
  * table is full. Reserves nothing: call commit before the next select. */
 int mqvpn_redundant_tx_select(mqvpn_redundant_tx_t *t, const int *usable, int n_usable,
                               int *out);
@@ -51,8 +53,26 @@ int mqvpn_redundant_tx_on_acked(mqvpn_redundant_tx_t *t, uint64_t dgram_id);
 /* -1 not tracked; 1 last unresolved copy and none was acked; 0 otherwise. */
 int mqvpn_redundant_tx_on_lost(mqvpn_redundant_tx_t *t, uint64_t dgram_id);
 
-void mqvpn_redundant_tx_set_srtt(mqvpn_redundant_tx_t *t, int path, uint64_t srtt_us);
 int mqvpn_redundant_tx_outstanding(const mqvpn_redundant_tx_t *t, int path);
 uint32_t mqvpn_redundant_tx_limit(const mqvpn_redundant_tx_t *t, int path);
+
+/* Feed a usable path's smoothed RTT (sizes the guard limit), congestion
+ * estimate (bytes/s) and bytes in flight (overload judgement); from the 100 ms
+ * refresh. */
+void mqvpn_redundant_tx_set_path_metrics(mqvpn_redundant_tx_t *t, int path,
+                                         uint64_t srtt_us, uint64_t est_bw,
+                                         uint64_t inflight);
+
+/* Overload mode: while no usable path can carry the stream alone, redundant
+ * packets go out once through the ordinary send. Call from the 100 ms refresh
+ * while some path is usable, after set_path_metrics. Returns 1 on entering
+ * overload mode, -1 on leaving it (a probe, or a reset: the stream stopped or
+ * the clock stepped back), 0 otherwise. */
+int mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable,
+                                   int n_usable, uint64_t now_us);
+
+/* 1 in overload mode: the packet counts toward the stream rate and the caller
+ * sends it once, untracked. 0 otherwise (nothing counted). */
+int mqvpn_redundant_tx_overload_bypass(mqvpn_redundant_tx_t *t, uint64_t now_us);
 
 #endif /* MQVPN_REDUNDANT_TX_H */
