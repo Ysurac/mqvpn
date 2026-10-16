@@ -415,9 +415,8 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
                                uint64_t now_us)
 {
     if (!t || !usable || n_usable <= 0) return 0;
-    /* start afresh when this update finds no packet counted for RTX_IDLE, or no
-     * judgement for RTX_IDLE (a total outage skips the update), or the clock stepped
-     * back */
+    /* start afresh when this update finds no packet counted, or no judgement (a total
+     * outage skips the update), for RTX_IDLE, or the clock stepped back */
     if (!t->have_win || now_us < t->last_us || now_us - t->last_us >= RTX_IDLE ||
         now_us < t->win_start_us ||
         (t->win_start_us && now_us - t->win_start_us >= RTX_IDLE)) {

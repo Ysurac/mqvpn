@@ -149,43 +149,6 @@ drive_every(mqvpn_redundant_tx_t *t, uint64_t step_ms, uint64_t to_ms, uint64_t 
     return 0;
 }
 
-/* 500 pps of 200 B copies on paths {0, 1} from from_ms to to_ms (inclusive, one original
- * every 2 ms): 90% of each path's copies are acked at once, so every path is short by
- * rate, and the rest stay unresolved. At every multiple of 100 ms, before update_mode(),
- * each path's bytes in flight are set to inflight_pct % of its unresolved copies' bytes.
- * Stops at the first non-zero update result, returns it and its time in *at_ms (0 if
- * none). */
-static int
-drive_small(mqvpn_redundant_tx_t *t, uint64_t from_ms, uint64_t to_ms, int inflight_pct,
-            uint64_t *at_ms)
-{
-    const int paths[2] = {0, 1};
-    uint64_t n[2] = {0, 0};
-    *at_ms = 0;
-    for (uint64_t ms = from_ms; ms <= to_ms; ms += 2) {
-        uint64_t ids[2];
-        ids[0] = g_next_id++;
-        ids[1] = g_next_id++;
-        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000, 200);
-        for (int p = 0; p < 2; p++)
-            if (n[p]++ % 10 < 9) mqvpn_redundant_tx_on_acked(t, ids[p]);
-        if (ms % 100 == 0) {
-            for (int p = 0; p < 2; p++) {
-                uint64_t unresolved =
-                    (uint64_t)mqvpn_redundant_tx_outstanding(t, p) * 200;
-                mqvpn_redundant_tx_set_path_metrics(t, p, 0, 0,
-                                                    unresolved * inflight_pct / 100);
-            }
-            int r = mqvpn_redundant_tx_update_mode(t, paths, 2, ms * 1000);
-            if (r) {
-                *at_ms = ms;
-                return r;
-            }
-        }
-    }
-    return 0;
-}
-
 /* ---- parse ---- */
 
 static void
@@ -687,12 +650,38 @@ test_overload_needs_enough_copies(void)
 static void
 test_fed_counts_bytes(void)
 {
-    uint64_t at;
+    const int paths[2] = {0, 1};
+    uint64_t at = 0;
+    int r = 0;
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
-    /* everything sent is in flight: nothing is queued, so no path is fed */
-    assert(drive_small(t, 2, 6000, 100, &at) == 0);
-    /* half of it is: the copies queue, and every path is short by rate */
-    assert(drive_small(t, 6002, 8000, 50, &at) == 1);
+    /* 100 unresolved copies per path, then a detach: it must drop their bytes */
+    for (int p = 0; p < 2; p++) {
+        for (int i = 0; i < 100; i++)
+            add_copy(t, p, 1000);
+        mqvpn_redundant_tx_detach_path(t, p);
+    }
+    /* 500 pps of 200 B copies, 9 in 10 acked: short by rate. Through 6000 ms all their
+     * bytes are in flight, so none is queued and nothing enters; after, half are. */
+    for (uint64_t ms = 2; ms <= 8000 && !r; ms += 2) {
+        uint64_t ids[2];
+        ids[0] = g_next_id++;
+        ids[1] = g_next_id++;
+        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000, 200);
+        if (ms % 20)
+            for (int p = 0; p < 2; p++)
+                mqvpn_redundant_tx_on_acked(t, ids[p]);
+        if (ms % 100 == 0) {
+            for (int p = 0; p < 2; p++) {
+                uint64_t unresolved =
+                    (uint64_t)mqvpn_redundant_tx_outstanding(t, p) * 200;
+                mqvpn_redundant_tx_set_path_metrics(
+                    t, p, 0, 0, ms <= 6000 ? unresolved : unresolved / 2);
+            }
+            r = mqvpn_redundant_tx_update_mode(t, paths, 2, ms * 1000);
+            if (r) at = ms;
+        }
+    }
+    assert(r == 1);
     assert(at == 6900); /* five fed judgements from 6100 ms, past the grace */
     mqvpn_redundant_tx_free(t);
 }
