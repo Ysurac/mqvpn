@@ -36,6 +36,8 @@
 #include "libmqvpn.h"
 #include "mqvpn_bind_posix.h"
 #include "mqvpn_internal.h"
+#include "mqvpn_server_internal.h"
+#include <xquic/xquic.h>
 
 /* Test infrastructure */
 
@@ -1976,6 +1978,12 @@ TEST(server_max_clients_config)
     mqvpn_config_free(cfg);
 }
 
+TEST(sched_refusal_reason)
+{
+    ASSERT_EQ(strcmp(mqvpn_server_test_sched_refusal_reason(-XQC_ESTATE), "paths"), 0);
+    ASSERT_EQ(strcmp(mqvpn_server_test_sched_refusal_reason(-XQC_EMALLOC), "engine"), 0);
+}
+
 /* Main */
 
 int
@@ -1992,6 +2000,7 @@ main(void)
     run_server_new_destroy();
     run_server_destroy_null();
     run_server_egress_fd_budget();
+    run_sched_refusal_reason();
 
     /* Lifecycle */
     run_server_lifecycle();

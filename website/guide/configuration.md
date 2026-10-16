@@ -196,6 +196,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, or `backup_fec`) | `wlb` |
+| `AllowClientScheduler` | Server only (`allow_client_scheduler` in JSON, or pass `--allow-client-scheduler`). When `true`, a client that asks for a scheduler gets it for its own connection's download direction; other clients keep the server's `Scheduler`. The request is not applied, and the connection keeps the scheduler it already has (at first, the server's `Scheduler`), when the client asks for `backup_fec`, when the server's `Scheduler` is `backup_fec`, when the same connection already changed its scheduler once, or when the connection already uses more than one path. | `false` |
+| `RequestServerScheduler` | Client only (`request_server_scheduler` in JSON, or pass `--request-server-scheduler`). When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
 | `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
@@ -205,6 +207,8 @@ In JSON, use `auth_key` on both client and server (as in the examples above).
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
 | `Redundant` | Client only. When `on`, each outgoing UDP packet is sent over every connected path at once, so losing one path does not interrupt live streams. Uses as much data as the number of paths for that traffic. Because redundant mode copies every packet, it only helps when every connection is fast enough to carry that traffic on its own; otherwise leave it off. See [Redundant mode](./multipath#redundant-mode). | `off` |
 | `RedundantPorts` | Client only. Comma-separated destination ports (at most 16 entries) to duplicate when `Redundant = on`; empty duplicates all UDP. An invalid list stops the client at startup. | empty |
+
+A server of this version tells each connected client which scheduler it uses for that client, even when `AllowClientScheduler` is `false`. A client that sets `RequestServerScheduler` logs `server scheduler: <name> (requested <name>)` after it connects.
 
 See [Multipath](./multipath) for scheduler details and
 [Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.

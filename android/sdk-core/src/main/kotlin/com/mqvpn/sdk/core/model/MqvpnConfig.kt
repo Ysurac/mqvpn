@@ -35,6 +35,8 @@ data class MqvpnConfig(
     val insecure: Boolean = false,
     val multipathEnabled: Boolean = true,
     val scheduler: Scheduler = Scheduler.MIN_RTT,
+    /** Ask the server to use [scheduler] for this connection (it may refuse). */
+    val requestServerScheduler: Boolean = false,
     /**
      * Minimum level of the library's log lines: this tunnel's own lines,
      * delivered to `MqvpnVpnService.onLog`, and the lines the library writes

@@ -45,6 +45,7 @@ class SettingsRepository @Inject constructor(
         val HYBRID_ENABLED = booleanPreferencesKey("hybrid_enabled")
         val HYBRID_TCP_MODE = stringPreferencesKey("hybrid_tcp_mode")
         val BLUETOOTH_PATH_ENABLED = booleanPreferencesKey("bluetooth_path_enabled")
+        val SCHEDULER = stringPreferencesKey("scheduler")
         val SCHEMA = intPreferencesKey("settings_schema_version")
     }
 
@@ -94,6 +95,7 @@ class SettingsRepository @Inject constructor(
                 hybridEnabled = prefs[Keys.HYBRID_ENABLED] ?: defaults.hybridEnabled,
                 hybridTcpMode = prefs[Keys.HYBRID_TCP_MODE] ?: defaults.hybridTcpMode,
                 bluetoothPathEnabled = prefs[Keys.BLUETOOTH_PATH_ENABLED] ?: defaults.bluetoothPathEnabled,
+                scheduler = prefs[Keys.SCHEDULER] ?: defaults.scheduler,
             )
         }
 
@@ -113,6 +115,7 @@ class SettingsRepository @Inject constructor(
             prefs[Keys.HYBRID_ENABLED] = newSettings.hybridEnabled
             prefs[Keys.HYBRID_TCP_MODE] = newSettings.hybridTcpMode
             prefs[Keys.BLUETOOTH_PATH_ENABLED] = newSettings.bluetoothPathEnabled
+            prefs[Keys.SCHEDULER] = newSettings.scheduler
         }
     }
 }

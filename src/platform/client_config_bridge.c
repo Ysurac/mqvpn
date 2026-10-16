@@ -42,6 +42,7 @@ mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_c
     default: lib_sched = MQVPN_SCHED_MINRTT; break;
     }
     mqvpn_config_set_scheduler(lib_cfg, lib_sched);
+    mqvpn_config_set_request_server_scheduler(lib_cfg, cfg->request_server_scheduler);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
     mqvpn_config_set_reinjection_deadline_params(lib_cfg, cfg->reinj_srtt_factor_pct,

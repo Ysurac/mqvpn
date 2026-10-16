@@ -16,16 +16,17 @@
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t (INI [Hybrid] bridge) */
 
 typedef struct mqvpn_server_cfg_s {
-    const char *listen_addr; /* bind address (e.g. "0.0.0.0") */
-    int listen_port;         /* bind port (e.g. 443) */
-    const char *subnet;      /* client IP pool CIDR (e.g. "10.0.0.0/24") */
-    const char *subnet6;     /* IPv6 client pool CIDR (NULL = disabled) */
-    const char *tun_name;    /* TUN device name */
-    const char *cert_file;   /* TLS certificate path */
-    const char *key_file;    /* TLS private key path */
-    int log_level;           /* mqvpn_log_level_t */
-    int scheduler;           /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */
-    const char *auth_key;    /* PSK for client authentication (NULL = no auth) */
+    const char *listen_addr;    /* bind address (e.g. "0.0.0.0") */
+    int listen_port;            /* bind port (e.g. 443) */
+    const char *subnet;         /* client IP pool CIDR (e.g. "10.0.0.0/24") */
+    const char *subnet6;        /* IPv6 client pool CIDR (NULL = disabled) */
+    const char *tun_name;       /* TUN device name */
+    const char *cert_file;      /* TLS certificate path */
+    const char *key_file;       /* TLS private key path */
+    int log_level;              /* mqvpn_log_level_t */
+    int allow_client_scheduler; /* 1=honour a client scheduler request (default 0) */
+    int scheduler;        /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */
+    const char *auth_key; /* PSK for client authentication (NULL = no auth) */
     const char *user_names[64];
     const char *user_keys[64];
     int n_users;

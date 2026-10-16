@@ -52,7 +52,9 @@
                                mqvpn_server_get_reorder_stats,
                                mqvpn_reorder_stats_t (via reorder.h),
                                mqvpn_internal_client_reinject_t,
-                               mqvpn_server_get_client_reinject */
+                               mqvpn_server_get_client_reinject,
+                               mqvpn_internal_client_sched_t,
+                               mqvpn_server_get_client_sched */
 
 #include <stdlib.h>
 #include <string.h>
@@ -217,6 +219,11 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
     int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
     if (n_reinj < 0) n_reinj = 0;
 
+    /* Same index alignment, see mqvpn_server_get_client_sched(). */
+    mqvpn_internal_client_sched_t sched[MQVPN_MAX_USERS];
+    int n_sched = mqvpn_server_get_client_sched(server, sched, MQVPN_MAX_USERS);
+    if (n_sched < 0) n_sched = 0;
+
     uint64_t now = 0;
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0)
@@ -251,12 +258,12 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t 
                                 : 0;
 
         if (i > 0) APPEND(",");
-        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
+        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\",\"scheduler\":\"%s\","
                "\"connected_sec\":%" PRIu64 ","
                "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
                "\"n_paths\":%d,\"paths\":[",
-               ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
-               ci->n_paths);
+               ci->username, ci->endpoint, i < n_sched ? sched[i].scheduler : "unknown",
+               conn_sec, ci->bytes_tx, ci->bytes_rx, ci->n_paths);
 
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];

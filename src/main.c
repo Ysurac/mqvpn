@@ -75,6 +75,13 @@ usage(const char *prog)
         "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
         "  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
+        "  --allow-client-scheduler  Let clients pick the download scheduler for their "
+        "own\n"
+        "                            connection (server mode)\n"
+        "  --request-server-scheduler\n"
+        "                            Ask the server to use --scheduler for the download "
+        "too\n"
+        "                            (client mode)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
         "                            TP (default = xquic default 8; set lower, "
@@ -165,6 +172,8 @@ main(int argc, char *argv[])
         {"kill-switch", no_argument, NULL, 'K'},
         {"no-manage-routes", no_argument, NULL, 0x103},
         {"tls-server-name", required_argument, NULL, 0x104},
+        {"allow-client-scheduler", no_argument, NULL, 0x105},
+        {"request-server-scheduler", no_argument, NULL, 0x106},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -183,6 +192,8 @@ main(int argc, char *argv[])
     const char *cert_file = NULL;
     const char *key_file = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
+    int allow_client_sched = -1;
+    int request_server_sched = -1;
     const char *tls_server_name = NULL;
     const char *auth_key = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
@@ -309,6 +320,8 @@ main(int argc, char *argv[])
         case 'K': kill_switch = 1; break;
         case 0x103: manage_routes = 0; break; /* --no-manage-routes */
         case 0x104: tls_server_name = optarg; break;
+        case 0x105: allow_client_sched = 1; break;
+        case 0x106: request_server_sched = 1; break;
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -385,6 +398,11 @@ main(int argc, char *argv[])
     const char *eff_cert = cert_file ? cert_file : file_cfg.cert_file;
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
+    int eff_allow_client_sched =
+        allow_client_sched >= 0 ? allow_client_sched : file_cfg.allow_client_scheduler;
+    int eff_request_server_sched = request_server_sched >= 0
+                                       ? request_server_sched
+                                       : file_cfg.request_server_scheduler;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
 
@@ -565,6 +583,7 @@ main(int argc, char *argv[])
             .log_level = log_level,
             .n_paths = n_paths,
             .scheduler = scheduler,
+            .request_server_scheduler = eff_request_server_sched,
             .auth_key = eff_auth_key,
             .n_dns = n_dns,
             .reconnect = eff_reconnect,
@@ -633,6 +652,7 @@ main(int argc, char *argv[])
             .key_file = eff_key,
             .log_level = log_level,
             .scheduler = scheduler,
+            .allow_client_scheduler = eff_allow_client_sched,
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,

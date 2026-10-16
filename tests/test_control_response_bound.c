@@ -56,10 +56,11 @@ per_user_envelope_bytes(int paths_inner_bytes)
     endpoint[63] = '\0';
 
     int env = snprintf(NULL, 0,
-                       ",{\"user\":\"%s\",\"endpoint\":\"%s\","
+                       ",{\"user\":\"%s\",\"endpoint\":\"%s\",\"scheduler\":\"%s\","
                        "\"connected_sec\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
                        ",\"bytes_rx\":%" PRIu64 ",\"n_paths\":%d,\"paths\":[]}",
-                       username, endpoint, UINT64_MAX, UINT64_MAX, UINT64_MAX, INT_MAX);
+                       username, endpoint, "XXXXXXXXXXXXXXX", UINT64_MAX, UINT64_MAX,
+                       UINT64_MAX, INT_MAX);
     return env + paths_inner_bytes;
 }
 

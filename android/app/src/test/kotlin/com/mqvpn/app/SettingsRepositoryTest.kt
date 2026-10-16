@@ -95,6 +95,7 @@ class SettingsRepositoryTest {
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            scheduler = "WLB",
         )
 
         repo.save(nonDefault)
@@ -212,6 +213,7 @@ class SettingsRepositoryTest {
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            scheduler = "WLB",
         )
 
         repo.save(nonDefault)

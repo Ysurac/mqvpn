@@ -90,6 +90,8 @@
 #include "fake_transport.h"
 #include "libmqvpn.h"
 #include "mqvpn_bind_posix.h"
+#include "mqvpn_internal.h"
+#include "mqvpn_server_internal.h"
 
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
@@ -105,8 +107,9 @@ static xqc_cid_t g_cli_cid;
 static int g_handshake_finished = 0;
 
 typedef struct {
-    int status; /* :status captured from the response, -1 = not yet seen */
-    int closed; /* h3_request_close_notify fired */
+    int status;          /* :status captured from the response, -1 = not yet seen */
+    int closed;          /* h3_request_close_notify fired */
+    char sched_echo[16]; /* mqvpn-scheduler value from the response, "" = absent */
 } cli_req_ctx_t;
 
 static cli_req_ctx_t g_req1 = {.status = -1};
@@ -256,12 +259,12 @@ cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
  * configured, so no authorization header is sent, and reorder is off by
  * default server-side, so no mqvpn-reorder header either. */
 static int
-cli_send_connect_ip(xqc_h3_request_t *req, int svr_port)
+cli_send_connect_ip(xqc_h3_request_t *req, int svr_port, const char *sched)
 {
     char authority[64];
     snprintf(authority, sizeof(authority), "127.0.0.1:%d", svr_port);
 
-    xqc_http_header_t hdrs[6] = {
+    xqc_http_header_t hdrs[7] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -281,7 +284,14 @@ cli_send_connect_ip(xqc_h3_request_t *req, int svr_port)
          .value = {.iov_base = "?1", .iov_len = 2},
          .flags = 0},
     };
-    xqc_http_headers_t headers = {.headers = hdrs, .count = 6, .capacity = 6};
+    int n_hdrs = 6;
+    if (sched) {
+        hdrs[n_hdrs++] = (xqc_http_header_t){
+            .name = {.iov_base = "mqvpn-scheduler", .iov_len = 15},
+            .value = {.iov_base = (void *)sched, .iov_len = strlen(sched)},
+            .flags = 0};
+    }
+    xqc_http_headers_t headers = {.headers = hdrs, .count = n_hdrs, .capacity = 7};
 
     /* fin=0: a real connect-ip tunnel keeps the stream open for capsules
      * (and would carry DATAGRAMs); the rejected duplicate never gets a
@@ -318,6 +328,12 @@ cli_h3_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag
                         ctx->status =
                             (v[0] - '0') * 100 + (v[1] - '0') * 10 + (v[2] - '0');
                     }
+                }
+                if (h->name.iov_len == 15 &&
+                    memcmp(h->name.iov_base, "mqvpn-scheduler", 15) == 0 && ctx &&
+                    h->value.iov_len < sizeof(ctx->sched_echo)) {
+                    memcpy(ctx->sched_echo, h->value.iov_base, h->value.iov_len);
+                    ctx->sched_echo[h->value.iov_len] = '\0';
                 }
             }
         }
@@ -527,6 +543,8 @@ main(void)
     mqvpn_config_set_subnet(cfg, "10.0.0.0/24");
     mqvpn_config_set_tls_cert(cfg, TEST_CERT_FILE, TEST_KEY_FILE);
     mqvpn_config_set_log_level(cfg, MQVPN_LOG_ERROR);
+    mqvpn_config_set_scheduler(cfg, MQVPN_SCHED_WLB);
+    mqvpn_config_set_allow_client_scheduler(cfg, 1);
 
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
     cbs.tun_output = svr_tun_output;
@@ -671,7 +689,7 @@ main(void)
         rc = 1;
     } else {
         req1 = xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req1);
-        if (!req1 || cli_send_connect_ip(req1, ntohs(svr_addr.sin_port)) != 0) {
+        if (!req1 || cli_send_connect_ip(req1, ntohs(svr_addr.sin_port), "minrtt") != 0) {
             printf("FAIL: send request #1\n");
             rc = 1;
         } else {
@@ -708,12 +726,23 @@ main(void)
             printf("  first CONNECT-IP did not establish exactly one session   FAIL\n");
             rc = 1;
         }
+        mqvpn_internal_client_sched_t cs[MQVPN_MAX_USERS];
+        int ncs = mqvpn_server_get_client_sched(svr, cs, MQVPN_MAX_USERS);
+        if (strcmp(g_req1.sched_echo, "minrtt") == 0 && ncs >= 1 &&
+            strcmp(cs[0].scheduler, "minrtt") == 0) {
+            printf("  client-requested scheduler: echo=minrtt, conn=minrtt     PASS\n");
+        } else {
+            printf("  client-requested scheduler: echo='%s' conn=%s (expected minrtt) "
+                   "FAIL\n",
+                   g_req1.sched_echo, ncs >= 1 ? cs[0].scheduler : "(none)");
+            rc = 1;
+        }
     }
 
     if (rc == 0) {
         xqc_h3_request_t *req2 =
             xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req2);
-        if (!req2 || cli_send_connect_ip(req2, ntohs(svr_addr.sin_port)) != 0) {
+        if (!req2 || cli_send_connect_ip(req2, ntohs(svr_addr.sin_port), NULL) != 0) {
             printf("FAIL: send request #2\n");
             rc = 1;
         }
@@ -829,7 +858,7 @@ main(void)
     uint64_t req3_stream_id = 0;
     if (rc == 0) {
         req3 = xqc_h3_request_create(g_cli_engine, &g_cli_cid, NULL, &g_req3);
-        if (!req3 || cli_send_connect_ip(req3, ntohs(svr_addr.sin_port)) != 0) {
+        if (!req3 || cli_send_connect_ip(req3, ntohs(svr_addr.sin_port), "wlb") != 0) {
             printf("FAIL: send request #3\n");
             rc = 1;
         } else {
@@ -855,6 +884,17 @@ main(void)
                 "assigned_ip2=%d.%d.%d.%d\n",
                 n_after_reest, g_req3.status, g_client_connected_calls, g_assigned_ip2[0],
                 g_assigned_ip2[1], g_assigned_ip2[2], g_assigned_ip2[3]);
+        mqvpn_internal_client_sched_t cs3[MQVPN_MAX_USERS];
+        int ncs3 = mqvpn_server_get_client_sched(svr, cs3, MQVPN_MAX_USERS);
+        if (strcmp(g_req3.sched_echo, "minrtt") == 0 && ncs3 >= 1 &&
+            strcmp(cs3[0].scheduler, "minrtt") == 0) {
+            printf("  re-request wlb after swap: echo=minrtt (already_set)     PASS\n");
+        } else {
+            printf("  re-request wlb after swap: echo='%s' conn=%s (expected minrtt) "
+                   "FAIL\n",
+                   g_req3.sched_echo, ncs3 >= 1 ? cs3[0].scheduler : "(none)");
+            rc = 1;
+        }
         if (g_req3.status == 200 && n_after_reest == 1 && g_client_connected_calls == 2) {
             printf("  re-establishment: req3=200, n_clients=1, connected_calls=2     "
                    "PASS\n");

@@ -258,4 +258,24 @@ class DemoSettingsTest {
         val ports = tokens.joinToString(",")
         assertEquals(16, DemoSettings(reorderPorts = ports).distinctValidPortCount())
     }
+
+    // -- scheduler ----------------------------------------------------------
+
+    @Test
+    fun `scheduler choice maps to config scheduler and request flag`() {
+        val c0 = DemoSettings().toMqvpnConfig()
+        assertEquals(MqvpnConfig.Scheduler.MIN_RTT, c0.scheduler)
+        assertFalse(c0.requestServerScheduler)
+        val c1 = DemoSettings(scheduler = "MIN_RTT").toMqvpnConfig()
+        assertEquals(MqvpnConfig.Scheduler.MIN_RTT, c1.scheduler)
+        assertTrue(c1.requestServerScheduler)
+        val c2 = DemoSettings(scheduler = "WLB").toMqvpnConfig()
+        assertEquals(MqvpnConfig.Scheduler.WLB, c2.scheduler)
+        assertTrue(c2.requestServerScheduler)
+    }
+
+    @Test
+    fun `schedulerChoice falls back to DEFAULT on unknown name`() {
+        assertEquals(DemoSettings.SchedulerChoice.DEFAULT, DemoSettings(scheduler = "bogus").schedulerChoice())
+    }
 }

@@ -191,6 +191,8 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, または `backup_fec`） | `wlb` |
+| `AllowClientScheduler` | サーバーのみ (JSON では `allow_client_scheduler`、コマンドラインでは `--allow-client-scheduler`)。`true` にすると、スケジューラを指定してきたクライアントには、そのクライアント自身の接続のダウンロード方向でそのスケジューラを使います。ほかのクライアントはサーバーの `Scheduler` のままです。クライアントが `backup_fec` を指定した場合、サーバーの `Scheduler` が `backup_fec` の場合、同じ接続ですでに一度スケジューラを変更した場合、接続がすでに複数のパスを使っている場合は、リクエストは適用されず、その接続は現在のスケジューラ（最初はサーバーの `Scheduler`）のままです。 | `false` |
+| `RequestServerScheduler` | クライアントのみ (JSON では `request_server_scheduler`、コマンドラインでは `--request-server-scheduler`)。`true` にすると、このクライアントの `Scheduler` をダウンロード方向にも使うようサーバーに依頼します。`Scheduler` だけを設定した場合は、従来どおりアップロード方向にのみ影響します。`AllowClientScheduler = true` のサーバーでのみ有効です。 | `false` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
 | `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
@@ -200,6 +202,8 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
 | `Redundant` | クライアント専用。`on` にすると、送信する UDP パケットを接続中のすべての回線で同時に送ります。1 本の回線が切れてもライブ配信などが途切れません。そのトラフィックは、使っている回線数倍のデータを使います (2 本なら 2 倍)。冗長化はパケットを複製するため、効果的に利用するにはどの回線も、そのトラフィックを単独で運べる速度が必要です。足りない回線があるときはオフにしてください。[冗長モード](./multipath#冗長モード)を参照してください。 | `off` |
 | `RedundantPorts` | クライアント専用。`Redundant = on` のとき複製する宛先ポートをカンマ区切りで指定します（最大 16 個）。空の場合はすべての UDP を複製します。不正な値を指定するとクライアントは起動時に停止します。 | 空 |
+
+このバージョンのサーバーは、`AllowClientScheduler` が `false` の場合でも、接続中の各クライアントに、そのクライアントに対して使っているスケジューラを通知します。`RequestServerScheduler` を設定したクライアントは、接続後に `server scheduler: <name> (requested <name>)` とログに出力します。
 
 スケジューラの詳細は[マルチパス](./multipath)、Reinjection のモード別ガイドは
 [マルチパスの Reinjection 節](./multipath)を参照してください。
