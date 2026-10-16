@@ -27,6 +27,8 @@
 #define RTX_HOLD_MAX    32000000u /* us: the hold doubles per failed probe, up to this */
 #define RTX_PROBE_OK    10000000u /* us: a probe this long resets the hold */
 #define RTX_HIST        10        /* whole seconds of rate history */
+/* fewest copies per window to judge: below it, ACKs every 2nd packet swing past 5% */
+#define RTX_MIN_JUDGED 40u
 enum { RTX_NORMAL, RTX_PROBE, RTX_OVERLOAD };
 
 /* ---- port list / packet matching ---- */
@@ -445,6 +447,7 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
         if (!fed || acked_pps * 100 >= pps * 95) all_short = 0;
         if (p->est_bw / RTX_PKT_BYTES * 100 >= base * 105) fit = 1;
     }
+    if (pps * el < (uint64_t)RTX_MIN_JUDGED * 1000000u) all_short = 0;
     rtx_window_start(t, now_us);
     if (pps == 0) return 0;
 

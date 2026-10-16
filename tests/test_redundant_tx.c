@@ -123,6 +123,31 @@ enter_overload(mqvpn_redundant_tx_t *t)
     assert(at == 2900);
 }
 
+/* A stream of one original every step_ms from step_ms to 6000 ms, copies on paths
+ * {0, 1} (no select, nothing acked), update_mode() at every multiple of 100 ms.
+ * Stops at the first non-zero update result, returns it and its time in *at_ms
+ * (0 if none). */
+static int
+drive_every(mqvpn_redundant_tx_t *t, uint64_t step_ms, uint64_t *at_ms)
+{
+    const int paths[2] = {0, 1};
+    *at_ms = 0;
+    for (uint64_t ms = step_ms; ms <= 6000; ms += step_ms) {
+        uint64_t ids[2];
+        ids[0] = g_next_id++;
+        ids[1] = g_next_id++;
+        mqvpn_redundant_tx_commit(t, ids, paths, 2, ms * 1000);
+        if (ms % 100 == 0) {
+            int r = mqvpn_redundant_tx_update_mode(t, paths, 2, ms * 1000);
+            if (r) {
+                *at_ms = ms;
+                return r;
+            }
+        }
+    }
+    return 0;
+}
+
 /* ---- parse ---- */
 
 static void
@@ -595,6 +620,20 @@ test_short_needs_fed(void)
     mqvpn_redundant_tx_free(t);
 }
 
+static void
+test_overload_needs_enough_copies(void)
+{
+    uint64_t at;
+    mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
+    assert(drive_every(t, 20, &at) == 0); /* 50 pps: 10 copies per window, too few */
+    mqvpn_redundant_tx_free(t);
+
+    t = mqvpn_redundant_tx_new();
+    assert(drive_every(t, 4, &at) == 1); /* 250 pps: 50 copies per window */
+    assert(at == 2900);
+    mqvpn_redundant_tx_free(t);
+}
+
 int
 main(void)
 {
@@ -622,6 +661,7 @@ main(void)
     RUN(test_mode_resets_when_stream_stops);
     RUN(test_mode_resets_after_total_outage);
     RUN(test_short_needs_fed);
+    RUN(test_overload_needs_enough_copies);
     printf("\n=== test_redundant_tx: %d passed ===\n", g_run);
     return 0;
 }

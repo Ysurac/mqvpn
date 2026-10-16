@@ -3641,10 +3641,12 @@ TEST(redundant_overload_sends_once)
     mqvpn_redundant_tx_t *t = mqvpn_client_test_redundant_tx(c);
     ASSERT_NOT_NULL(t);
     int u[2] = {0, 1}, entered = 0;
-    for (uint64_t ms = 100; ms <= 4000 && !entered; ms += 100) { /* every path short */
+    /* every path short; 250 pps, enough copies per window to be judged */
+    for (uint64_t ms = 4; ms <= 4000 && !entered; ms += 4) {
         uint64_t ids[2] = {1000000 + 2 * ms, 1000001 + 2 * ms};
         mqvpn_redundant_tx_commit(t, ids, u, 2, ms * 1000);
-        entered = mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) > 0;
+        if (ms % 100 == 0)
+            entered = mqvpn_redundant_tx_update_mode(t, u, 2, ms * 1000) > 0;
     }
     ASSERT_EQ(entered, 1);
     int o0 = mqvpn_client_test_redundant_outstanding(c, 0);
