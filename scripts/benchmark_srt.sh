@@ -283,6 +283,14 @@ declare -A R_LOSS R_SENT R_RCVDROP R_SNDDROP R_RETRANS R_RTT R_RATE R_BELATED R_
 RUNS=()   # ordered "<cond>_<latency>_<arm>_rN" keys
 
 # run_arm <cond> <latency> <rate-mbps> <arm> <rep>
+# SRT_BENCH_KEEP=1: keep each run's client log, failed runs included (the next
+# run overwrites client.log)
+keep_client_log() {
+    if [ "${SRT_BENCH_KEEP:-0}" = "1" ] && [ -f "${WORK_DIR}/client.log" ]; then
+        mv "${WORK_DIR}/client.log" "${WORK_DIR}/$1.client.log"
+    fi
+}
+
 run_arm() {
     local cond="$1" latency="$2" rate_mbps="$3" arm="$4" rep="${5:-1}"
     local key="${cond}_${latency}_${arm}_r${rep}"
@@ -301,6 +309,7 @@ run_arm() {
         R_LOSS[$key]="ERR"; R_SENT[$key]="-"; R_RCVDROP[$key]="-"
         R_SNDDROP[$key]="-"; R_RETRANS[$key]="-"; R_RTT[$key]="-"; R_RATE[$key]="-"
         arm_teardown "$arm"
+        keep_client_log "$run_id"
         return 0
     fi
 
@@ -309,13 +318,11 @@ run_arm() {
         R_LOSS[$key]="ERR"; R_SENT[$key]="-"; R_RCVDROP[$key]="-"
         R_SNDDROP[$key]="-"; R_RETRANS[$key]="-"; R_RTT[$key]="-"; R_RATE[$key]="-"
         arm_teardown "$arm"
+        keep_client_log "$run_id"
         return 0
     fi
     arm_teardown "$arm"
-    # SRT_BENCH_KEEP=1: keep each run's client log (the next run overwrites it)
-    if [ "${SRT_BENCH_KEEP:-0}" = "1" ] && [ -f "${WORK_DIR}/client.log" ]; then
-        mv "${WORK_DIR}/client.log" "${WORK_DIR}/${run_id}.client.log"
-    fi
+    keep_client_log "$run_id"
 
     local raw="${OUT_DIR}/raw"
     local sent recvu rcvdrop snddrop retrans rtt rate belated

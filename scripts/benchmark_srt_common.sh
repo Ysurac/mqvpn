@@ -72,8 +72,8 @@ teardown_netns() {
 # and limit stay on netem.
 shape_dev() {
     local ns="$1" dev="$2" rate="$3" netem="$4"
+    # shellcheck disable=SC2086  # netem args are intentionally word-split
     ip netns exec "$ns" tc qdisc add dev "$dev" root handle 1: tbf rate 10gbit burst 2000 latency 1ms &&
-        # shellcheck disable=SC2086  # netem args are intentionally word-split
         ip netns exec "$ns" tc qdisc add dev "$dev" parent 1:1 handle 10: netem $netem rate "$rate"
 }
 
