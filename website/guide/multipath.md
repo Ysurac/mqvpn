@@ -201,7 +201,7 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   `RedundantPorts` to cover only your stream, for example `4200`, or a
   comma-separated list such as `4200,9000` (up to 16 ports). Without it, all
   UDP is duplicated. TCP is never duplicated by this mode.
-- **Every connection must carry the whole stream**: each connection sends a
+- **Every connection should carry the whole stream (recommended)**: each connection sends a
   full copy, so each one needs enough upload speed for the stream on its own,
   with some room to spare. For a 20 Mbps stream, every connection must manage
   at least 20 Mbps up. One connection slowing down for a while is fine as long
