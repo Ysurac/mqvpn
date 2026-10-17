@@ -180,9 +180,9 @@ Notes:
 
 ## Redundant Mode
 
-Redundant mode sends every outgoing UDP packet over every connected path at
-once. If one connection drops for a few seconds, the same packets are already
-arriving over the others, so a live stream does not stall. Off by default.
+Redundant mode sends copies of outgoing UDP packets over more than one path at
+once. If one connection drops for a few seconds, the copies on the others
+usually keep a live stream going. Off by default.
 
 ```ini
 [Multipath]
@@ -196,8 +196,8 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
 - **When to use it**: live streaming such as SRT over phone connections,
   especially with a short latency setting, and connections that drop out for a
   few seconds at a time.
-- **What it costs**: the traffic it covers uses as much data as the number of
-  paths in use (twice with two paths, three times with three). Set
+- **What it costs**: the traffic it covers uses up to twice the data with two
+  paths, three times with three. Set
   `RedundantPorts` to cover only your stream, for example `4200`, or a
   comma-separated list such as `4200,9000` (up to 16 ports). Without it, all
   UDP is duplicated. TCP is never duplicated by this mode.
@@ -217,8 +217,9 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   before using this mode for other UDP traffic.
 - **Upload only**: it applies to what the client sends. Download traffic is
   unchanged. The server ignores the setting.
-- A path that is still starting up or has gone down gets no copies; if only
-  one path is usable, packets are sent once on it.
+- A path that is still starting up or has gone down gets no copies. A path
+  that falls behind the others gets none until it catches up. If only one path
+  is usable, packets are sent once on it.
 - Right after connecting, a stream can still lose a few packets for about the
   first second while the connections speed up.
 - Redundant mode has no effect with `Scheduler = backup_fec`, because the
