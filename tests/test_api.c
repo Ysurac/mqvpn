@@ -3692,11 +3692,20 @@ rt_udp_pkt(uint8_t *p, size_t len, uint16_t dport)
     p[25] = (uint8_t)(len - 20);
 }
 
+/* A fixed clock: however long a test takes, no redundant copy looks queued. */
+static uint64_t
+rt_clock(void *ctx)
+{
+    (void)ctx;
+    return 10000000;
+}
+
 static mqvpn_client_t *
 rt_client(const uint16_t *ports, size_t n_ports, int reorder, int reorder_peer)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_clock(cfg, rt_clock, NULL);
     ASSERT_EQ(mqvpn_config_set_redundant(cfg, 1, ports, n_ports), MQVPN_OK);
     if (reorder) mqvpn_config_set_reorder_enabled(cfg, MQVPN_REORDER_ON);
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
@@ -3913,9 +3922,8 @@ TEST(redundant_tables_full_fall_back)
     rt_stub_init(&s, 1);
     uint8_t pkt[100];
     rt_udp_pkt(pkt, sizeof(pkt), 5000);
-    /* Copies are never notified, so they stay tracked. Once the path has
-     * about 300 outstanding (pps is 0, so the floor limit applies) the guard
-     * sends one copy per packet, so the copy table fills at 16384 ids. */
+    /* Copies are never notified, so they stay tracked until the copy table
+     * fills at 16384 ids. */
     uint64_t sent = 0;
     while (s.next_id <= 16384) {
         ASSERT_EQ(mqvpn_client_test_redundant_send(c, pkt, sizeof(pkt), rt_send, &s),

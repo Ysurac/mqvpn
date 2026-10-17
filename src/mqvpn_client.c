@@ -146,7 +146,7 @@ struct cli_conn_s {
     /* Redundant mode (client TX): created on connect when
      * cfg.redundant is set, freed on conn teardown. */
     mqvpn_redundant_tx_t *redundant_tx;
-    uint64_t redundant_refresh_us; /* last 100 ms srtt/slot refresh */
+    uint64_t redundant_refresh_us; /* last 100 ms metrics/slot refresh */
     int redundant_full_warned; /* "tracking table full" logged, until select recovers */
     /* Test seam: NULL in production (the real xquic sends). */
     mqvpn_test_send_fn test_send;
@@ -4056,10 +4056,10 @@ tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, si
     int usable[MQVPN_MAX_PATHS], sel[MQVPN_MAX_PATHS], paths[MQVPN_MAX_PATHS];
     uint64_t ids[MQVPN_MAX_PATHS];
     int nu = redundant_usable_paths(c, conn, usable);
+    uint64_t now = client_now_us(c);
     /* overload mode: one ordinary send, still counted toward the stream rate */
-    if (nu && mqvpn_redundant_tx_overload_bypass(conn->redundant_tx, client_now_us(c)))
-        return 0;
-    int k = nu ? mqvpn_redundant_tx_select(conn->redundant_tx, usable, nu, sel) : 0;
+    if (nu && mqvpn_redundant_tx_overload_bypass(conn->redundant_tx, now)) return 0;
+    int k = nu ? mqvpn_redundant_tx_select(conn->redundant_tx, usable, nu, sel, now) : 0;
     if (nu && !k) { /* a usable path always yields a pick unless the tables are full */
         if (!conn->redundant_full_warned)
             LOG_W(c, "redundant mode: tracking table full; sending without redundancy");
@@ -4079,8 +4079,7 @@ tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, si
             eagain++;
         }
     }
-    mqvpn_redundant_tx_commit(conn->redundant_tx, ids, paths, accepted, client_now_us(c),
-                              n);
+    mqvpn_redundant_tx_commit(conn->redundant_tx, ids, paths, accepted, now, n);
     if (accepted) {
         c->dgram_sent++;
         return 1;
@@ -4407,8 +4406,8 @@ tick_handshake_watchdog(mqvpn_client_t *c)
 /* ─── Tick ─── */
 
 /* Redundant mode, every 100 ms: re-sync the tracker's slot bindings; while some
- * path is usable, feed it each usable path's smoothed RTT (guard limit) and load,
- * and update overload mode. An update that finds no packet counted for 1 s, or no
+ * path is usable, feed it each usable path's minimum RTT (base of its queue) and
+ * load, and update overload mode. An update that finds no packet counted for 1 s, or no
  * judgement for 1 s (a total outage skips the update), starts the judgement afresh. */
 static void
 tick_redundant_refresh(mqvpn_client_t *c)
@@ -4429,7 +4428,7 @@ tick_redundant_refresh(mqvpn_client_t *c)
             xqc_find_path_metrics(&st, c->paths[usable[j]].xqc_path_id);
         if (pm)
             mqvpn_redundant_tx_set_path_metrics(conn->redundant_tx, usable[j],
-                                                pm->path_srtt, pm->path_est_bw,
+                                                pm->path_min_rtt, pm->path_est_bw,
                                                 pm->path_bytes_in_flight);
     }
     free(st.paths_info);

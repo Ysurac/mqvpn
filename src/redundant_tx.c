@@ -10,9 +10,9 @@
 
 #define RTX_CAP 16384 /* power of two; both tables */
 /* Physical slots: load <= 0.5, so a probe always meets an empty slot. */
-#define RTX_SLOTS     (2 * RTX_CAP)
-#define RTX_LIMIT_MIN 300
-#define RTX_RTT_SLACK 250000u /* us added to srtt in the limit */
+#define RTX_SLOTS       (2 * RTX_CAP)
+#define RTX_LAG         250000u   /* us a path may queue beyond the least-queued one */
+#define RTX_RTT_UNKNOWN 10000000u /* us: xquic's min RTT before a sample (UINT32_MAX) */
 /* us per rate bucket; the last complete bucket estimates the current rate */
 #define RTX_RATE_BUCKET 100000u
 /* shortcut: the fit check assumes full-size datagrams (SRT), so a small-packet stream
@@ -92,7 +92,7 @@ mqvpn_redundant_match(const uint16_t *ports, int n_ports, const uint8_t *pkt, si
     return 0;
 }
 
-/* ---- guard ---- */
+/* ---- copy tracking and queue gate ---- */
 
 /* Open-addressing table (linear probe, backward-shift delete, no eviction).
  * Copies: key = dgram_id, a = original key, b = path (-1 detached), len = bytes.
@@ -115,10 +115,11 @@ typedef struct {
     uint64_t xqc_id;
     int outstanding;
     uint64_t out_bytes; /* bytes of the unresolved copies */
-    uint64_t srtt_us;
+    uint64_t min_rtt_us;
+    uint32_t first;            /* sent[] index of the oldest unresolved copy */
     uint64_t acked;            /* copies acked since the judgement window start */
     uint64_t est_bw, inflight; /* bytes/s (congestion estimate), bytes in flight */
-    int hit;                   /* select skipped it at its limit in the window */
+    int hit;                   /* select left it out in the window */
 } rtx_path_t;
 
 struct mqvpn_redundant_tx_s {
@@ -136,6 +137,8 @@ struct mqvpn_redundant_tx_s {
     uint64_t win_start_us, flow_since_us; /* window, stream start (0 = unset) */
     uint64_t since_us, hold_us;           /* OVERLOAD / PROBE start; overload hold */
     uint32_t sec_hist[RTX_HIST];          /* originals per whole second, a ring */
+    /* hand-over times of each path's unresolved copies: outstanding entries from first */
+    uint64_t sent[MQVPN_MAX_PATHS][RTX_CAP];
 };
 
 static uint32_t
@@ -251,11 +254,12 @@ mqvpn_redundant_tx_bind_path(mqvpn_redundant_tx_t *t, int path, uint64_t xqc_pat
 }
 
 void
-mqvpn_redundant_tx_set_path_metrics(mqvpn_redundant_tx_t *t, int path, uint64_t srtt_us,
-                                    uint64_t est_bw, uint64_t inflight)
+mqvpn_redundant_tx_set_path_metrics(mqvpn_redundant_tx_t *t, int path,
+                                    uint64_t min_rtt_us, uint64_t est_bw,
+                                    uint64_t inflight)
 {
     if (!t || !path_ok(path)) return;
-    t->path[path].srtt_us = srtt_us;
+    t->path[path].min_rtt_us = min_rtt_us;
     t->path[path].est_bw = est_bw;
     t->path[path].inflight = inflight;
 }
@@ -276,35 +280,54 @@ rtx_stream_pps(const mqvpn_redundant_tx_t *t)
     return bkt > pps ? bkt : pps;
 }
 
-uint32_t
-mqvpn_redundant_tx_limit(const mqvpn_redundant_tx_t *t, int path)
+uint64_t
+mqvpn_redundant_tx_stream_pps(const mqvpn_redundant_tx_t *t)
 {
-    if (!t || !path_ok(path)) return RTX_LIMIT_MIN;
-    uint64_t v = rtx_stream_pps(t) * (t->path[path].srtt_us + RTX_RTT_SLACK) / 1000000u;
-    if (v < RTX_LIMIT_MIN) v = RTX_LIMIT_MIN;
-    return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+    return t ? rtx_stream_pps(t) : 0;
+}
+
+/* How long the path's oldest unresolved copy has waited beyond its min RTT; 0 with
+ * none, or with the clock behind it (gettimeofday can step back). */
+static uint64_t
+rtx_queued_us(const mqvpn_redundant_tx_t *t, int path, uint64_t now_us)
+{
+    const rtx_path_t *p = &t->path[path];
+    if (p->outstanding == 0) return 0;
+    uint64_t since = t->sent[path][p->first];
+    uint64_t base = p->min_rtt_us < RTX_RTT_UNKNOWN ? p->min_rtt_us : 0;
+    return now_us > since + base ? now_us - since - base : 0;
 }
 
 int
 mqvpn_redundant_tx_select(mqvpn_redundant_tx_t *t, const int *usable, int n_usable,
-                          int *out)
+                          int *out, uint64_t now_us)
 {
     if (!t || !usable || !out || n_usable <= 0) return 0;
     if (t->origs.n >= RTX_CAP) return 0;
-    int n = 0, best = -1;
+    uint64_t q[MQVPN_MAX_PATHS];
+    int best = -1;
     for (int i = 0; i < n_usable; i++) {
         int p = usable[i];
         if (!path_ok(p)) continue;
+        q[p] = rtx_queued_us(t, p, now_us);
         int o = t->path[p].outstanding;
-        if (best < 0 || o < t->path[best].outstanding ||
-            (o == t->path[best].outstanding && p < best))
+        if (best < 0 || q[p] < q[best] ||
+            (q[p] == q[best] && (o < t->path[best].outstanding ||
+                                 (o == t->path[best].outstanding && p < best))))
             best = p;
-        if ((uint32_t)o < mqvpn_redundant_tx_limit(t, p))
+    }
+    if (best < 0) return 0;
+    /* copies more than RTX_LAG behind another path's rarely arrive in time to fill a
+     * loss, and if that path drops, every fresh packet waits behind them */
+    int n = 0;
+    for (int i = 0; i < n_usable; i++) {
+        int p = usable[i];
+        if (!path_ok(p)) continue;
+        if (q[best] > RTX_LAG ? p == best : q[p] <= q[best] + RTX_LAG)
             out[n++] = p;
         else
             t->path[p].hit = 1;
     }
-    if (n == 0 && best >= 0) out[n++] = best;
     int room = RTX_CAP - t->copies.n;
     return n < room ? n : room;
 }
@@ -352,8 +375,10 @@ mqvpn_redundant_tx_commit(mqvpn_redundant_tx_t *t, const uint64_t *dgram_ids,
         c->b = path_ok(paths[i]) ? paths[i] : -1;
         c->len = bytes;
         if (c->b >= 0) {
-            t->path[c->b].outstanding++;
-            t->path[c->b].out_bytes += bytes;
+            rtx_path_t *p = &t->path[c->b];
+            t->sent[c->b][(p->first + (uint32_t)p->outstanding) & (RTX_CAP - 1)] = now_us;
+            p->outstanding++;
+            p->out_bytes += bytes;
         }
     }
 }
@@ -366,9 +391,15 @@ resolve(mqvpn_redundant_tx_t *t, uint64_t dgram_id, int *last, int acked)
     if (!c) return NULL;
     rtx_ent_t *o = tab_find(&t->origs, c->a);
     if (c->b >= 0) {
-        t->path[c->b].outstanding--;
-        t->path[c->b].out_bytes -= c->len;
-        if (acked) t->path[c->b].acked++;
+        rtx_path_t *p = &t->path[c->b];
+        p->outstanding--;
+        p->out_bytes -= c->len;
+        if (acked) p->acked++;
+        /* shortcut: drops the oldest time whichever copy resolved, so an out-of-order
+         * resolution under-estimates the queue (never over); keep per-copy times if that
+         * matters. A copy xquic never reports (none known) pins the time once the path
+         * gets no copy for RTX_LAG past its min RTT, leaving it out until a detach. */
+        p->first = (p->first + 1) & (RTX_CAP - 1);
     }
     tab_remove(&t->copies, c);
     *last = (--o->a == 0);
@@ -442,7 +473,7 @@ mqvpn_redundant_tx_update_mode(mqvpn_redundant_tx_t *t, const int *usable, int n
     for (int i = 0; i < n_usable; i++) {
         if (!path_ok(usable[i])) continue;
         const rtx_path_t *p = &t->path[usable[i]];
-        /* short: backed up (at the guard limit, or copies queued in xquic) yet
+        /* short: backed up (left out by select, or copies queued in xquic) yet
          * delivering under 95% of the stream */
         uint64_t acked_pps = p->acked * 1000000u / el;
         int fed = p->hit || p->out_bytes > p->inflight + p->inflight / 10;
