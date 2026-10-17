@@ -8,6 +8,7 @@ import com.mqvpn.sdk.core.model.MqvpnConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -138,7 +139,7 @@ class DemoSettingsTest {
                 assertFalse(v, DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = v).isValid())
                 // connecting with it fails instead of duplicating all UDP
                 val enabled = DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = v)
-                assertTrue(v, runCatching { enabled.toMqvpnConfig() }.isFailure)
+                assertThrows(v, IllegalArgumentException::class.java) { enabled.toMqvpnConfig() }
                 // ignored when the switch is off
                 assertTrue(v, DemoSettings(serverAddress = "h", redundantEnabled = false, redundantPorts = v).isValid())
             }
