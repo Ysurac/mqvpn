@@ -218,8 +218,9 @@ Android では **Redundant Mode** スイッチをオンにします（ポート�
   待機のままのため）。
 
 以前の `Reinjection = dgram` は廃止され、この冗長モードに置き換わりました。
-設定ファイルに `dgram` が残っていると警告が出て `Reinjection = off` で
-動作します。代わりに `Redundant = on` を使ってください。
+INI の設定ファイルに `dgram` が残っていると警告が出て `Reinjection = off` で
+動作します。JSON の設定（`"reinjection": "dgram"`）は読み込みエラーになります。
+代わりに `Redundant = on` を使ってください。
 
 ## パスの重み付け
 
