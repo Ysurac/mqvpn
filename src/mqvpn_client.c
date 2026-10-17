@@ -4407,8 +4407,9 @@ tick_handshake_watchdog(mqvpn_client_t *c)
 
 /* Redundant mode, every 100 ms: re-sync the tracker's slot bindings; while some
  * path is usable, feed it each usable path's minimum RTT (base of its queue) and
- * load, and update overload mode. An update that finds no packet counted for 1 s, or no
- * judgement for 1 s (a total outage skips the update), starts the judgement afresh. */
+ * load, and update overload mode. An update that finds no packet counted for 1 s,
+ * or no judgement for 1 s (a total outage skips the update), starts the judgement
+ * afresh. */
 static void
 tick_redundant_refresh(mqvpn_client_t *c)
 {

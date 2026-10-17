@@ -72,19 +72,13 @@ add_copy(mqvpn_redundant_tx_t *t, int path, uint64_t now_us)
     return id;
 }
 
-static int
-sel(mqvpn_redundant_tx_t *t, const int *usable, int n, int *out, uint64_t now_us)
-{
-    return mqvpn_redundant_tx_select(t, usable, n, out, now_us);
-}
-
 /* select over u[0..n) at now_us returns exactly the paths in want[0..nw), in order */
 static int
 sel_is(mqvpn_redundant_tx_t *t, const int *u, int n, uint64_t now_us, const int *want,
        int nw)
 {
     int out[8];
-    if (sel(t, u, n, out, now_us) != nw) return 0;
+    if (mqvpn_redundant_tx_select(t, u, n, out, now_us) != nw) return 0;
     for (int i = 0; i < nw; i++)
         if (out[i] != want[i]) return 0;
     return 1;
@@ -236,9 +230,8 @@ static void
 test_select_all_fresh(void)
 {
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
-    int u[3] = {0, 1, 2}, out[8];
-    assert(sel(t, u, 3, out, 0) == 3);
-    assert(out[0] == 0 && out[1] == 1 && out[2] == 2);
+    const int u[3] = {0, 1, 2};
+    assert(sel_is(t, u, 3, 0, u, 3));
     mqvpn_redundant_tx_free(t);
 }
 
@@ -468,10 +461,10 @@ test_capacity_truncates(void)
     mqvpn_redundant_tx_t *t = mqvpn_redundant_tx_new();
     for (int i = 0; i < 16383; i++)
         add_copy(t, 2, 1000000);
-    int u[3] = {0, 1, 2}, out[8];
-    assert(sel(t, u, 3, out, 1000000) == 1); /* three paths, room for one copy */
+    const int u[3] = {0, 1, 2};
+    assert(sel_is(t, u, 3, 1000000, u, 1)); /* three paths, room for one copy */
     add_copy(t, 2, 1000000);
-    assert(sel(t, u, 3, out, 1000000) == 0);
+    assert(sel_is(t, u, 3, 1000000, u, 0));
     mqvpn_redundant_tx_free(t);
 }
 
@@ -514,6 +507,7 @@ test_detach_and_rebind(void)
     add_copy(t, 2, 1000000);
     /* z was detached: resolving it leaves path 2's queue alone */
     assert(mqvpn_redundant_tx_on_lost(t, z) == 1);
+    assert(mqvpn_redundant_tx_outstanding(t, 2) == 1);
     assert(sel_is(t, u12, 2, 1000001, u12, 2));
     mqvpn_redundant_tx_free(t);
 }

@@ -12,7 +12,7 @@
 /* Physical slots: load <= 0.5, so a probe always meets an empty slot. */
 #define RTX_SLOTS       (2 * RTX_CAP)
 #define RTX_LAG         250000u   /* us a path may queue beyond the least-queued one */
-#define RTX_RTT_UNKNOWN 10000000u /* us: xquic's min RTT before a sample (UINT32_MAX) */
+#define RTX_RTT_UNKNOWN 10000000u /* us: at or above, no min RTT sample (UINT32_MAX) */
 /* us per rate bucket; the last complete bucket estimates the current rate */
 #define RTX_RATE_BUCKET 100000u
 /* shortcut: the fit check assumes full-size datagrams (SRT), so a small-packet stream
@@ -259,7 +259,7 @@ mqvpn_redundant_tx_set_path_metrics(mqvpn_redundant_tx_t *t, int path,
                                     uint64_t inflight)
 {
     if (!t || !path_ok(path)) return;
-    t->path[path].min_rtt_us = min_rtt_us;
+    t->path[path].min_rtt_us = min_rtt_us < RTX_RTT_UNKNOWN ? min_rtt_us : 0;
     t->path[path].est_bw = est_bw;
     t->path[path].inflight = inflight;
 }
@@ -286,16 +286,14 @@ mqvpn_redundant_tx_stream_pps(const mqvpn_redundant_tx_t *t)
     return t ? rtx_stream_pps(t) : 0;
 }
 
-/* How long the path's oldest unresolved copy has waited beyond its min RTT; 0 with
- * none, or with the clock behind it (gettimeofday can step back). */
+/* 0 with no unresolved copy, or with the clock behind it (it can step back). */
 static uint64_t
 rtx_queued_us(const mqvpn_redundant_tx_t *t, int path, uint64_t now_us)
 {
     const rtx_path_t *p = &t->path[path];
     if (p->outstanding == 0) return 0;
-    uint64_t since = t->sent[path][p->first];
-    uint64_t base = p->min_rtt_us < RTX_RTT_UNKNOWN ? p->min_rtt_us : 0;
-    return now_us > since + base ? now_us - since - base : 0;
+    uint64_t due = t->sent[path][p->first] + p->min_rtt_us;
+    return now_us > due ? now_us - due : 0;
 }
 
 int
