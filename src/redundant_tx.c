@@ -286,7 +286,8 @@ mqvpn_redundant_tx_stream_pps(const mqvpn_redundant_tx_t *t)
     return t ? rtx_stream_pps(t) : 0;
 }
 
-/* 0 with no unresolved copy, or with the clock behind it (it can step back). */
+/* 0 with no unresolved copy, or until the oldest one has waited its min RTT; the clock
+ * can step back. */
 static uint64_t
 rtx_queued_us(const mqvpn_redundant_tx_t *t, int path, uint64_t now_us)
 {
