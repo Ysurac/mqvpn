@@ -282,15 +282,15 @@ arm_teardown() {
 declare -A R_LOSS R_SENT R_RCVDROP R_SNDDROP R_RETRANS R_RTT R_RATE R_BELATED R_RXA R_RXB
 RUNS=()   # ordered "<cond>_<latency>_<arm>_rN" keys
 
-# run_arm <cond> <latency> <rate-mbps> <arm> <rep>
-# SRT_BENCH_KEEP=1: keep each run's client log, failed runs included (the next
-# run overwrites client.log)
+# Give each run's client log its own name (the next run overwrites client.log). A
+# failed run keeps WORK_DIR, and SRT_BENCH_KEEP=1 keeps it after a clean one.
 keep_client_log() {
-    if [ "${SRT_BENCH_KEEP:-0}" = "1" ] && [ -f "${WORK_DIR}/client.log" ]; then
+    if [ -f "${WORK_DIR}/client.log" ]; then
         mv "${WORK_DIR}/client.log" "${WORK_DIR}/$1.client.log"
     fi
 }
 
+# run_arm <cond> <latency> <rate-mbps> <arm> <rep>
 run_arm() {
     local cond="$1" latency="$2" rate_mbps="$3" arm="$4" rep="${5:-1}"
     local key="${cond}_${latency}_${arm}_r${rep}"

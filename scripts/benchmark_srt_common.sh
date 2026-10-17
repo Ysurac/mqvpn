@@ -178,7 +178,7 @@ run_vpn() {
     CLIENT_PID=$!
     sleep 5
     if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
-        echo "    ERROR: client died (see ${WORK_DIR}/client.log)"
+        echo "    ERROR: client died (see this run's client log in ${WORK_DIR})"
         return 1
     fi
 
@@ -194,7 +194,7 @@ run_vpn() {
     fi
     if [ "$reinj" != "off" ] && \
        ! grep -q "$marker" "${WORK_DIR}/client.log"; then
-        echo "    ERROR: client did not log '${marker}' (see ${WORK_DIR}/client.log)"
+        echo "    ERROR: client did not log '${marker}' (see this run's client log in ${WORK_DIR})"
         return 1
     fi
     return 0
