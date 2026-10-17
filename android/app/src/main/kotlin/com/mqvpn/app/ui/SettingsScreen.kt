@@ -352,8 +352,9 @@ fun SettingsScreen(
             )
             Text(
                 "Sends each UDP packet over every connection at once, so a dropped connection " +
-                    "does not interrupt live streams. Uses as much mobile data as the number of " +
-                    "connections (twice with two).",
+                    "does not interrupt live streams. Each connection carries a full copy, so the " +
+                    "stream's data use is multiplied by the number of connections in total " +
+                    "(twice with two).",
                 style = MaterialTheme.typography.bodySmall,
             )
             if (redundantEnabled) {
