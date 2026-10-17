@@ -225,9 +225,8 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   second path stays on standby.
 
 This replaces the former `Reinjection = dgram` mode, which has been removed.
-An INI config file that still says `dgram` prints a warning and runs with
-`Reinjection = off`; a JSON config with `"reinjection": "dgram"` is rejected.
-Use `Redundant = on` instead.
+A config file that still says `dgram` prints a warning and runs with
+`Reinjection = off`; use `Redundant = on` instead.
 
 ## Path Weighting
 
