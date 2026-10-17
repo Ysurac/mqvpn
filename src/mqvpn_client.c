@@ -2976,9 +2976,12 @@ cli_start_connection(mqvpn_client_t *c)
 
     if (c->config.redundant) {
         char ports[MQVPN_REDUNDANT_MAX_PORTS * 6 + 4] = "all";
-        for (int i = 0, o = 0; i < c->config.n_redundant_ports; i++)
-            o += snprintf(ports + o, sizeof(ports) - (size_t)o, "%s%u", i ? "," : "",
-                          (unsigned)c->config.redundant_ports[i]);
+        for (int i = 0, o = 0; i < c->config.n_redundant_ports; i++) {
+            int n = snprintf(ports + o, sizeof(ports) - (size_t)o, "%s%u", i ? "," : "",
+                             (unsigned)c->config.redundant_ports[i]);
+            if (n < 0 || (size_t)n >= sizeof(ports) - (size_t)o) break;
+            o += n;
+        }
         LOG_I(c, "redundant mode enabled: ports=%s", ports);
         if (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
             LOG_W(c, "redundant mode has no effect with scheduler backup_fec (the "
