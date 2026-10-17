@@ -11,21 +11,17 @@ path's gets no new copies until it catches up. `2026-10-17-overload-acceptance`
 was taken at e3ddd8bf, which capped the number of outstanding copies per path
 instead; the two are not comparable run for run.
 
-- R2: two links, 40 and 30 Mbit/s, light random loss.
-- R3: two 100 Mbit/s links, one with bursty loss.
-- R4: as R2, and link A drops for 2 s every 10 s.
-
-| rate | condition | off loss | redundant loss | note |
-|---|---|---|---|---|
-| 10 Mbit/s | R2 | 0.20-0.31% | 0.00-0.02% | |
-| 10 Mbit/s | R3 | 3.4-3.5% | 0.00% | |
-| 10 Mbit/s | R4 | 1.6-2.2% | 0.12-0.15% | |
-| 20 Mbit/s | R2 | 0.27-0.47% | 0.01-0.03% | |
-| 20 Mbit/s | R3 | 4.6-5.4% | 0.00-0.12% | |
-| 20 Mbit/s | R4 | 2.3-2.9% | 0.11-0.17% | |
-| 50 Mbit/s | R3 | 1.9-4.8% | 0.00-0.31% | |
-| 50 Mbit/s | R2 | 3.3-7.2% | 3.9-6.3% | each link slower than the stream |
-| 50 Mbit/s | R4 | 20-30% | 23-30% | the links cannot carry the stream while A is down |
+| rate | condition | links | off loss | redundant loss | note |
+|---|---|---|---|---|---|
+| 10 Mbit/s | R2 | A 40 + B 30 Mbit/s, light random loss | 0.20-0.31% | 0.00-0.02% | |
+| 10 Mbit/s | R3 | A + B 100 Mbit/s, bursty loss on A | 3.4-3.5% | 0.00% | |
+| 10 Mbit/s | R4 | as R2, A down 2 s of every 10 | 1.6-2.2% | 0.12-0.15% | |
+| 20 Mbit/s | R2 | A 40 + B 30 Mbit/s, light random loss | 0.27-0.47% | 0.01-0.03% | |
+| 20 Mbit/s | R3 | A + B 100 Mbit/s, bursty loss on A | 4.6-5.4% | 0.00-0.12% | |
+| 20 Mbit/s | R4 | as R2, A down 2 s of every 10 | 2.3-2.9% | 0.11-0.17% | |
+| 50 Mbit/s | R3 | A + B 100 Mbit/s, bursty loss on A | 1.9-4.8% | 0.00-0.31% | |
+| 50 Mbit/s | R2 | A 40 + B 30 Mbit/s, light random loss | 3.3-7.2% | 3.9-6.3% | each link slower than the stream |
+| 50 Mbit/s | R4 | as R2, A down 2 s of every 10 | 20-30% | 23-30% | the links cannot carry the stream while A is down |
 
 R3's setup failed in 9 of its 36 runs (`ERROR: tunnel not established`, an
 `ERR` row in `summary.md`). The bench checks the tunnel with two pings, and
