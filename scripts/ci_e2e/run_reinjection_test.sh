@@ -681,6 +681,11 @@ EOT
     fi
     echo "  redundant: client marker present: OK"
 
+    # Sample only once both paths carry copies, or the second path's delta can miss.
+    if ! wait_for 10 grep -q 'path\[1\] activated' "$client_log"; then
+        echo "  FAIL: second path never activated"; tail -30 "$client_log"; return 1
+    fi
+
     # Inner UDP flow, client -> server: iperf3 server in NS_SERVER on the
     # tunnel address. The server-side veth rx_bytes of each path show how
     # many bytes arrived on it.
