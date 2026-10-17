@@ -351,10 +351,9 @@ fun SettingsScreen(
                 enabled = fieldsEnabled,
             )
             Text(
-                "Sends each UDP packet over every connection at once, so a dropped connection " +
-                    "does not interrupt live streams. Each connection carries a full copy, so the " +
-                    "stream's data use is multiplied by the number of connections in total " +
-                    "(twice with two).",
+                "Sends copies of UDP packets over more than one connection at once, which " +
+                    "helps live streams keep going when a connection drops. Uses up to twice " +
+                    "the data with two connections, three times with three.",
                 style = MaterialTheme.typography.bodySmall,
             )
             if (redundantEnabled) {
