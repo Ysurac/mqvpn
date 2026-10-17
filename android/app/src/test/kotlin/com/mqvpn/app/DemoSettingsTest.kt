@@ -136,6 +136,9 @@ class DemoSettingsTest {
             .forEach { v ->
                 assertFalse(v, DemoSettings(redundantPorts = v).redundantPortsValid())
                 assertFalse(v, DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = v).isValid())
+                // connecting with it fails instead of duplicating all UDP
+                val enabled = DemoSettings(serverAddress = "h", redundantEnabled = true, redundantPorts = v)
+                assertTrue(v, runCatching { enabled.toMqvpnConfig() }.isFailure)
                 // ignored when the switch is off
                 assertTrue(v, DemoSettings(serverAddress = "h", redundantEnabled = false, redundantPorts = v).isValid())
             }

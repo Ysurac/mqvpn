@@ -70,27 +70,33 @@ data class DemoSettings(
             .map { it.trim() }
             .filter { it.isNotBlank() && (it.toIntOrNull() ?: -1) !in 1..65535 }
 
-    fun toMqvpnConfig(): MqvpnConfig = MqvpnConfig(
-        serverAddress = serverAddress.trim(),
-        serverPort = serverPort,
-        tlsServerName = tlsServerName.trim().ifEmpty { null },
-        authKey = authKey.trim(),
-        insecure = insecure,
-        killSwitch = killSwitch,
-        reorderEnabled = reorderEnabled,
-        reorderProfile = reorderProfileEnum(),
-        reorderPorts = parsedReorderPorts(),
-        redundantEnabled = redundantEnabled,
-        redundantPorts = parsedRedundantPorts(),
-        hybridEnabled = hybridEnabled,
-        hybridTcpMode = hybridTcpModeEnum(),
-        bluetoothPathEnabled = bluetoothPathEnabled,
-        scheduler = when (schedulerChoice()) {
-            SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
-            else -> MqvpnConfig.Scheduler.MIN_RTT
-        },
-        requestServerScheduler = schedulerChoice() != SchedulerChoice.DEFAULT,
-    )
+    /** Fails on an invalid redundant port list instead of widening it to all UDP. */
+    fun toMqvpnConfig(): MqvpnConfig {
+        require(!redundantEnabled || redundantPortsValid()) {
+            "Redundant Ports is not a valid port list"
+        }
+        return MqvpnConfig(
+            serverAddress = serverAddress.trim(),
+            serverPort = serverPort,
+            tlsServerName = tlsServerName.trim().ifEmpty { null },
+            authKey = authKey.trim(),
+            insecure = insecure,
+            killSwitch = killSwitch,
+            reorderEnabled = reorderEnabled,
+            reorderProfile = reorderProfileEnum(),
+            reorderPorts = parsedReorderPorts(),
+            redundantEnabled = redundantEnabled,
+            redundantPorts = parsedRedundantPorts(),
+            hybridEnabled = hybridEnabled,
+            hybridTcpMode = hybridTcpModeEnum(),
+            bluetoothPathEnabled = bluetoothPathEnabled,
+            scheduler = when (schedulerChoice()) {
+                SchedulerChoice.WLB -> MqvpnConfig.Scheduler.WLB
+                else -> MqvpnConfig.Scheduler.MIN_RTT
+            },
+            requestServerScheduler = schedulerChoice() != SchedulerChoice.DEFAULT,
+        )
+    }
 
     fun hostValid(): Boolean = serverAddress.trim().isNotBlank()
 
