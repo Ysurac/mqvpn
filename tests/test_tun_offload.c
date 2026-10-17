@@ -962,6 +962,75 @@ test_gro_acks_many_flows(void)
     mqvpn_gro_free(g);
 }
 
+/* A FIN behind IPv4 options or an IPv6 extension header does not overtake
+ * the data its flow holds. */
+static void
+test_gro_long_header_keeps_order(void)
+{
+    static uint8_t data[2048], fin[2048];
+    for (int v6 = 0; v6 < 2; v6++) {
+        mqvpn_gro_t *g = mqvpn_gro_new(capture, NULL);
+        out_n = 0;
+        size_t dlen = mk_tcp(data, v6, 100, 1000, 0x10, 1, 0x1234, 1);
+        spec_t s = {.v6 = v6,
+                    .proto = IPPROTO_TCP,
+                    .ext = v6 ? 8 : 0,
+                    .ip_opts = v6 ? 0 : 8,
+                    .tcp_flags = 0x11,
+                    .seq = 1100};
+        size_t ip_hlen;
+        size_t flen = build(fin, &s, &ip_hlen);
+        mqvpn_gro_push(g, data, dlen);
+        mqvpn_gro_push(g, fin, flen);
+        mqvpn_gro_flush(g);
+        assert(out_n == 2);
+        assert(out_q[0].len == dlen && memcmp(out_q[0].pkt, data, dlen) == 0);
+        assert(out_q[1].len == flen && memcmp(out_q[1].pkt, fin, flen) == 0);
+        mqvpn_gro_free(g);
+    }
+}
+
+/* The packets an emit callback must see, in order. */
+typedef struct {
+    const uint8_t *pkt[2];
+    size_t len[2];
+    unsigned n;
+} expect_t;
+
+static int
+capture_expect(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, size_t len)
+{
+    static const struct virtio_net_hdr plain; /* all zero */
+    expect_t *x = ctx;
+    assert(memcmp(vh, &plain, sizeof(plain)) == 0 && x->n < 2);
+    assert(len == x->len[x->n] && memcmp(pkt, x->pkt[x->n], len) == 0);
+    x->n++;
+    return 0;
+}
+
+/* An IPv6 packet longer than an entry's buffer is written unmerged, after
+ * the data its flow holds. */
+static void
+test_gro_oversized(void)
+{
+    static uint8_t data[2048], big[40 + 65535];
+    size_t dlen = mk_tcp(data, 1, 100, 1000, 0x10, 1, 0x1234, 1);
+    spec_t s = {.v6 = 1,
+                .proto = IPPROTO_TCP,
+                .payload = 65535 - 20,
+                .tcp_flags = 0x10,
+                .seq = 1100};
+    size_t ip_hlen;
+    size_t len = build(big, &s, &ip_hlen);
+    assert(len == sizeof(big));
+    expect_t x = {.pkt = {data, big}, .len = {dlen, len}};
+    mqvpn_gro_t *g = mqvpn_gro_new(capture_expect, &x);
+    mqvpn_gro_push(g, data, dlen);
+    mqvpn_gro_push(g, big, len);
+    assert(x.n == 2 && !mqvpn_gro_pending(g));
+    mqvpn_gro_free(g);
+}
+
 int
 main(void)
 {
@@ -978,6 +1047,8 @@ main(void)
     test_gro_reserved_bits();
     test_gro_acks();
     test_gro_acks_many_flows();
+    test_gro_long_header_keeps_order();
+    test_gro_oversized();
     printf("test_tun_offload: OK\n");
     return 0;
 }
