@@ -215,6 +215,11 @@ On Android, turn on the **Redundant Mode** switch (the port list is the
   copies, so the receiving application sees every packet more than once. SRT
   and similar protocols discard duplicates; check that your application does
   before using this mode for other UDP traffic.
+- **Using Reorder together with redundant mode**: outgoing UDP packets covered
+  by redundant mode bypass Reorder, so Reorder neither puts them in order nor
+  removes their duplicates. With an empty `RedundantPorts` list, all outgoing
+  UDP bypasses Reorder. Reorder still follows its settings and rules for other
+  traffic and downloads.
 - **Upload only**: it applies to what the client sends. Download traffic is
   unchanged. The server ignores the setting.
 - A path that is still starting up or has gone down gets no copies. A path
