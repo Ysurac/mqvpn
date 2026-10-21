@@ -1146,6 +1146,9 @@ if(BUILD_TESTING)
         TEST_CHAIN_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-leaf.key"
         TEST_CHAIN_LEAF_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-leaf.der"
         TEST_CHAIN_INTERMEDIATE_DER_FILE="${CMAKE_SOURCE_DIR}/tests/certs/chain-intermediate.der"
+        # Self-signed mqvpn-test that expired in 2020 (tests/certs/gen_expired.sh)
+        TEST_EXPIRED_CERT_FILE="${CMAKE_SOURCE_DIR}/tests/certs/expired.crt"
+        TEST_EXPIRED_KEY_FILE="${CMAKE_SOURCE_DIR}/tests/certs/expired.key"
     )
     set_target_properties(test_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_server COMMAND test_server)
@@ -1243,12 +1246,11 @@ if(BUILD_TESTING)
     add_test(NAME test_cli_path_argv
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
 
-    # SIGTERM-while-CLOSED shell test (runs the built mqvpn binary). Needs no
-    # root, no server and no TUN — the client reaches CLOSED on a handshake
-    # that times out — so it runs here rather than in the sudo+netns suite.
-    # ~10s: the failed handshake waits out xquic's init_idle_time_out.
-    add_test(NAME test_cli_sigterm_closed
-        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_sigterm_closed.sh $<TARGET_FILE:mqvpn>)
+    # Exit-at-CLOSED shell test (runs the built mqvpn binary). Needs no root,
+    # no server and no TUN — the client reaches CLOSED on a handshake that is
+    # abandoned — so it runs here rather than in the sudo+netns suite. ~7s.
+    add_test(NAME test_cli_closed_exits
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_closed_exits.sh $<TARGET_FILE:mqvpn>)
 
     # Guard: every tests/test_*.c using bare assert() must #undef NDEBUG,
     # since CI also runs ctest on a Release (-DNDEBUG) build.
