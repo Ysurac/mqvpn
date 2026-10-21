@@ -159,6 +159,8 @@ struct mqvpn_server_s {
 
     /* xquic engine */
     xqc_engine_t *engine;
+    /* holds a share of the process's xquic clock (mqvpn_xqc_clock_acquire) */
+    int xqc_clock_held;
 
     /* Shared transport (installed once via set_transport). tops.send != NULL
      * iff installed; transport_ctx is an opaque payload (NULL legal). The
@@ -268,8 +270,9 @@ mqvpn_scheduler_label(int s)
     return mqvpn_sched_to_name((mqvpn_scheduler_t)s);
 }
 
+/* Wall clock, for the times the API reports as dates (connected_at_us). */
 static uint64_t
-now_us(void)
+wall_us(void)
 {
 #ifdef _WIN32
     FILETIME ft;
@@ -281,6 +284,14 @@ now_us(void)
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
 #endif
+}
+
+/* Clock of the server's timers and of its xquic engine: the library's
+ * (mqvpn_clock.c), not the wall clock, which NTP or an admin can step. */
+static uint64_t
+now_us(void)
+{
+    return mqvpn_clock_us();
 }
 
 /* One-shot at mqvpn_server_new (rlimit-derived headroom under the
@@ -673,7 +684,7 @@ cb_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_user_data)
  * present. TX stamping stays gated on peer_reorder_supported (set when the
  * client advertises in its CONNECT-IP request), so until then everything is
  * sent RAW. The hash seeds need not match the peer (§6.2); derive from
- * wall-clock time. Shared by cb_h3_conn_create (first tunnel) and
+ * now_us(). Shared by cb_h3_conn_create (first tunnel) and
  * svr_connect_ip_on_request (re-establishment after svr_session_release freed
  * the previous generation's engines — each tunnel generation gets fresh
  * sequence/flow state). On alloc failure both engines are left NULL (RAW
@@ -1454,7 +1465,7 @@ svr_connect_ip_on_request(mqvpn_server_t *s, svr_stream_t *stream,
             return -1;
         }
 
-        stream->conn->connected_at_us = now_us();
+        stream->conn->connected_at_us = wall_us();
         snprintf(stream->conn->username, sizeof(stream->conn->username), "%s", username);
 
         LOG_I(s, "client authenticated successfully (user=%s)", stream->conn->username);
@@ -2185,6 +2196,9 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
                 .xqc_log_write_err = cb_xqc_log_write,
                 .xqc_log_write_stat = cb_xqc_log_write,
             },
+        /* the clock of the receive times handed to
+         * xqc_engine_packet_process(): now_us() */
+        .monotonic_ts = mqvpn_xqc_clock_now,
     };
 
     xqc_transport_callbacks_t tcbs = {
@@ -2231,6 +2245,14 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         s->tx_batch = 1;
 #endif
 
+    /* xquic's clock is process-wide (see mqvpn_clock.c): refused while a
+     * client of this process runs on an injected clock */
+    if (mqvpn_xqc_clock_acquire(NULL, NULL) != 0) {
+        LOG_E(s, "a client of this process runs on a different clock (xquic's "
+                 "clock is process-wide)");
+        goto cleanup;
+    }
+    s->xqc_clock_held = 1;
     s->engine = xqc_engine_create(XQC_ENGINE_SERVER, &xconfig, &engine_ssl, &engine_cbs,
                                   &tcbs, s);
     if (!s->engine) goto cleanup;
@@ -2323,6 +2345,7 @@ cleanup:
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
     }
+    if (s->xqc_clock_held) mqvpn_xqc_clock_release();
     free(s);
     return NULL;
 }
@@ -2351,6 +2374,10 @@ mqvpn_server_destroy(mqvpn_server_t *s)
     if (s->engine) {
         xqc_engine_destroy(s->engine);
         s->engine = NULL;
+    }
+    if (s->xqc_clock_held) {
+        mqvpn_xqc_clock_release();
+        s->xqc_clock_held = 0;
     }
 
 #ifdef MQVPN_HYBRID_TCP_EGRESS_ENABLED
