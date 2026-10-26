@@ -616,6 +616,11 @@ scenario_auth(void)
     CHECK(mqvpn_server_remove_user(e.svr, "alice") == MQVPN_OK, "remove_user(alice)");
     pump_until(&e, c_conn_closed, &c1);
     CHECK(c1.closed, "removed user's connection closed");
+    /* The server frees c1's session only once its side has drained, which
+     * on a slow runner (qemu, MSan) outlasts the next handshake: wait for
+     * it, so the count below can only see a session admitted for c2. */
+    int zero = 0;
+    CHECK(pump_until(&e, c_n_clients, &zero), "removed user's session released");
 
     cli_conn_t c2;
     cli_req_t r2;
