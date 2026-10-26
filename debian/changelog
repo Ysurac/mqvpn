@@ -1,3 +1,99 @@
+mqvpn (0.18.0+20261026-1) UNRELEASED; urgency=medium
+
+  * Merge of upstream 0.18.0 (up to 5a07f86).
+  * feat(multipath): redundant mode. Redundant = on ([Multipath], JSON
+    redundant, client only) sends a copy of outgoing UDP packets over
+    every usable path, so a live stream keeps going when one connection
+    drops for a few seconds; RedundantPorts limits it to up to 16
+    destination ports (an invalid list stops the client at startup). It
+    uses up to twice the data with two paths, three times with three, and
+    stops copying to a path that falls behind. CC = bbr is recommended
+    with it; the Android app has the setting.
+  * feat(reinjection)!: the dgram reinjection mode is removed. A config
+    file that sets Reinjection = dgram gets a warning and runs with off;
+    the old ReinjectionMode / reinjection_mode = dgram alias now gives
+    idle. Use redundant mode to duplicate packets.
+  * feat(mtu): PathMTU ([Interface], JSON path_mtu, --path-mtu) sizes the
+    QUIC packets for the underlay: 1500 gives 1436-byte packets and a TUN
+    MTU of 1418 (1382 before). PMTUD = true (JSON pmtud, --pmtud) probes
+    the path instead, starting at the size that still gives IPv6 its 1280,
+    with PathMTU as the cap, and goes back down when larger packets stop
+    getting through. A datagram too large for the interface is now a lost
+    packet instead of a fatal send error. A client whose IPv6 tunnel
+    cannot get an inner MTU of 1280 now closes the connection ("IPv6
+    requires an inner MTU of at least 1280").
+  * feat(linux): the TUN reads and writes GSO super-packets (TCP, and UDP
+    for sockets with UDP_GRO), so bulk traffic costs far fewer syscalls.
+    [Advanced] TunOffload and TunGro (JSON advanced.tun_offload /
+    tun_gro, default on) turn it off; they replace the MQVPN_TUN_OFFLOAD
+    environment variable.
+  * fix: mqvpn and xquic are timed with CLOCK_BOOTTIME (Windows: the
+    interrupt time) instead of the wall clock, so an NTP step on a router
+    without an RTC no longer skews path RTTs or closes the connection as
+    idle (which recreated the TUN and dropped every connection through
+    it). connected_sec in get_status still counts from the wall clock.
+  * feat(cc): BBR (CC = bbr) compensates its cwnd for RTT variation like
+    bbr2; it no longer collapses on links whose RTT swings past twice
+    their minimum.
+  * fix(config): the JSON config file, the library's JSON config and the
+    control API are parsed with a full JSON parser (vendored yyjson
+    0.13.0). Malformed JSON that used to be let through now fails, a key
+    is looked up only in its own object, the first of two duplicate keys
+    wins, and escapes are decoded. A value too long for its field is
+    still refused rather than shortened. The server's NAT helper
+    (mqvpn-server-nat.sh) reads Subnet, Subnet6 and TunName with mqvpn's
+    own parser through the new mqvpn-nat-config helper, installed next to
+    it in /usr/lib/mqvpn; a manual install must keep the two together.
+    Teardown still leaves IP forwarding on, and removes the rules even if
+    the config changed or was deleted.
+  * Control API compatibility: a request that is not valid JSON now gets
+    "missing cmd" instead of a per-field error (e.g. "weight":3abc), and a
+    name over 63 bytes in add_user, set_user_fixed_ip, remove_user or
+    get_fec_stats gets "name exceeds 63 bytes" (was "name and key
+    required" / "name required"). dscp_mask still accepts bare 0x hex.
+    Replies keep their keys, order and types. --user with a name over 63
+    bytes now prints "error: --user name exceeds 63 bytes".
+  * fix(server): in get_status, a client's bytes_tx counts only what the
+    server sent to it (it included the received bytes), and its paths
+    list keeps the paths carrying traffic after networks came back and
+    paths were re-created. The listen socket gets the same large buffers
+    as the client paths, so one fast upload no longer overflows it.
+  * fix(server): a Subnet6 too small to hold the IPv4 pool is refused at
+    startup.
+  * fix(linux): ICMP errors the server sends from its tunnel address
+    (Fragmentation Needed, Time Exceeded) now reach the sender, and the
+    server hop answers traceroute.
+  * fix(client): a connection lost before the platform activates the TUN
+    reconnects instead of asserting; a server certificate rejected inside
+    the library is reported as a TLS error and not retried; a client that
+    reaches CLOSED on its own (--no-reconnect, rejected certificate) exits
+    non-zero.
+  * feat(log): path status lines name the interface: "path <handle>
+    (<iface>) -> <status>".
+  * perf: each tunnelled packet is copied once, and the reorder buffer and
+    the hybrid TCP lane no longer walk their whole flow tables per packet
+    or tick.
+  * fix(android): the UI re-attaches to a VPN that kept running after the
+    activity was destroyed.
+  * fix(debian): ship mqvpn-nat-config, which mqvpn-server-nat.sh now
+    needs; build BoringSSL without LTO (a false -Werror warning broke the
+    arm64 build).
+  * xquic: bump to 2bf181c (mqvpn-main ea3d00a):
+    - PMTU black-hole detection (RFC 8899 section 4.3), used by PMTUD
+      above; a lost PMTU probe no longer counts as congestion, and paths
+      not yet validated no longer limit the connection's packet size;
+    - a spilled ACK stays within the packet cap, which goes up to 1436;
+    - BBR's RTT-variance compensation is compiled in;
+    - every library-side certificate rejection is reported to mqvpn;
+    - closed paths and abandoned CID sets are kept out of the per-packet
+      path and CID walks;
+    - allocation failures while creating a connection are survived, FEC
+      reserves room for its largest frame, and two signed shifts are
+      fixed;
+    - BoringSSL 0.20260929.0.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 26 Oct 2026 12:27:20 +0100
+
 mqvpn (0.17.0+20261015-1) UNRELEASED; urgency=medium
 
   * fix(reorder): a packet that arrived CapPackets (1024) or more sequence
