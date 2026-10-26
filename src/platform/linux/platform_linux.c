@@ -17,8 +17,11 @@
 #include "platform_linux.h"
 #include "control_socket.h"
 #include "log.h"
+#include "compat/socket_compat.h"
+#include "platform/path_line.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
+#include "tun_offload.h"
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -99,7 +102,7 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Create TUN device — use tun_name_cfg which survives destroy/recreate */
-    if (mqvpn_tun_create(&p->tun, p->tun_name_cfg) < 0) {
+    if (mqvpn_tun_create_opts(&p->tun, p->tun_name_cfg, p->tun_offload, p->tun_gro) < 0) {
         LOG_ERR("TUN create failed");
         goto fail;
     }
@@ -294,20 +297,27 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
-        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
-            event_base_loopbreak(p->eb);
+        /* CLOSED we did not ask for: the connection ended and the library
+         * will not retry it (reconnect off, or a rejected certificate), so
+         * exit non-zero rather than idle on a dead client. */
+        if (new_state == MQVPN_STATE_CLOSED && !p->shutting_down)
+            p->fatal_error = PLATFORM_FATAL_CLOSED;
+        if (new_state == MQVPN_STATE_CLOSED) event_base_loopbreak(p->eb);
     }
 }
 
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
      * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
-    const char *sn = mqvpn_path_status_string(status);
-    LOG_INF("path %lld -> %s", (long long)path, sn);
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
+    platform_fmt_path_line(line, sizeof(line), path, iface, status);
+    LOG_INF("%s", line);
 }
 
 static void
@@ -433,6 +443,9 @@ schedule_next_tick(platform_ctx_t *p)
     mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_client_get_interest(p->client, &interest);
 
+    /* Every handler that can deliver packets to the TUN ends here. */
+    if (p->tun_up && p->tun.fd >= 0) mqvpn_tun_flush(&p->tun);
+
     int ms = interest.next_timer_ms;
     struct timeval tv = {
         .tv_sec = ms / 1000,
@@ -446,6 +459,10 @@ schedule_next_tick(platform_ctx_t *p)
             event_add(p->ev_tun, NULL);
         else if (!interest.tun_readable && event_pending(p->ev_tun, EV_READ, NULL))
             event_del(p->ev_tun);
+        /* Segments kept from before a backpressure stop are no longer in the
+         * fd, so it may never become readable for them: run the read handler. */
+        if (interest.tun_readable && mqvpn_tun_has_pending(&p->tun))
+            event_active(p->ev_tun, EV_READ, 1);
     }
 }
 
@@ -516,7 +533,9 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    /* Finish the segments of a super-packet already split off the kernel
+     * read, even past the budget: they are not in the fd any more. */
+    for (int i = 0; i < BULK_READ_COUNT || mqvpn_tun_has_pending(&p->tun); i++) {
         int n = mqvpn_tun_read(&p->tun, buf, sizeof(buf));
         if (n == 0) break; /* EAGAIN: drained */
         if (n < 0) {
@@ -844,8 +863,11 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Either knob suppresses route management: no_routes (CLI --no-routes /
      * INI NoRoutes) and manage_routes (ManageRoutes / --no-manage-routes). */
     ctx.manage_routes = cfg->manage_routes && !cfg->no_routes;
+    ctx.pmtud = cfg->pmtud;
     ctx.udp_gro = cfg->udp_gro;
     ctx.udp_gso = cfg->udp_gso;
+    ctx.tun_offload = cfg->tun_offload;
+    ctx.tun_gro = cfg->tun_gro;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -975,8 +997,10 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
         mqvpn_path_desc_t desc;
         platform_path_fill_desc(&ctx, s, &desc);
+        ctx.adding_iface = s->iface;
         s->handle = mqvpn_client_add_path(ctx.client, &desc, mqvpn_bind_posix_path_ops(),
                                           tctx, NULL);
+        ctx.adding_iface = NULL;
         if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
             mqvpn_bind_posix_path_free(tctx); /* add failed: still ours */
@@ -1050,6 +1074,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = ctx.fatal_error ? 1 : 0;
     if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
         LOG_ERR("exiting: path release refused by the library");
+    else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
+        LOG_ERR("exiting: connection closed");
     else if (rc)
         LOG_ERR("exiting: tunnel setup failed");
 
@@ -1179,6 +1205,8 @@ typedef struct server_platform_ctx_s {
     struct event *ev_sighup;
     mqvpn_tun_t tun;
     int tun_up;
+    int tun_offload; /* [Advanced] TunOffload */
+    int tun_gro;     /* [Advanced] TunGro */
     int udp_fd;
     /* mqvpn_bind_posix server transport over udp_fd; owned by the library
      * after set_transport (finalised inside mqvpn_server_destroy). */
@@ -1222,6 +1250,8 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
     mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_server_get_interest(sp->server, &interest);
 
+    if (sp->tun_up && sp->tun.fd >= 0) mqvpn_tun_flush(&sp->tun);
+
     int ms = interest.next_timer_ms;
     struct timeval tv = {
         .tv_sec = ms / 1000,
@@ -1235,6 +1265,8 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
             event_add(sp->ev_tun, NULL);
         else if (!interest.tun_readable && event_pending(sp->ev_tun, EV_READ, NULL))
             event_del(sp->ev_tun);
+        if (interest.tun_readable && mqvpn_tun_has_pending(&sp->tun))
+            event_active(sp->ev_tun, EV_READ, 1);
     }
 }
 
@@ -1278,7 +1310,7 @@ svr_tun_build(server_platform_ctx_t *sp, const mqvpn_tunnel_info_t *info)
     /* Create TUN device from the configured name; sp->tun.name then holds
      * the kernel-assigned one (differs only for a template like tun%d). */
     const char *tun_name = sp->tun_name_cfg[0] ? sp->tun_name_cfg : "mqvpn0";
-    if (mqvpn_tun_create(&sp->tun, tun_name) < 0) {
+    if (mqvpn_tun_create_opts(&sp->tun, tun_name, sp->tun_offload, sp->tun_gro) < 0) {
         LOG_ERR("TUN create failed");
         return -1;
     }
@@ -1380,7 +1412,7 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    for (int i = 0; i < BULK_READ_COUNT || mqvpn_tun_has_pending(&sp->tun); i++) {
         int n = mqvpn_tun_read(&sp->tun, buf, sizeof(buf));
         if (n == 0) break; /* EAGAIN: drained */
         if (n < 0) {
@@ -1557,11 +1589,8 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    /* The platform sizes its own listen socket, so the transport ctx is told
-     * to leave the buffers alone (socket_buf_bytes = -1). */
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    /* Socket buffers are sized by the transport ctx (bind default), as on
+     * the client paths. */
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1623,6 +1652,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     memset(&sp, 0, sizeof(sp));
     sp.tun.fd = -1;
     sp.udp_fd = -1;
+    sp.tun_offload = cfg->tun_offload;
+    sp.tun_gro = cfg->tun_gro;
 
     if (cfg->tun_name)
         snprintf(sp.tun_name_cfg, sizeof(sp.tun_name_cfg), "%s", cfg->tun_name);
@@ -1704,6 +1735,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
     mqvpn_config_set_fec_scheme(lib_cfg, (mqvpn_fec_scheme_t)cfg->fec_scheme);
+    mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
+    mqvpn_config_set_pmtud(lib_cfg, cfg->pmtud);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
@@ -1751,12 +1784,23 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
                                       &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
+    /* without DF a fragmented probe could be acknowledged and raise the size
+     * beyond what the path carries */
+    if (cfg->pmtud && mqvpn_socket_set_dontfrag(sp.udp_fd, local_addr.ss_family) < 0) {
+        LOG_ERR("cannot set DF on the UDP socket, which PMTUD needs: %s",
+                strerror(errno));
+        goto cleanup;
+    }
 
     mqvpn_bind_posix_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);
     bopts.udp_gso = cfg->udp_gso;
     bopts.udp_gro = cfg->udp_gro;
-    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    /* The bind's default (7 MiB, forced past rmem_max/wmem_max when
+     * privileged), as on every client path: this one socket takes every
+     * client's traffic, and each overflow of its receive queue drops a whole
+     * GRO batch of datagrams that nothing retransmits. */
+    bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "server");
     if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
         LOG_ERR("server transport setup failed");

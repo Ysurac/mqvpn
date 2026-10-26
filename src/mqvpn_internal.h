@@ -40,6 +40,38 @@
  * 1500B, xqc_defs.h XQC_CONN_MAX_UDP_PAYLOAD_SIZE). */
 #define MQVPN_MAX_PKT_OUT_SIZE 1400
 
+/* xquic clamps max_pkt_out_size to this (XQC_MAX_PACKET_OUT_SIZE). */
+#define MQVPN_XQC_MAX_PKT_OUT_SIZE 1436
+
+/* A sent packet can exceed max_pkt_out_size by the AEAD tag (16) plus the
+ * room xquic keeps for a piggybacked ACK frame (XQC_ACK_SPACE, 16). xquic
+ * never lets that ACK take a packet past MQVPN_XQC_MAX_PKT_OUT_SIZE. */
+#define MQVPN_AEAD_TAG_LEN     16
+#define MQVPN_PKT_OUT_OVERHEAD 32
+
+/* QUIC short header (8-byte CID, 4-byte packet number), DATAGRAM frame
+ * header and MASQUE ids: max_pkt_out_size minus this is the TUN MTU. */
+#define MQVPN_DGRAM_HEADROOM 18
+
+/* With PMTUD, packets start at this size: the smallest that still gives
+ * IPv6's minimum inner MTU of 1280. */
+#define MQVPN_PMTUD_BASE_PKT_OUT_SIZE (1280 + MQVPN_DGRAM_HEADROOM)
+
+/* max_pkt_out_size for a PathMTU. Assumes an IPv6 + UDP header so the
+ * result fits either family; 0 keeps MQVPN_MAX_PKT_OUT_SIZE. */
+static inline size_t
+mqvpn_pkt_out_size(int path_mtu)
+{
+    if (path_mtu <= 0) return MQVPN_MAX_PKT_OUT_SIZE;
+    /* at the cap a full packet carries no ACK, so only the tag is added */
+    if (path_mtu - 40 - 8 - MQVPN_AEAD_TAG_LEN >= MQVPN_XQC_MAX_PKT_OUT_SIZE)
+        return MQVPN_XQC_MAX_PKT_OUT_SIZE;
+    int v = path_mtu - 40 - 8 - MQVPN_PKT_OUT_OVERHEAD;
+    if (v > MQVPN_XQC_MAX_PKT_OUT_SIZE) v = MQVPN_XQC_MAX_PKT_OUT_SIZE;
+    if (v < 1200) v = 1200;
+    return (size_t)v;
+}
+
 /* Is the Linux batched-send path engaged for this config?
  *
  * ONE definition, used by both the client and the server for two decisions
@@ -48,7 +80,7 @@
  * batch callback registered xquic sends one packet per syscall regardless, so
  * deferring the flush there would move it for no benefit at all. Spelling the
  * condition out per call site is what would let the two drift — notably if
- * MQVPN_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
+ * MQVPN_XQC_MAX_PKT_OUT_SIZE is ever raised past the single-run/no-splitting
  * bound that mqvpn_udp_send_batch() documents in src/bind/posix_offload.h.
  *
  * Callers still record the result on the client/server struct (tx_batch) and
@@ -57,7 +89,7 @@
 static inline int
 mqvpn_tx_batch_enabled(int udp_gso)
 {
-    return udp_gso && MQVPN_MAX_PKT_OUT_SIZE <= 1500;
+    return udp_gso && MQVPN_XQC_MAX_PKT_OUT_SIZE <= 1500;
 }
 
 /* Teardown TX-offload telemetry line, emitted by mqvpn_client_destroy and
@@ -79,7 +111,7 @@ mqvpn_tx_batch_enabled(int udp_gso)
  * − DATAGRAM/MASQUE headers = 1382).  Clients that negotiated less are
  * handled per-client via ICMP PTB in mqvpn_server_on_tun_packet(), so a
  * high default is safe. */
-#define MQVPN_TUN_MTU_AUTO 1382
+#define MQVPN_TUN_MTU_AUTO (MQVPN_MAX_PKT_OUT_SIZE - MQVPN_DGRAM_HEADROOM)
 
 /* xquic h3 recv_body_buf_high_water, set by client and server on every
  * request stream. A hybrid-lane flow that stops calling recv_body (inner
@@ -129,6 +161,11 @@ struct mqvpn_config_s {
     int reinj_hard_deadline_ms;
     int reinj_deadline_lower_bound_ms;
 
+    /* Redundant mode (client only); empty port list = all UDP. */
+    int redundant;
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS];
+    int n_redundant_ports;
+
     mqvpn_log_level_t log_level;
     int multipath;
     int reconnect_enable;
@@ -158,8 +195,10 @@ struct mqvpn_config_s {
      * 0 = use xquic default (XQC_DEFAULT_INIT_MAX_PATH_ID = 8). */
     uint64_t init_max_path_id;
 
-    int tun_mtu; /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
-                    TUN MTU */
+    int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
+                     TUN MTU */
+    int path_mtu; /* 0 = default packet size, >0 = underlay MTU to size packets for */
+    int pmtud;    /* 1 = discover the path MTU, path_mtu is the upper bound */
 
     /* Flow-aware reorder shim config (§16). Seeded with
      * mqvpn_reorder_config_default() in mqvpn_config_new(); the library
@@ -271,6 +310,23 @@ bool mqvpn_check_scheduler_preconditions(mqvpn_scheduler_t scheduler, int n_path
 #  define MQVPN_INTERNAL
 #endif
 
+/* ── Clock (mqvpn_clock.c) ──
+ * mqvpn_clock_us: the clock of the library's timers and of its xquic
+ * engines, CLOCK_BOOTTIME (Windows: the interrupt time) offset to read Unix
+ * time at its first reading.
+ * mqvpn_xqc_clock_*: the one clock all engines of a process share (xquic's
+ * clock is process-wide). acquire returns -1 while engines on another clock
+ * run; mqvpn_xqc_clock_now is the monotonic_ts callback of every engine.
+ * mqvpn_clock_test_sources (tests only) replaces the boot clock and wall
+ * clock readings, NULL for the real ones, and takes the offset again as a
+ * new process would. */
+MQVPN_INTERNAL uint64_t mqvpn_clock_us(void);
+MQVPN_INTERNAL int mqvpn_xqc_clock_acquire(mqvpn_clock_fn fn, void *ctx);
+MQVPN_INTERNAL void mqvpn_xqc_clock_release(void);
+MQVPN_INTERNAL uint64_t mqvpn_xqc_clock_now(void);
+MQVPN_INTERNAL void mqvpn_clock_test_sources(uint64_t (*boot_us)(void),
+                                             uint64_t (*wall_us)(void));
+
 /* Returns "minrtt" / "wlb" / "wlb_udp_pin" / "backup_fec" / "unknown" —
  * caller-owned static string, do not free.
  * Used by control_socket.c for get_build_info JSON. */
@@ -297,6 +353,38 @@ MQVPN_INTERNAL uint64_t mqvpn_client_uptime_seconds(const mqvpn_client_t *c);
  * If xquic re-orders this enum the labels become wrong; every value is
  * pinned to the real enum by tests/test_xquic_abi_pin.c. */
 MQVPN_INTERNAL const char *mqvpn_path_state_label(int state);
+
+/* ── Redundant-mode client test hooks (tests/test_api.c) ──
+ * The fixture gives the connection masque_stream_id 4.
+ * The send stub stands in for every xquic datagram send of the ingress →
+ * lane decision → tun_send_datagram sequence: a pinned copy gets the slot's
+ * xquic path id, the ordinary (non-pinned) send gets UINT64_MAX. Returns the
+ * xquic send result (0 or -XQC_*). */
+typedef int (*mqvpn_test_send_fn)(void *ud, uint64_t xqc_path_id, const uint8_t *frame,
+                                  size_t frame_len, uint64_t *dgram_id);
+MQVPN_INTERNAL int mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths,
+                                                       size_t dgram_mss,
+                                                       int reorder_peer);
+/* Drives the datagram MSS update callback on a test connection (masque
+ * stream 4, TUN active) and returns the client's TUN MTU after it, or -1. */
+MQVPN_INTERNAL int mqvpn_client_test_mss_updated(mqvpn_client_t *c, size_t dgram_mss,
+                                                 int reorder_peer);
+MQVPN_INTERNAL int mqvpn_client_test_reorder_peek_hdr(mqvpn_client_t *c,
+                                                      const uint8_t *pkt, size_t len,
+                                                      uint8_t hdr_out[8]);
+MQVPN_INTERNAL int mqvpn_client_test_redundant_send(mqvpn_client_t *c, const uint8_t *pkt,
+                                                    size_t len, mqvpn_test_send_fn send,
+                                                    void *ud);
+MQVPN_INTERNAL int mqvpn_client_test_decide_lane(mqvpn_client_t *c, const uint8_t *pkt,
+                                                 size_t len, int *do_stamp,
+                                                 int *redundant);
+MQVPN_INTERNAL void mqvpn_client_test_dgram_notify(mqvpn_client_t *c, uint64_t dgram_id,
+                                                   int acked);
+MQVPN_INTERNAL int mqvpn_client_test_redundant_outstanding(mqvpn_client_t *c, int idx);
+MQVPN_INTERNAL struct mqvpn_redundant_tx_s *
+mqvpn_client_test_redundant_tx(mqvpn_client_t *c);
+MQVPN_INTERNAL void mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live,
+                                               uint64_t xqc_path_id);
 
 /* Snapshot of FEC / multipath counters for one client.
  * INTERNAL — not in public libmqvpn.h. Field widths chosen to safely accept

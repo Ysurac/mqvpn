@@ -26,65 +26,22 @@ if [ -z "$ACTION" ] || [ -z "$CONFIG" ]; then
     exit 1
 fi
 
-if [ ! -f "$CONFIG" ]; then
-    echo "Error: config file not found: $CONFIG" >&2
-    exit 1
-fi
-
-# Detect config format once (matches mqvpn_config_load() in src/config.c).
-# JSON if first non-whitespace character is '{', INI otherwise.
-config_is_json=0
-[ "$(tr -d '[:space:]' < "$CONFIG" | head -c 1)" = "{" ] && config_is_json=1
-
-# Read a value from the config, supporting both INI and JSON formats.
-read_config_value() {
-    local json_key="$1" ini_key="$2" default="$3"
-    local value=""
-
-    if [ "$config_is_json" -eq 1 ]; then
-        value=$(sed -n 's/.*"'"${json_key}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG" | tail -1 || true)
-    else
-        # Like src/config.c: section and key names are case-insensitive and
-        # these keys live in [Interface]. A trailing "# ..." or "; ..."
-        # comment is dropped (no valid value contains either character).
-        value=$(awk -v want="$ini_key" '
-            { line = $0; sub(/\r$/, "", line) }
-            line ~ /^[[:space:]]*\[/ {
-                sec = line
-                sub(/^[[:space:]]*\[/, "", sec)
-                sub(/\].*$/, "", sec)
-                gsub(/[[:space:]]/, "", sec)
-                sec = tolower(sec)
-                next
-            }
-            sec == "interface" {
-                eq = index(line, "=")
-                if (eq == 0) next
-                k = substr(line, 1, eq - 1)
-                gsub(/[[:space:]]/, "", k)
-                if (tolower(k) != tolower(want)) next
-                v = substr(line, eq + 1)
-                sub(/[#;].*$/, "", v)
-                gsub(/[[:space:]]/, "", v)
-                val = v
-            }
-            END { print val }' "$CONFIG")
-    fi
-
-    echo "${value:-$default}"
-}
-
-# Read Subnet from config (fallback: 10.0.0.0/24)
-SUBNET=$(read_config_value "subnet"   "Subnet"   "10.0.0.0/24")
-# Read Subnet6 from config (optional, empty if not set)
-SUBNET6=$(read_config_value "subnet6"  "Subnet6"  "")
-# Read TunName from config (fallback: mqvpn0)
-TUN_NAME=$(read_config_value "tun_name" "TunName"  "mqvpn0")
-
 COMMENT="mqvpn-server-nat"
 STATE_DIR="/run/mqvpn"
 
 setup() {
+    if [ ! -f "$CONFIG" ]; then
+        echo "Error: config file not found: $CONFIG" >&2
+        exit 1
+    fi
+
+    # Capture the status before mapfile (process substitution would hide it).
+    local nat_config
+    nat_config=$("$(dirname "$0")/mqvpn-nat-config" "$CONFIG")
+    local -a nat_values
+    mapfile -t nat_values <<< "$nat_config"
+    local SUBNET="${nat_values[0]}" SUBNET6="${nat_values[1]}" TUN_NAME="${nat_values[2]:-mqvpn0}"
+
     sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
     # MASQUERADE by source subnet on every egress except the tunnel itself,
@@ -147,8 +104,9 @@ teardown() {
     delete_by_comment_v6 filter FORWARD
 
     # Forwarding stays enabled (see the header). Drop the saved values an
-    # older version of this script left behind.
-    rm -f "$STATE_DIR/orig_ip_forward.$TUN_NAME" "$STATE_DIR/orig_ip6_forward.$TUN_NAME"
+    # older version of this script left behind; the config may have changed
+    # or disappeared since setup, so every tunnel's file goes.
+    rm -f "$STATE_DIR"/orig_ip_forward.* "$STATE_DIR"/orig_ip6_forward.*
 }
 
 case "$ACTION" in

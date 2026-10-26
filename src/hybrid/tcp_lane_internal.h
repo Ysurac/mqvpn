@@ -242,6 +242,9 @@ typedef struct mqvpn_tcp_flow {
     uint8_t pcb_aborted;
 
     struct mqvpn_tcp_flow *next; /* hash chain */
+    /* The lane's list of flows bound to an H3 stream (f->stream != NULL),
+     * which find_flow_by_stream walks instead of the whole table. */
+    struct mqvpn_tcp_flow *bound_prev, *bound_next;
 } mqvpn_tcp_flow_t;
 
 /* True once the flow left the relay — torn down (doomed, still held) or

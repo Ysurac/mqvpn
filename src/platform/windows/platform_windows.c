@@ -21,6 +21,7 @@
 #  include "net_mon.h"
 #  include "cert_verify.h"
 #  include "log.h"
+#  include "platform/path_line.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_hybrid (INI [Hybrid] bridge) */
 #  include "compat/socket_compat.h"
 
@@ -429,18 +430,24 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
 
-        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
-            event_base_loopbreak(p->eb);
+        /* CLOSED we did not ask for: the connection ended and the library
+         * will not retry it (reconnect off, or a rejected certificate), so
+         * exit non-zero rather than idle on a dead client. */
+        if (new_state == MQVPN_STATE_CLOSED && !p->shutting_down)
+            p->fatal_error = PLATFORM_FATAL_CLOSED;
+        if (new_state == MQVPN_STATE_CLOSED) event_base_loopbreak(p->eb);
     }
 }
 
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
-    static const char *snames[] = {"PENDING", "ACTIVE", "DEGRADED", "STANDBY", "CLOSED"};
-    const char *sn = (status < 5) ? snames[status] : "?";
-    LOG_INF("path %lld -> %s", (long long)path, sn);
+    platform_win_ctx_t *p = (platform_win_ctx_t *)user_ctx;
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
+    platform_fmt_path_line(line, sizeof(line), path, iface, status);
+    LOG_INF("%s", line);
 }
 
 static void
@@ -848,6 +855,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         bopts.struct_size = sizeof(bopts);
         bopts.socket_buf_bytes = 0;
         snprintf(bopts.tag, sizeof(bopts.tag), "%s", s->iface[0] ? s->iface : "path");
+        bopts.dont_fragment = mqvpn_client_pmtud_enabled(ctx.client);
         void *tctx = NULL;
         if (mqvpn_bind_winsock_path_new(s->sock, &bopts, &tctx) != MQVPN_OK) {
             LOG_ERR("path[%d] transport setup failed", i);
@@ -856,8 +864,10 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
         mqvpn_path_desc_t desc;
         platform_path_fill_desc(&ctx, s, &desc);
+        ctx.adding_iface = s->iface;
         s->handle = mqvpn_client_add_path(ctx.client, &desc,
                                           mqvpn_bind_winsock_path_ops(), tctx, NULL);
+        ctx.adding_iface = NULL;
         if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
             mqvpn_bind_winsock_path_free(tctx); /* add failed: still ours */
@@ -917,6 +927,8 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = ctx.fatal_error ? 1 : 0;
     if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
         LOG_ERR("exiting: path release refused by the library");
+    else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
+        LOG_ERR("exiting: connection closed");
 
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);

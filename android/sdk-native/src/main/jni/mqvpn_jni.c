@@ -704,6 +704,15 @@ JNI_FN(configSetRequestServerScheduler)(JNIEnv *env, jobject thiz, jlong cfg,
                                                      enable ? 1 : 0);
 }
 
+/* configSetCc(cfg, cc) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetCc)(JNIEnv *env, jobject thiz, jlong cfg, jint cc)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_cc((mqvpn_config_t *)(intptr_t)cfg, (mqvpn_cc_t)cc);
+}
+
 /* configSetLogLevel(cfg, level) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
@@ -782,6 +791,25 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
                                             enable ? 1 : 0);
 }
 
+/* configSetPathMtu(cfg, mtu) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_path_mtu((mqvpn_config_t *)(intptr_t)cfg, (int)mtu);
+}
+
+/* configSetPmtud(cfg, enable) → int. The reactor then sets DF on the path
+ * sockets (mqvpn_client_pmtud_enabled). */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPmtud)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_pmtud((mqvpn_config_t *)(intptr_t)cfg, enable ? 1 : 0);
+}
+
 /* configSetReorderEnabled(cfg, mode) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetReorderEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
@@ -804,6 +832,29 @@ JNI_FN(configAddReorderRule)(JNIEnv *env, jobject thiz, jlong cfg, jint proto, j
     return mqvpn_config_add_reorder_rule((mqvpn_config_t *)(intptr_t)cfg, (uint8_t)proto,
                                          (uint16_t)port,
                                          (mqvpn_reorder_profile_t)profile);
+}
+
+/* configSetRedundant(cfg, enabled, ports) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetRedundant)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enabled,
+                           jintArray ports)
+{
+    (void)thiz;
+    jsize n = ports ? (*env)->GetArrayLength(env, ports) : 0;
+    if (n > MQVPN_REDUNDANT_MAX_PORTS) return MQVPN_ERR_INVALID_ARG;
+    uint16_t narrowed[MQVPN_REDUNDANT_MAX_PORTS];
+    if (n > 0) {
+        jint raw[MQVPN_REDUNDANT_MAX_PORTS];
+        (*env)->GetIntArrayRegion(env, ports, 0, n, raw);
+        if ((*env)->ExceptionCheck(env)) return MQVPN_ERR_INVALID_ARG;
+        for (jsize i = 0; i < n; i++) {
+            /* validate before narrowing: 65537 must not become port 1 */
+            if (raw[i] < 1 || raw[i] > 65535) return MQVPN_ERR_INVALID_ARG;
+            narrowed[i] = (uint16_t)raw[i];
+        }
+    }
+    return mqvpn_config_set_redundant((mqvpn_config_t *)(intptr_t)cfg, enabled ? 1 : 0,
+                                      n > 0 ? narrowed : NULL, (size_t)n);
 }
 
 /* configSetHybridEnabled(cfg, enable) → int */
