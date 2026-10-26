@@ -18,8 +18,10 @@ ExecStart=@CMAKE_INSTALL_PREFIX@/bin/mqvpn --config /etc/mqvpn/client-%i.conf
 # The sandboxed client cannot unlink the bind-mounted backup after restoring
 # resolv.conf. Remove it here when it holds nothing to restore: empty (DNS
 # override unused) or identical to resolv.conf (restored). A backup that
-# differs, left by a crash, is kept.
-ExecStopPost=+/bin/sh -c 'if [ ! -s /etc/resolv.conf.mqvpn.bak ] || cmp -s /etc/resolv.conf.mqvpn.bak /etc/resolv.conf; then rm -f /etc/resolv.conf.mqvpn.bak; fi'
+# differs, left by a crash, is kept. "+" still gets a private mount namespace
+# with ReadWritePaths= applied, where the backup is a bind mount (unlink:
+# EBUSY): unmount it there first; the unlink then reaches the host file.
+ExecStopPost=+/bin/sh -c 'if [ ! -s /etc/resolv.conf.mqvpn.bak ] || cmp -s /etc/resolv.conf.mqvpn.bak /etc/resolv.conf; then umount /etc/resolv.conf.mqvpn.bak 2>/dev/null; rm -f /etc/resolv.conf.mqvpn.bak; fi'
 Restart=on-failure
 RestartSec=5
 
