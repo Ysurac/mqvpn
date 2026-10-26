@@ -50,6 +50,7 @@ class TunnelCallbacksJniTest {
             assertTrue(reactor != 0L)
             client = NativeBridge.clientNew(cfg, rec)
             assertTrue("clientNew could not resolve a TunnelCallbacks method", client != 0L)
+            rec.calls.clear() // clientNew's own startup logs are not the seam's
             assertTrue(NativeBridgeTestSeams.nativeFireUpcallsForTest(client))
             calls = rec.calls.toList() // before destroy, which logs through the same upcall
         } finally {
@@ -62,7 +63,7 @@ class TunnelCallbacksJniTest {
         val config = listOf("config", listOf<Byte>(10, 0, 0, 2), 24, ip6.toList(), 112, listOf<Byte>(10, 0, 0, 1), 30, 1280, true)
         assertEquals(
             listOf(
-                config + listOf(true, 3),       // hasServerScheduler, MQVPN_SCHED_WLB_UDP_PIN
+                config + listOf(true, 5),       // hasServerScheduler, MQVPN_SCHED_WLB_UDP_PIN
                 config + listOf(false, 0),      // pre-ABI-3 struct_size: scheduler absent
                 listOf("state", 1, 2),          // CONNECTING -> AUTHENTICATING
                 listOf("path", 7L, 2),          // MQVPN_PATH_DEGRADED
