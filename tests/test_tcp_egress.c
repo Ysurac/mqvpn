@@ -2320,11 +2320,19 @@ TEST(mqvpn_tcp_paused_flow_backpressures_client)
         payload[i] = (uint8_t)((i * 31u + (i >> 16)) & 0xFF);
 
     /* Phase 1: send until the probe has made no progress for 50 consecutive
-     * pump slices (1 s), with the sink still not reading. */
+     * pump slices and 1 s of real time, with the sink still not reading. The
+     * heap is sampled once the stall has lasted 10 slices and 200 ms of real
+     * time, so bytes already in flight have landed: on a loaded runner
+     * harness_pump's budget can run ahead of real time (see
+     * idle-timeout-evicts). */
     size_t off = 0;
     int idle_slices = 0;
+    uint64_t stall_start_us = 0;
     long long heap_at_stall = -1;
-    for (int i = 0; i < 3000 && off < payload_len && idle_slices < 50; i++) {
+    int heap_sampled = 0;
+    for (int i = 0; i < 3000 && off < payload_len &&
+                    (idle_slices < 50 || test_now_us() - stall_start_us < 1000000ull);
+         i++) {
         size_t before = off;
         while (off < payload_len) {
             ssize_t sent = xqc_h3_request_send_body(
@@ -2333,8 +2341,17 @@ TEST(mqvpn_tcp_paused_flow_backpressures_client)
             ASSERT_EQ(sent > 0, 1);
             off += (size_t)sent;
         }
-        idle_slices = (off == before) ? idle_slices + 1 : 0;
-        if (idle_slices == 10) heap_at_stall = test_heap_in_use();
+        if (off != before) {
+            idle_slices = 0;
+            heap_sampled = 0;
+        } else if (idle_slices++ == 0) {
+            stall_start_us = test_now_us();
+        }
+        if (!heap_sampled && idle_slices >= 10 &&
+            test_now_us() - stall_start_us >= 200000ull) {
+            heap_at_stall = test_heap_in_use();
+            heap_sampled = 1;
+        }
         tcp_sink_pump(&sink);
         int never = 0;
         harness_pump(&h, &never, 20);
@@ -2963,8 +2980,17 @@ TEST(mqvpn_tcp_rejected_request_body_is_discarded)
     long long before = test_heap_in_use();
     for (int i = 0; i < 4; i++)
         ASSERT_EQ(probe_send_body_retry(&h, &h.probe, junk, sizeof(junk), 2000), 0);
-    harness_pump(&h, &never, 300);
+    /* The heap counts both engines: until the server has read and ACKed the
+     * last bytes, the probe still holds them. Pump until it is back near the
+     * baseline, on real time (harness_pump's budget can run ahead of it on a
+     * loaded runner); a server that keeps the body never gets there. */
     long long after = test_heap_in_use();
+    uint64_t settle_start_us = test_now_us();
+    while (before >= 0 && after - before > (1 << 20) &&
+           test_now_us() - settle_start_us < 5000000ull) {
+        harness_pump(&h, &never, 20);
+        after = test_heap_in_use();
+    }
     if (before >= 0 && after - before > (1 << 20)) {
         printf("FAIL\n    %s:%d: heap grew by %lld bytes while streaming 4 MiB into "
                "a rejected request\n",
