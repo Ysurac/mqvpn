@@ -108,7 +108,8 @@ usage(const char *prog)
         "  --fec-enable              Enable FEC\n"
         "  --no-fec                  Disable FEC\n"
         "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme\n"
-        "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited|none  Congestion control (default bbr2)\n"
+        "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited|none  Congestion control (default "
+        "bbr2)\n"
         "  --mtu N                   TUN MTU, 1280-9000 (client: cap on negotiated;\n"
         "                            server: sets TUN MTU; default: auto = ~1382)\n"
         "  --path-mtu N              Underlay MTU to size QUIC packets for, 1280-9000\n"
@@ -121,12 +122,14 @@ usage(const char *prog)
         "                            Server: don't auto-adopt the client's own value\n"
         "                            for downlink scheduling. Client: don't announce\n"
         "                            its own value to the server. (default: sync\n"
-        "                            enabled; either side alone is enough to disable it)\n"
+        "                            enabled; either side alone is enough to disable "
+        "it)\n"
         "  --push-path-labels        Push an operator-pinned per-path weight/dscp_mask\n"
         "                            from server to client (reverse of the above), so\n"
         "                            it also governs that client's own uplink, keyed by\n"
         "                            user. Server: send the push. Client: adopt one\n"
-        "                            received. (default: off; BOTH sides must enable it)\n"
+        "                            received. (default: off; BOTH sides must enable "
+        "it)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
         "  --help                    Show this help\n"
@@ -278,19 +281,20 @@ main(int argc, char *argv[])
     const char *dns_servers[4];
     int n_dns = 0;
     int no_reconnect = 0;
-    int kill_switch = -1;        /* -1 = not set by CLI */
-    int route_via_server = -1;   /* -1 = not set by CLI */
-    int no_routes = -1;          /* -1 = not set by CLI */
-    int manage_routes = -1;      /* -1 = not set by CLI; 0 = --no-manage-routes */
-    int sync_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
-    int push_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
+    int kill_switch = -1;      /* -1 = not set by CLI */
+    int route_via_server = -1; /* -1 = not set by CLI */
+    int no_routes = -1;        /* -1 = not set by CLI */
+    int manage_routes = -1;    /* -1 = not set by CLI; 0 = --no-manage-routes */
+    int sync_path_labels = -1; /* -1 = not set by CLI (client and server modes) */
+    int push_path_labels = -1; /* -1 = not set by CLI (client and server modes) */
     int control_port = 0;
     int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
     int status_mode = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:EeF:M:L:X:x:wWRKTVh",
+    while ((opt = getopt_long(argc, argv,
+                              "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:EeF:M:L:X:x:wWRKTVh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -367,7 +371,8 @@ main(int argc, char *argv[])
             if (n_backup_paths < MQVPN_MAX_PATH_IFACES) {
                 backup_ifaces[n_backup_paths++] = optarg;
             } else {
-                fprintf(stderr, "error: max %d backup paths supported\n", MQVPN_MAX_PATH_IFACES);
+                fprintf(stderr, "error: max %d backup paths supported\n",
+                        MQVPN_MAX_PATH_IFACES);
                 return 1;
             }
             break;
@@ -553,8 +558,8 @@ main(int argc, char *argv[])
         for (int i = 0; i < eff_n_users; i++) {
             eff_user_names[i] = file_cfg.user_names[i];
             eff_user_keys[i] = file_cfg.user_keys[i];
-            eff_user_fixed_ips[i] = file_cfg.user_fixed_ips[i][0]
-                                        ? file_cfg.user_fixed_ips[i] : NULL;
+            eff_user_fixed_ips[i] =
+                file_cfg.user_fixed_ips[i][0] ? file_cfg.user_fixed_ips[i] : NULL;
         }
     }
 
@@ -669,8 +674,8 @@ main(int argc, char *argv[])
     } else if (strcmp(eff_fec_scheme, "galois_calculation") == 0) {
         fec_scheme = MQVPN_FEC_SCHEME_GALOIS_CALCULATION;
     } else if (strcmp(eff_fec_scheme, "reed_solomon") != 0) {
-        fprintf(stderr,
-                "error: --fec-scheme must be 'galois_calculation', 'packet_mask', 'reed_solomon' or 'xor'\n");
+        fprintf(stderr, "error: --fec-scheme must be 'galois_calculation', "
+                        "'packet_mask', 'reed_solomon' or 'xor'\n");
         return 1;
     }
 
@@ -744,18 +749,19 @@ main(int argc, char *argv[])
          * out of the routing table wins. CLI still overrides the file for the
          * flag it names. Routes are managed iff manage_routes && !no_routes. */
         int eff_no_routes_flag = no_routes >= 0 ? no_routes : file_cfg.no_routes;
-        int eff_manage_routes = manage_routes >= 0 ? manage_routes : file_cfg.manage_routes;
+        int eff_manage_routes =
+            manage_routes >= 0 ? manage_routes : file_cfg.manage_routes;
         int eff_no_routes = eff_no_routes_flag || !eff_manage_routes;
 
         const char *eff_auth_key_client = eff_auth_key;
-        const char *eff_auth_username = file_cfg.auth_username[0] ? file_cfg.auth_username : NULL;
+        const char *eff_auth_username =
+            file_cfg.auth_username[0] ? file_cfg.auth_username : NULL;
         if (!eff_auth_key_client && eff_n_users > 0) {
             /* User = NAME:KEY style: use first entry's key and name */
             if (eff_n_users > 1)
                 LOG_WRN("client mode: only the first user credential is used");
             eff_auth_key_client = eff_user_keys[0];
-            if (!eff_auth_username)
-                eff_auth_username = eff_user_names[0];
+            if (!eff_auth_username) eff_auth_username = eff_user_names[0];
         }
         /* The username travels in a request header and is echoed by the
          * control API: hold it to the same rule as a server-side user name. */
@@ -774,7 +780,8 @@ main(int argc, char *argv[])
             .server_port = port,
             .tls_server_name = eff_tls_name,
             .tun_name = eff_tun_name,
-            .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
+            .tls_ciphers =
+                (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .insecure = eff_insecure,
             .pinned_pubkey = eff_pinned_pubkey,
             .log_level = log_level,
@@ -791,8 +798,8 @@ main(int argc, char *argv[])
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
-            .route_via_server = route_via_server >= 0 ? route_via_server
-                                                      : file_cfg.route_via_server,
+            .route_via_server =
+                route_via_server >= 0 ? route_via_server : file_cfg.route_via_server,
             /* Both spellings mean the same thing (see eff_no_routes). */
             .no_routes = eff_no_routes,
             .manage_routes = !eff_no_routes,
@@ -874,7 +881,8 @@ main(int argc, char *argv[])
             .tun_name = eff_tun_name,
             .cert_file = eff_cert,
             .key_file = eff_key,
-            .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
+            .tls_ciphers =
+                (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .log_level = log_level,
             .scheduler = scheduler,
             .fec_enable = eff_fec_enable,

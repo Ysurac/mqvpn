@@ -24,7 +24,7 @@
  * MQVPN_DGRAM_UNSENT_DELAY_MS (xqc_conn_settings_t.max_dgram_unsent_packets
  * and max_dgram_unsent_delay_ms); mqvpn_conn_settings.c explains the
  * numbers. */
-#define MQVPN_DGRAM_UNSENT_PACKETS 4096
+#define MQVPN_DGRAM_UNSENT_PACKETS  4096
 #define MQVPN_DGRAM_UNSENT_DELAY_MS 50
 
 /* Caller-driven inputs. The bools are parameterised (not a single

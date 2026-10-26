@@ -32,7 +32,8 @@ int mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_l
  * unlikely but not impossible to also hold for two different keys).
  * Writes exactly 8 hex chars + NUL; dst_len must be >= 9. No-op (dst
  * untouched) if dst_len < 9. */
-void mqvpn_auth_debug_fingerprint(const char *key, size_t key_len, char *dst, size_t dst_len);
+void mqvpn_auth_debug_fingerprint(const char *key, size_t key_len, char *dst,
+                                  size_t dst_len);
 
 /* Base64 encode src into dst. Returns 0 on success, -1 if dst_len too small. */
 int mqvpn_auth_b64_encode(char *dst, size_t dst_len, const unsigned char *src,

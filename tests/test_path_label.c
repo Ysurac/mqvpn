@@ -37,12 +37,12 @@ static int tests_failed = 0;
 #define ASSERT_EQ(a, b)                                                             \
     do {                                                                            \
         if ((a) != (b)) {                                                           \
-            char _buf[128];                                                        \
+            char _buf[128];                                                         \
             snprintf(_buf, sizeof(_buf), "expected %lld, got %lld", (long long)(b), \
                      (long long)(a));                                               \
-            FAIL(_buf);                                                            \
-            return;                                                                \
-        }                                                                          \
+            FAIL(_buf);                                                             \
+            return;                                                                 \
+        }                                                                           \
     } while (0)
 
 static void
@@ -60,8 +60,8 @@ test_roundtrip_basic(void)
     uint64_t path_id = 0, dscp_mask = 0;
     uint32_t weight = 0;
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface), &weight,
-                                     &dscp_mask);
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                     &weight, &dscp_mask);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(path_id, 5);
     ASSERT_EQ(weight, 10);
@@ -89,8 +89,8 @@ test_roundtrip_zero_weight_and_mask(void)
     uint64_t path_id = 0, dscp_mask = 123; /* pre-dirty */
     uint32_t weight = 456;                 /* pre-dirty */
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface), &weight,
-                                     &dscp_mask);
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                     &weight, &dscp_mask);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(weight, 0);
     ASSERT_EQ(dscp_mask, 0);
@@ -101,7 +101,7 @@ test_roundtrip_zero_weight_and_mask(void)
 static void
 test_roundtrip_max_len_iface(void)
 {
-    TEST(roundtrip max-length iface(15 chars));
+    TEST(roundtrip max - length iface(15 chars));
 
     const char *iface15 = "abcdefghijklmno"; /* 15 chars */
     uint8_t buf[MQVPN_PATH_LABEL_PAYLOAD_MAX];
@@ -111,8 +111,8 @@ test_roundtrip_max_len_iface(void)
     uint64_t path_id = 0, dscp_mask = 0;
     uint32_t weight = 0;
     char iface_out[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface_out, sizeof(iface_out),
-                                     &weight, &dscp_mask);
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface_out,
+                                     sizeof(iface_out), &weight, &dscp_mask);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(path_id, 0xdeadbeefULL);
     ASSERT_EQ(weight, 1);
@@ -140,8 +140,8 @@ test_roundtrip_path_id_zero(void)
     uint64_t path_id = 123, dscp_mask = 0; /* pre-dirty */
     uint32_t weight = 0;
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface), &weight,
-                                     &dscp_mask);
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                     &weight, &dscp_mask);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(path_id, 0);
 
@@ -165,8 +165,8 @@ test_roundtrip_max_weight_and_mask(void)
     uint64_t path_id = 0, dscp_mask = 0;
     uint32_t weight = 0;
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface), &weight,
-                                     &dscp_mask);
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                     &weight, &dscp_mask);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(weight, max_weight);
     ASSERT_EQ(dscp_mask, max_mask);
@@ -268,17 +268,16 @@ test_decode_rejects_truncated(void)
 static void
 test_decode_rejects_zero_iface_len(void)
 {
-    TEST(decode rejects zero-length iface field);
+    TEST(decode rejects zero - length iface field);
 
     uint8_t buf[9] = {0};
     buf[8] = 0; /* iface_len = 0 */
     uint64_t path_id, dscp_mask;
     uint32_t weight;
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    ASSERT_EQ(
-        mqvpn_path_label_decode(buf, sizeof(buf), &path_id, iface, sizeof(iface), &weight,
-                                &dscp_mask),
-        -1);
+    ASSERT_EQ(mqvpn_path_label_decode(buf, sizeof(buf), &path_id, iface, sizeof(iface),
+                                      &weight, &dscp_mask),
+              -1);
 
     PASS();
 }
@@ -293,10 +292,9 @@ test_decode_rejects_oversized_iface_len_field(void)
     uint64_t path_id, dscp_mask;
     uint32_t weight;
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    ASSERT_EQ(
-        mqvpn_path_label_decode(buf, sizeof(buf), &path_id, iface, sizeof(iface), &weight,
-                                &dscp_mask),
-        -1);
+    ASSERT_EQ(mqvpn_path_label_decode(buf, sizeof(buf), &path_id, iface, sizeof(iface),
+                                      &weight, &dscp_mask),
+              -1);
 
     PASS();
 }
@@ -304,7 +302,7 @@ test_decode_rejects_oversized_iface_len_field(void)
 static void
 test_decode_rejects_small_out_buffer(void)
 {
-    TEST(decode rejects too-small iface_out buffer);
+    TEST(decode rejects too - small iface_out buffer);
 
     uint8_t buf[MQVPN_PATH_LABEL_PAYLOAD_MAX];
     int n = mqvpn_path_label_encode(buf, sizeof(buf), 1, "eth0", 0, 0);
@@ -361,7 +359,7 @@ test_decode_ignores_trailing_bytes(void)
 static void
 test_capsule_type_distinct(void)
 {
-    TEST(capsule type constant is distinct from IETF-defined types);
+    TEST(capsule type constant is distinct from IETF - defined types);
 
     /* DATAGRAM/ADDRESS_ASSIGN/ADDRESS_REQUEST/ROUTE_ADVERTISEMENT = 0x00-0x03 */
     assert(MQVPN_CAPSULE_PATH_LABEL > 0x03);
@@ -384,7 +382,7 @@ test_capsule_push_type_distinct(void)
 static void
 test_push_direction_roundtrip_via_shared_codec(void)
 {
-    TEST(push direction (path_id=0) round-trips through the same encode/decode);
+    TEST(push direction(path_id = 0) round - trips through the same encode / decode);
 
     /* The server -> client push direction reuses mqvpn_path_label_encode/
      * decode verbatim with path_id=0 (see mqvpn_path_label.h's "Problem 3"
@@ -400,8 +398,8 @@ test_push_direction_roundtrip_via_shared_codec(void)
     uint64_t path_id = 999, dscp_mask = 0; /* pre-dirty path_id */
     uint32_t weight = 0;
     char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface), &weight,
-                                     &dscp_mask);
+    int rc = mqvpn_path_label_decode(buf, (size_t)n, &path_id, iface, sizeof(iface),
+                                     &weight, &dscp_mask);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(path_id, 0); /* meaningless in this direction; always 0 on the wire */
     ASSERT_EQ(weight, 50);

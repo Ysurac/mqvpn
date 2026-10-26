@@ -38,7 +38,7 @@
 
 /* ── Test infrastructure ─────────────────────────────────────────────────── */
 
-static int g_run    = 0;
+static int g_run = 0;
 static int g_passed = 0;
 
 #define TEST(name)                 \
@@ -53,33 +53,32 @@ static int g_passed = 0;
     }                              \
     static void test_##name(void)
 
-#define ASSERT_STR_EQ(a, b)                                                          \
-    do {                                                                             \
-        if (strcmp((a), (b)) != 0) {                                                 \
-            printf("FAIL\n    %s:%d  \"%s\" != \"%s\"\n", __FILE__, __LINE__,        \
-                   (a), (b));                                                        \
-            exit(1);                                                                 \
-        }                                                                            \
+#define ASSERT_STR_EQ(a, b)                                                              \
+    do {                                                                                 \
+        if (strcmp((a), (b)) != 0) {                                                     \
+            printf("FAIL\n    %s:%d  \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
+            exit(1);                                                                     \
+        }                                                                                \
     } while (0)
 
-#define ASSERT_EQ(a, b)                                                              \
-    do {                                                                             \
-        long long _a = (long long)(a), _b = (long long)(b);                          \
-        if (_a != _b) {                                                              \
-            printf("FAIL\n    %s:%d  %s == %lld, expected %lld\n",                   \
-                   __FILE__, __LINE__, #a, _a, _b);                                  \
-            exit(1);                                                                 \
-        }                                                                            \
+#define ASSERT_EQ(a, b)                                                                \
+    do {                                                                               \
+        long long _a = (long long)(a), _b = (long long)(b);                            \
+        if (_a != _b) {                                                                \
+            printf("FAIL\n    %s:%d  %s == %lld, expected %lld\n", __FILE__, __LINE__, \
+                   #a, _a, _b);                                                        \
+            exit(1);                                                                   \
+        }                                                                              \
     } while (0)
 
-#define ASSERT_NE(a, b)                                                              \
-    do {                                                                             \
-        long long _a = (long long)(a), _b = (long long)(b);                          \
-        if (_a == _b) {                                                              \
-            printf("FAIL\n    %s:%d  %s == %lld (unexpected equal)\n",               \
-                   __FILE__, __LINE__, #a, _a);                                      \
-            exit(1);                                                                 \
-        }                                                                            \
+#define ASSERT_NE(a, b)                                                          \
+    do {                                                                         \
+        long long _a = (long long)(a), _b = (long long)(b);                      \
+        if (_a == _b) {                                                          \
+            printf("FAIL\n    %s:%d  %s == %lld (unexpected equal)\n", __FILE__, \
+                   __LINE__, #a, _a);                                            \
+            exit(1);                                                             \
+        }                                                                        \
     } while (0)
 
 /* Write a string to a temp file and return the static path. */
@@ -89,9 +88,15 @@ write_tmp(const char *content)
     static char path[256];
     snprintf(path, sizeof(path), "/tmp/test_cc_XXXXXX");
     int fd = mkstemp(path);
-    if (fd < 0) { perror("mkstemp"); exit(1); }
+    if (fd < 0) {
+        perror("mkstemp");
+        exit(1);
+    }
     size_t len = strlen(content);
-    if (write(fd, content, len) != (ssize_t)len) { perror("write"); exit(1); }
+    if (write(fd, content, len) != (ssize_t)len) {
+        perror("write");
+        exit(1);
+    }
     close(fd);
     return path;
 }
@@ -117,8 +122,8 @@ static int
 parse_cc_json(const char *cc_value, mqvpn_file_config_t *out)
 {
     char json[256];
-    snprintf(json, sizeof(json),
-             "{\"server\":\"127.0.0.1:4433\",\"cc\":\"%s\"}", cc_value);
+    snprintf(json, sizeof(json), "{\"server\":\"127.0.0.1:4433\",\"cc\":\"%s\"}",
+             cc_value);
     const char *path = write_tmp(json);
     mqvpn_config_defaults(out);
     int rc = mqvpn_config_load(out, path);
@@ -204,8 +209,7 @@ parse_cc_ini(const char *cc_value, mqvpn_file_config_t *out)
 {
     char ini[256];
     snprintf(ini, sizeof(ini),
-             "[Server]\nAddress = 127.0.0.1:4433\n[Multipath]\nCC = %s\n",
-             cc_value);
+             "[Server]\nAddress = 127.0.0.1:4433\n[Multipath]\nCC = %s\n", cc_value);
     const char *path = write_tmp(ini);
     mqvpn_config_defaults(out);
     int rc = mqvpn_config_load(out, path);
@@ -314,19 +318,19 @@ TEST(api_set_cc_all_algorithms)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
 
-    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR2),     MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR2), MQVPN_OK);
     ASSERT_EQ(cfg->cc, MQVPN_CC_BBR2);
 
-    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR),      MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_BBR), MQVPN_OK);
     ASSERT_EQ(cfg->cc, MQVPN_CC_BBR);
 
-    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_CUBIC),    MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_CUBIC), MQVPN_OK);
     ASSERT_EQ(cfg->cc, MQVPN_CC_CUBIC);
 
     ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_NEW_RENO), MQVPN_OK);
     ASSERT_EQ(cfg->cc, MQVPN_CC_NEW_RENO);
 
-    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_COPA),     MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_COPA), MQVPN_OK);
     ASSERT_EQ(cfg->cc, MQVPN_CC_COPA);
 
     ASSERT_EQ(mqvpn_config_set_cc(cfg, MQVPN_CC_UNLIMITED), MQVPN_OK);

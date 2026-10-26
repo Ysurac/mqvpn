@@ -33,13 +33,11 @@ json_str_key(yyjson_val *root, const char *key, char *out, size_t out_len)
 }
 
 static int
-json_add_user_cb(void *ctx, const char *name, const char *key,
-                 const char *fixed_ip)
+json_add_user_cb(void *ctx, const char *name, const char *key, const char *fixed_ip)
 {
     mqvpn_config_t *cfg = (mqvpn_config_t *)ctx;
     if (mqvpn_config_add_user(cfg, name, key) != MQVPN_OK) return -1;
-    if (fixed_ip &&
-        mqvpn_config_set_user_fixed_ip(cfg, name, fixed_ip) != MQVPN_OK)
+    if (fixed_ip && mqvpn_config_set_user_fixed_ip(cfg, name, fixed_ip) != MQVPN_OK)
         return -1;
     return 0;
 }
@@ -133,10 +131,12 @@ mqvpn_config_new(void)
     cfg->max_clients = 64;
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
-    cfg->tun_mtu = 0; /* 0 = auto */
+    cfg->tun_mtu = 0;          /* 0 = auto */
     cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
-    cfg->sync_path_labels = 1; /* server: adopt / client: announce weight+dscp, both by default */
-    cfg->push_path_labels = 0; /* server: push / client: adopt an operator pin — opt-in, both sides */
+    cfg->sync_path_labels =
+        1; /* server: adopt / client: announce weight+dscp, both by default */
+    cfg->push_path_labels =
+        0; /* server: push / client: adopt an operator pin — opt-in, both sides */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);

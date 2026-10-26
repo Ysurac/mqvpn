@@ -153,11 +153,14 @@ TEST(config_set_user_fixed_ip)
     ASSERT_STR_EQ(cfg->user_fixed_ips[0], "");
 
     /* Unknown user returns error */
-    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "carol", "10.0.0.5"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "carol", "10.0.0.5"),
+              MQVPN_ERR_INVALID_ARG);
 
     /* NULL args */
-    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(NULL, "alice", "10.0.0.5"), MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, NULL, "10.0.0.5"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(NULL, "alice", "10.0.0.5"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, NULL, "10.0.0.5"),
+              MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "alice", NULL), MQVPN_ERR_INVALID_ARG);
 
     /* Fixed IP survives remove_user shifting */
@@ -1715,9 +1718,11 @@ TEST(config_set_fec_scheme_all_values)
     ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_XOR);
     ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_PACKET_MASK), MQVPN_OK);
     ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_PACKET_MASK);
-    ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_GALOIS_CALCULATION), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(cfg, MQVPN_FEC_SCHEME_GALOIS_CALCULATION),
+              MQVPN_OK);
     ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_GALOIS_CALCULATION);
-    ASSERT_EQ(mqvpn_config_set_fec_scheme(NULL, MQVPN_FEC_SCHEME_XOR), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_fec_scheme(NULL, MQVPN_FEC_SCHEME_XOR),
+              MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
 
@@ -1743,7 +1748,8 @@ TEST(config_load_json_fec)
     ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_PACKET_MASK);
 
     /* fec_scheme — galois_calculation */
-    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"galois_calculation\"}"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"fec_scheme\":\"galois_calculation\"}"),
+              MQVPN_OK);
     ASSERT_EQ(cfg->fec_scheme, MQVPN_FEC_SCHEME_GALOIS_CALCULATION);
 
     /* fec_scheme — reed_solomon (default/fallback) */
@@ -1764,9 +1770,13 @@ TEST(config_set_tls_ciphers)
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_set_tls_ciphers(cfg, "TLS_AES_256_GCM_SHA384"), MQVPN_OK);
     ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_256_GCM_SHA384");
-    ASSERT_EQ(mqvpn_config_set_tls_ciphers(cfg, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256"), MQVPN_OK);
-    ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256");
-    ASSERT_EQ(mqvpn_config_set_tls_ciphers(NULL, "TLS_AES_256_GCM_SHA384"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_tls_ciphers(
+                  cfg, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256"),
+              MQVPN_OK);
+    ASSERT_STR_EQ(cfg->tls_ciphers,
+                  "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256");
+    ASSERT_EQ(mqvpn_config_set_tls_ciphers(NULL, "TLS_AES_256_GCM_SHA384"),
+              MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_set_tls_ciphers(cfg, NULL), MQVPN_ERR_INVALID_ARG);
     mqvpn_config_free(cfg);
 }
@@ -1776,15 +1786,19 @@ TEST(config_load_json_ciphers)
     mqvpn_config_t *cfg = mqvpn_config_new();
 
     /* tls_ciphers key */
-    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"tls_ciphers\":\"TLS_AES_256_GCM_SHA384\"}"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"tls_ciphers\":\"TLS_AES_256_GCM_SHA384\"}"),
+              MQVPN_OK);
     ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_256_GCM_SHA384");
 
     /* ciphers alias */
-    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"ciphers\":\"TLS_AES_128_GCM_SHA256\"}"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"ciphers\":\"TLS_AES_128_GCM_SHA256\"}"),
+              MQVPN_OK);
     ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_AES_128_GCM_SHA256");
 
     /* cipher (singular) alias */
-    ASSERT_EQ(mqvpn_config_load_json(cfg, "{\"cipher\":\"TLS_CHACHA20_POLY1305_SHA256\"}"), MQVPN_OK);
+    ASSERT_EQ(
+        mqvpn_config_load_json(cfg, "{\"cipher\":\"TLS_CHACHA20_POLY1305_SHA256\"}"),
+        MQVPN_OK);
     ASSERT_STR_EQ(cfg->tls_ciphers, "TLS_CHACHA20_POLY1305_SHA256");
 
     mqvpn_config_free(cfg);
@@ -4043,7 +4057,8 @@ TEST(get_interest_two_paths_takes_min_deadline)
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
 
     /* h1: CREATE_WAIT with 5 s retry deadline */
-    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h1, g_recovery_fake_now_us), 0);
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h1, g_recovery_fake_now_us),
+              0);
     /* h2: just entered stable observation (30 s threshold) */
     ASSERT_EQ(mqvpn_client_test_set_path_stable_us(c, h2, g_recovery_fake_now_us, 1), 0);
 
@@ -4071,7 +4086,8 @@ TEST(get_interest_two_paths_both_overdue_forces_1ms)
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
 
-    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h1, g_recovery_fake_now_us), 0);
+    ASSERT_EQ(mqvpn_client_apply_path_activation_failure(c, h1, g_recovery_fake_now_us),
+              0);
     ASSERT_EQ(mqvpn_client_test_set_path_stable_us(c, h2, g_recovery_fake_now_us, 1), 0);
 
     /* Advance 60 s so both deadlines are in the past */

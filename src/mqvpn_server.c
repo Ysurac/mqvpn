@@ -62,9 +62,9 @@
 
 /* ─── Constants ─── */
 
-#define PACKET_BUF_SIZE   65536
-#define MASQUE_FRAME_BUF  (PACKET_BUF_SIZE + 16)
-#define MAX_CAPSULE_BUF   65536
+#define PACKET_BUF_SIZE  65536
+#define MASQUE_FRAME_BUF (PACKET_BUF_SIZE + 16)
+#define MAX_CAPSULE_BUF  65536
 
 /* ─── Forward declarations ─── */
 
@@ -118,21 +118,21 @@ typedef struct {
  * svr_conn_s — mirrors the client side's path_entry_t, which is also only
  * in-process/in-connection state, not persisted across a full restart. */
 typedef struct {
-    char     iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+    char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
     uint64_t path_id;
     uint32_t weight;
     uint64_t dscp_mask;
-    int      has_path_id;   /* an announcement has arrived (path_id 0 is a
-                              * valid id — can't use it as its own sentinel) */
-    int      has_weight;
-    int      has_dscp_mask;
-    int      weight_from_operator;     /* an explicit server-side call set this —
-                                         * ignore the client's own announced value */
-    int      dscp_mask_from_operator;
+    int has_path_id; /* an announcement has arrived (path_id 0 is a
+                      * valid id — can't use it as its own sentinel) */
+    int has_weight;
+    int has_dscp_mask;
+    int weight_from_operator; /* an explicit server-side call set this —
+                               * ignore the client's own announced value */
+    int dscp_mask_from_operator;
 } svr_path_label_t;
 
 struct svr_conn_s {
-    uint32_t        tag;    /* SVR_CONN_TAG — set at alloc time in cb_accept */
+    uint32_t tag; /* SVR_CONN_TAG — set at alloc time in cb_accept */
     mqvpn_server_t *server;
     xqc_h3_conn_t *h3_conn;
     xqc_cid_t cid;
@@ -696,7 +696,7 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     static const char prefix[] = "[xquic] ";
     memcpy(msg, prefix, sizeof(prefix) - 1);
     mqvpn_xquic_annotate_err_codes((const char *)buf, size, msg + sizeof(prefix) - 1,
-                                    sizeof(msg) - (sizeof(prefix) - 1));
+                                   sizeof(msg) - (sizeof(prefix) - 1));
     s->cbs.log(ml, msg, s->user_ctx);
 }
 
@@ -926,7 +926,7 @@ cb_path_created(xqc_connection_t *conn, const xqc_cid_t *cid, uint64_t path_id,
             }
             if (label->has_dscp_mask) {
                 xqc_conn_set_path_dscp_mask(s->engine, &sc->cid, path_id,
-                                           label->dscp_mask);
+                                            label->dscp_mask);
             }
         }
     }
@@ -1417,7 +1417,8 @@ svr_masque_send_response(xqc_h3_request_t *h3_request, svr_stream_t *stream,
         svr_identity_sessions(s, conn, superseded_off) >= s->max_sessions_per_user) {
         if (svr_log_rl_allow(s, &s->rl_user_cap, 10, MQVPN_LOG_WARN,
                              "max sessions per user reached"))
-            LOG_W(s, "max sessions per user reached (%d), rejecting (credential=%s user=%s)",
+            LOG_W(s,
+                  "max sessions per user reached (%d), rejecting (credential=%s user=%s)",
                   s->max_sessions_per_user, conn->auth_identity, conn->username);
         svr_masque_send_403(h3_request);
         stream->role = SVR_STREAM_ROLE_REJECTED; /* return 0: see the 403 above */
@@ -1883,7 +1884,8 @@ svr_parse_request_headers(mqvpn_server_t *s, xqc_http_headers_t *headers,
         if (h->name.iov_len == 6 && memcmp(h->name.iov_base, "x-user", 6) == 0 &&
             h->value.iov_len > 0) {
             size_t ulen = h->value.iov_len < sizeof(out->x_user) - 1
-                          ? h->value.iov_len : sizeof(out->x_user) - 1;
+                              ? h->value.iov_len
+                              : sizeof(out->x_user) - 1;
             memcpy(out->x_user, h->value.iov_base, ulen);
             out->x_user[ulen] = '\0';
         }
@@ -2413,7 +2415,8 @@ svr_path_label_find_or_create(svr_conn_t *conn, const char *iface)
  * on the wire in this direction (meaningless here — the client already
  * knows its own path_id for its own iface). */
 static void
-svr_push_path_label_to_client(mqvpn_server_t *s, svr_conn_t *conn, const svr_path_label_t *label)
+svr_push_path_label_to_client(mqvpn_server_t *s, svr_conn_t *conn,
+                              const svr_path_label_t *label)
 {
     if (!s->config.push_path_labels) return;
     if (!label->weight_from_operator && !label->dscp_mask_from_operator) return;
@@ -2427,11 +2430,12 @@ svr_push_path_label_to_client(mqvpn_server_t *s, svr_conn_t *conn, const svr_pat
                                     weight, dscp_mask);
     if (n <= 0) return;
 
-    uint8_t cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
+    uint8_t
+        cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
     size_t cap_written = 0;
     xqc_int_t xret = xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
-                                               MQVPN_CAPSULE_PATH_LABEL_PUSH, label_payload,
-                                               (size_t)n);
+                                               MQVPN_CAPSULE_PATH_LABEL_PUSH,
+                                               label_payload, (size_t)n);
     if (xret != XQC_OK) {
         LOG_W(s, "path_label push capsule encode failed: %d (user=%s)", xret,
               conn->username);
@@ -2633,7 +2637,8 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                          * intentional later override on the next path
                          * flap/reconnect within the same connection. */
                         if (is_new_label) {
-                            int pi = svr_path_policy_find(s, stream->conn->username, iface);
+                            int pi =
+                                svr_path_policy_find(s, stream->conn->username, iface);
                             if (pi >= 0) {
                                 if (s->config.path_policy_has_weight[pi]) {
                                     label->weight = s->config.path_policy_weight[pi];
@@ -2641,12 +2646,14 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                                     label->weight_from_operator = 1;
                                 }
                                 if (s->config.path_policy_has_dscp_mask[pi]) {
-                                    label->dscp_mask = s->config.path_policy_dscp_mask[pi];
+                                    label->dscp_mask =
+                                        s->config.path_policy_dscp_mask[pi];
                                     label->has_dscp_mask = 1;
                                     label->dscp_mask_from_operator = 1;
                                 }
-                                LOG_I(s, "path_policy: user=%s iface=%s weight=%u "
-                                         "dscp_mask=%" PRIu64 " applied",
+                                LOG_I(s,
+                                      "path_policy: user=%s iface=%s weight=%u "
+                                      "dscp_mask=%" PRIu64 " applied",
                                       stream->conn->username, iface, label->weight,
                                       label->dscp_mask);
                             }
@@ -2669,7 +2676,8 @@ svr_connect_ip_on_body(mqvpn_server_t *s, svr_stream_t *stream,
                                 label->weight = client_weight;
                                 label->has_weight = 1;
                             }
-                            if (!label->dscp_mask_from_operator && client_dscp_mask != 0) {
+                            if (!label->dscp_mask_from_operator &&
+                                client_dscp_mask != 0) {
                                 label->dscp_mask = client_dscp_mask;
                                 label->has_dscp_mask = 1;
                             }
@@ -3116,7 +3124,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     s->user_ctx = user_ctx; // lgtm[cpp/stack-address-escape]
     s->log_level = cfg->log_level;
     s->max_clients = cfg->max_clients > 0 ? cfg->max_clients : 64;
-    s->max_sessions_per_user = cfg->max_sessions_per_user > 0 ? cfg->max_sessions_per_user : 0;
+    s->max_sessions_per_user =
+        cfg->max_sessions_per_user > 0 ? cfg->max_sessions_per_user : 0;
     mqvpn_ptb_bucket_init(&s->ptb_bucket);
     s->boot_us = now_us();
 
@@ -3219,8 +3228,8 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
             continue;
         }
         int idx = s->n_pinned_ips;
-        snprintf(s->pinned_ips[idx].username, sizeof(s->pinned_ips[idx].username),
-                 "%s", s->config.user_names[i]);
+        snprintf(s->pinned_ips[idx].username, sizeof(s->pinned_ips[idx].username), "%s",
+                 s->config.user_names[i]);
         s->pinned_ips[idx].offset = offset;
         s->pinned_ips[idx].ip = alloc_out;
         s->n_pinned_ips++;
@@ -3358,28 +3367,28 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
      * mqvpn_build_conn_settings() above via cs_input.reinjection. */
     if (cfg->fec_enable) {
 #ifdef XQC_ENABLE_FEC
-#ifdef XQC_ENABLE_RSC
+#  ifdef XQC_ENABLE_RSC
         xqc_fec_schemes_e fec_scheme = XQC_REED_SOLOMON_CODE;
         conn_settings.fec_callback = xqc_reed_solomon_code_cb;
-#else
+#  else
         xqc_fec_schemes_e fec_scheme = XQC_XOR_CODE;
         conn_settings.fec_callback = xqc_xor_code_cb;
-#endif
+#  endif
 
         if (cfg->fec_scheme == MQVPN_FEC_SCHEME_XOR) {
             fec_scheme = XQC_XOR_CODE;
             conn_settings.fec_callback = xqc_xor_code_cb;
         } else if (cfg->fec_scheme == MQVPN_FEC_SCHEME_PACKET_MASK) {
-#ifdef XQC_ENABLE_PKM
+#  ifdef XQC_ENABLE_PKM
             fec_scheme = XQC_PACKET_MASK_CODE;
             conn_settings.fec_callback = xqc_packet_mask_code_cb;
-#else
+#  else
             LOG_W(s, "packet_mask FEC unavailable in xquic build; using reed_solomon");
-#endif
+#  endif
         } else if (cfg->fec_scheme == MQVPN_FEC_SCHEME_REED_SOLOMON) {
-#ifndef XQC_ENABLE_RSC
+#  ifndef XQC_ENABLE_RSC
             LOG_W(s, "reed_solomon FEC unavailable in xquic build; using xor");
-#endif
+#  endif
         }
 
         conn_settings.enable_encode_fec = 1;
@@ -4325,8 +4334,8 @@ mqvpn_server_set_path_dscp_mask(mqvpn_server_t *s, const char *user, uint64_t pa
 }
 
 int
-mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user, const char *iface,
-                                      uint32_t weight)
+mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user,
+                                      const char *iface, uint32_t weight)
 {
     if (!s || !user || user[0] == '\0' || !iface || iface[0] == '\0' ||
         strlen(iface) > MQVPN_PATH_LABEL_IFACE_MAX)

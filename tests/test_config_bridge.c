@@ -173,7 +173,7 @@ test_defaults_and_fallbacks(void)
     /* remaining scheduler codepoints: cfg.scheduler carries the library
      * enum value itself */
     static const mqvpn_scheduler_t scheds[] = {
-        MQVPN_SCHED_MINRTT, MQVPN_SCHED_WLB,  MQVPN_SCHED_BACKUP,
+        MQVPN_SCHED_MINRTT, MQVPN_SCHED_WLB,         MQVPN_SCHED_BACKUP,
         MQVPN_SCHED_RAP,    MQVPN_SCHED_WLB_UDP_PIN, MQVPN_SCHED_WRTT,
         MQVPN_SCHED_WRR,    MQVPN_SCHED_REDUNDANT,   MQVPN_SCHED_DSCP,
     };

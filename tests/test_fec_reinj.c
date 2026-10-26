@@ -18,24 +18,24 @@
 
 static int g_pass = 0, g_fail = 0;
 
-#define ASSERT_EQ_INT(a, b, msg)                                                \
-    do {                                                                        \
-        if ((a) == (b)) {                                                       \
-            g_pass++;                                                           \
-        } else {                                                                \
-            g_fail++;                                                           \
+#define ASSERT_EQ_INT(a, b, msg)                                               \
+    do {                                                                       \
+        if ((a) == (b)) {                                                      \
+            g_pass++;                                                          \
+        } else {                                                               \
+            g_fail++;                                                          \
             fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); \
-        }                                                                       \
+        }                                                                      \
     } while (0)
 
-#define ASSERT_EQ_STR(a, b, msg)                                          \
-    do {                                                                   \
-        if (strcmp((a), (b)) == 0) {                                       \
-            g_pass++;                                                      \
-        } else {                                                           \
-            g_fail++;                                                      \
+#define ASSERT_EQ_STR(a, b, msg)                                         \
+    do {                                                                 \
+        if (strcmp((a), (b)) == 0) {                                     \
+            g_pass++;                                                    \
+        } else {                                                         \
+            g_fail++;                                                    \
             fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); \
-        }                                                                  \
+        }                                                                \
     } while (0)
 
 #define ASSERT_TRUE(cond, msg)                   \
@@ -221,7 +221,8 @@ test_fec_scheme_ini_galois_calculation(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.fec_enable, 1, "FecScheme=galois_calculation: fec_enable=1");
-    ASSERT_EQ_STR(cfg.fec_scheme, "galois_calculation", "FecScheme=galois_calculation stored");
+    ASSERT_EQ_STR(cfg.fec_scheme, "galois_calculation",
+                  "FecScheme=galois_calculation stored");
 }
 
 static void
@@ -408,7 +409,8 @@ test_reinj_mode_ini_unknown_keeps_default(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_TRUE(cfg.reinjection_mode[0] != '\0', "ReinjectionMode=bogus: field non-empty");
+    ASSERT_TRUE(cfg.reinjection_mode[0] != '\0',
+                "ReinjectionMode=bogus: field non-empty");
 }
 
 static void
@@ -425,7 +427,8 @@ test_reinj_mode_only_no_control(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.reinjection_control, 0, "no ReinjectionControl → stays 0");
-    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline", "ReinjectionMode without control still stored");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline",
+                  "ReinjectionMode without control still stored");
 }
 
 static void
@@ -468,7 +471,8 @@ test_fec_and_reinj_combined_ini(void)
     ASSERT_EQ_INT(cfg.fec_enable, 1, "combined: fec_enable=1");
     ASSERT_EQ_STR(cfg.fec_scheme, "packet_mask", "combined: fec_scheme=packet_mask");
     ASSERT_EQ_INT(cfg.reinjection_control, 1, "combined: reinjection_control=1");
-    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline", "combined: reinjection_mode=deadline");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline",
+                  "combined: reinjection_mode=deadline");
 }
 
 static void
@@ -599,7 +603,8 @@ test_json_fec_scheme_galois_calculation(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.fec_enable, 1, "json galois: fec_enable=1");
-    ASSERT_EQ_STR(cfg.fec_scheme, "galois_calculation", "json fec_scheme=galois_calculation stored");
+    ASSERT_EQ_STR(cfg.fec_scheme, "galois_calculation",
+                  "json fec_scheme=galois_calculation stored");
 }
 
 static void
@@ -661,7 +666,8 @@ test_json_reinj_mode_default(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.reinjection_control, 1, "json mode=default: control=1");
-    ASSERT_EQ_STR(cfg.reinjection_mode, "default", "json reinjection_mode=default stored");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "default",
+                  "json reinjection_mode=default stored");
 }
 
 static void
@@ -677,7 +683,8 @@ test_json_reinj_mode_deadline(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.reinjection_control, 1, "json mode=deadline: control=1");
-    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline", "json reinjection_mode=deadline stored");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline",
+                  "json reinjection_mode=deadline stored");
 }
 
 static void
@@ -707,7 +714,8 @@ test_json_reinj_mode_unknown_keeps_field(void)
     mqvpn_config_defaults(&cfg);
     ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "json unknown reinj_mode no error");
     unlink(path);
-    ASSERT_TRUE(cfg.reinjection_mode[0] != '\0', "json unknown reinj_mode: field non-empty");
+    ASSERT_TRUE(cfg.reinjection_mode[0] != '\0',
+                "json unknown reinj_mode: field non-empty");
 }
 
 static void
@@ -724,7 +732,8 @@ test_json_reinj_mode_duplicate_last_wins(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     /* reinj_ctl is an alias processed after reinjection_mode; dgram should win */
-    ASSERT_EQ_STR(cfg.reinjection_mode, "dgram", "reinj_ctl alias overrides reinjection_mode");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "dgram",
+                  "reinj_ctl alias overrides reinjection_mode");
 }
 
 /* ================================================================
@@ -767,8 +776,10 @@ test_json_all_fec_schemes_all_reinj_modes(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_STR(cfg.fec_scheme, "galois_calculation", "matrix: galois+deadline fec_scheme ok");
-    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline", "matrix: galois+deadline reinj_mode ok");
+    ASSERT_EQ_STR(cfg.fec_scheme, "galois_calculation",
+                  "matrix: galois+deadline fec_scheme ok");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "deadline",
+                  "matrix: galois+deadline reinj_mode ok");
 }
 
 /* ================================================================
@@ -821,7 +832,8 @@ test_fec_not_affected_by_other_sections(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.fec_enable, 0, "no FEC section: fec_enable stays 0");
-    ASSERT_EQ_STR(cfg.fec_scheme, "reed_solomon", "no FEC section: fec_scheme stays reed_solomon");
+    ASSERT_EQ_STR(cfg.fec_scheme, "reed_solomon",
+                  "no FEC section: fec_scheme stays reed_solomon");
 }
 
 static void
@@ -837,7 +849,8 @@ test_reinj_not_affected_by_other_sections(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.reinjection_control, 0, "no Multipath: reinj_control stays 0");
-    ASSERT_EQ_STR(cfg.reinjection_mode, "default", "no Multipath: reinj_mode stays default");
+    ASSERT_EQ_STR(cfg.reinjection_mode, "default",
+                  "no Multipath: reinj_mode stays default");
 }
 
 /* ================================================================

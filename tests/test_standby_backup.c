@@ -20,7 +20,7 @@
 
 /* ── Test infrastructure ── */
 
-static int g_run    = 0;
+static int g_run = 0;
 static int g_passed = 0;
 
 #define TEST(name)                 \
@@ -35,52 +35,52 @@ static int g_passed = 0;
     }                              \
     static void test_##name(void)
 
-#define ASSERT_EQ(a, b)                                                                      \
-    do {                                                                                     \
-        long long _a = (long long)(a), _b = (long long)(b);                                  \
-        if (_a != _b) {                                                                      \
-            printf("FAIL\n    %s:%d  %s == %lld, expected %lld\n", __FILE__, __LINE__, #a,   \
-                   _a, _b);                                                                  \
-            exit(1);                                                                         \
-        }                                                                                    \
-    } while (0)
-
-#define ASSERT_NE(a, b)                                                                      \
-    do {                                                                                     \
-        long long _a = (long long)(a), _b = (long long)(b);                                  \
-        if (_a == _b) {                                                                      \
-            printf("FAIL\n    %s:%d  %s == %lld (unexpected equal)\n", __FILE__, __LINE__,   \
-                   #a, _a);                                                                  \
-            exit(1);                                                                         \
-        }                                                                                    \
-    } while (0)
-
-#define ASSERT_NOT_NULL(a)                                                             \
+#define ASSERT_EQ(a, b)                                                                \
     do {                                                                               \
-        if ((a) == NULL) {                                                             \
-            printf("FAIL\n    %s:%d  %s is NULL\n", __FILE__, __LINE__, #a);           \
+        long long _a = (long long)(a), _b = (long long)(b);                            \
+        if (_a != _b) {                                                                \
+            printf("FAIL\n    %s:%d  %s == %lld, expected %lld\n", __FILE__, __LINE__, \
+                   #a, _a, _b);                                                        \
             exit(1);                                                                   \
         }                                                                              \
     } while (0)
 
-#define ASSERT_STR_EQ(a, b)                                                                  \
-    do {                                                                                     \
-        if (strcmp((a), (b)) != 0) {                                                         \
-            printf("FAIL\n    %s:%d  \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b));     \
-            exit(1);                                                                         \
-        }                                                                                    \
+#define ASSERT_NE(a, b)                                                          \
+    do {                                                                         \
+        long long _a = (long long)(a), _b = (long long)(b);                      \
+        if (_a == _b) {                                                          \
+            printf("FAIL\n    %s:%d  %s == %lld (unexpected equal)\n", __FILE__, \
+                   __LINE__, #a, _a);                                            \
+            exit(1);                                                             \
+        }                                                                        \
+    } while (0)
+
+#define ASSERT_NOT_NULL(a)                                                   \
+    do {                                                                     \
+        if ((a) == NULL) {                                                   \
+            printf("FAIL\n    %s:%d  %s is NULL\n", __FILE__, __LINE__, #a); \
+            exit(1);                                                         \
+        }                                                                    \
+    } while (0)
+
+#define ASSERT_STR_EQ(a, b)                                                              \
+    do {                                                                                 \
+        if (strcmp((a), (b)) != 0) {                                                     \
+            printf("FAIL\n    %s:%d  \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
+            exit(1);                                                                     \
+        }                                                                                \
     } while (0)
 
 /* ── Mock callbacks ── */
 
-static int                   g_path_event_count;
-static mqvpn_path_handle_t   g_last_path_handle;
-static mqvpn_path_status_t   g_last_path_status;
+static int g_path_event_count;
+static mqvpn_path_handle_t g_last_path_handle;
+static mqvpn_path_status_t g_last_path_status;
 
 /* Record the last N path events so ordering can be checked */
 #define MAX_RECORDED_EVENTS 16
-static mqvpn_path_handle_t   g_event_handle[MAX_RECORDED_EVENTS];
-static mqvpn_path_status_t   g_event_status[MAX_RECORDED_EVENTS];
+static mqvpn_path_handle_t g_event_handle[MAX_RECORDED_EVENTS];
+static mqvpn_path_status_t g_event_status[MAX_RECORDED_EVENTS];
 
 static void
 mock_path_event(mqvpn_path_handle_t handle, mqvpn_path_status_t status, void *ctx)
@@ -95,7 +95,8 @@ mock_path_event(mqvpn_path_handle_t handle, mqvpn_path_status_t status, void *ct
     g_path_event_count++;
 }
 
-static void reset_events(void)
+static void
+reset_events(void)
 {
     g_path_event_count = 0;
     g_last_path_handle = -1;
@@ -107,13 +108,16 @@ static void reset_events(void)
 static void
 dummy_tun_output(const uint8_t *p, size_t l, void *u)
 {
-    (void)p; (void)l; (void)u;
+    (void)p;
+    (void)l;
+    (void)u;
 }
 
 static void
 dummy_config_ready(const mqvpn_tunnel_info_t *i, void *u)
 {
-    (void)i; (void)u;
+    (void)i;
+    (void)u;
 }
 
 static mqvpn_client_t *
@@ -123,9 +127,9 @@ make_client_with_events(void)
     mqvpn_config_set_server(cfg, "1.2.3.4", 443);
 
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
-    cbs.tun_output         = dummy_tun_output;
+    cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
-    cbs.path_event         = mock_path_event;
+    cbs.path_event = mock_path_event;
 
     mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
     mqvpn_config_free(cfg);
@@ -157,7 +161,10 @@ find_path_info(mqvpn_client_t *c, mqvpn_path_handle_t h, mqvpn_path_info_t *out)
     int n = 0;
     if (mqvpn_client_get_paths(c, infos, 8, &n) != MQVPN_OK) return 0;
     for (int i = 0; i < n; i++) {
-        if (infos[i].handle == h) { *out = infos[i]; return 1; }
+        if (infos[i].handle == h) {
+            *out = infos[i];
+            return 1;
+        }
     }
     return 0;
 }
@@ -171,7 +178,7 @@ TEST(backup_flag_stored_in_path_info)
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
     mqvpn_path_handle_t h = add_fake_path(c, &desc);
@@ -219,7 +226,7 @@ TEST(backup_path_status_pending_before_connect)
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
     mqvpn_path_handle_t h = add_fake_path(c, &desc);
@@ -257,8 +264,10 @@ TEST(mixed_primary_backup_flags_independent)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t dp = {0}, db = {0};
-    dp.struct_size = sizeof(dp); snprintf(dp.iface, sizeof(dp.iface), "eth0");
-    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
+    dp.struct_size = sizeof(dp);
+    snprintf(dp.iface, sizeof(dp.iface), "eth0");
+    db.struct_size = sizeof(db);
+    db.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(db.iface, sizeof(db.iface), "lte0");
 
     mqvpn_path_handle_t hp = add_fake_path(c, &dp);
@@ -281,9 +290,11 @@ TEST(two_backup_paths_both_reported)
     mqvpn_client_t *c = make_client_with_events();
 
     mqvpn_path_desc_t db1 = {0}, db2 = {0};
-    db1.struct_size = sizeof(db1); db1.flags = MQVPN_PATH_FLAG_BACKUP;
+    db1.struct_size = sizeof(db1);
+    db1.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(db1.iface, sizeof(db1.iface), "lte0");
-    db2.struct_size = sizeof(db2); db2.flags = MQVPN_PATH_FLAG_BACKUP;
+    db2.struct_size = sizeof(db2);
+    db2.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(db2.iface, sizeof(db2.iface), "lte1");
 
     mqvpn_path_handle_t h1 = add_fake_path(c, &db1);
@@ -313,7 +324,7 @@ TEST(no_path_event_before_connect)
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
     add_fake_path(c, &desc);
@@ -348,7 +359,7 @@ TEST(backup_path_removable)
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
     mqvpn_path_handle_t h = add_fake_path(c, &desc);
@@ -371,7 +382,8 @@ TEST(backup_path_slot_reusable_after_remove)
     /* Fill all MQVPN_MAX_PATHS slots — first two as primary + backup */
     mqvpn_path_desc_t dp = {0}, db = {0};
     dp.struct_size = sizeof(dp);
-    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
+    db.struct_size = sizeof(db);
+    db.flags = MQVPN_PATH_FLAG_BACKUP;
 
     mqvpn_path_handle_t hp = add_fake_path(c, &dp);
     mqvpn_path_handle_t hb = add_fake_path(c, &db);
@@ -379,8 +391,7 @@ TEST(backup_path_slot_reusable_after_remove)
         add_fake_path(c, NULL);
 
     /* One beyond the limit must fail */
-    ASSERT_EQ(add_fake_path(c, NULL),
-              (mqvpn_path_handle_t)-1);
+    ASSERT_EQ(add_fake_path(c, NULL), (mqvpn_path_handle_t)-1);
 
     /* Remove backup: the slot is only recycled once the platform has
      * released its transport, then adding one more should succeed */
@@ -402,7 +413,8 @@ TEST(get_paths_counts_backup_paths)
 
     mqvpn_path_desc_t dp = {0}, db = {0};
     dp.struct_size = sizeof(dp);
-    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
+    db.struct_size = sizeof(db);
+    db.flags = MQVPN_PATH_FLAG_BACKUP;
 
     add_fake_path(c, &dp);
     add_fake_path(c, &db);
@@ -444,7 +456,7 @@ TEST(tick_safe_with_backup_paths_no_connection)
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
     add_fake_path(c, &desc);
 
@@ -461,7 +473,8 @@ TEST(tick_safe_mixed_paths_no_connection)
 
     mqvpn_path_desc_t dp = {0}, db = {0};
     dp.struct_size = sizeof(dp);
-    db.struct_size = sizeof(db); db.flags = MQVPN_PATH_FLAG_BACKUP;
+    db.struct_size = sizeof(db);
+    db.flags = MQVPN_PATH_FLAG_BACKUP;
     add_fake_path(c, &dp);
     add_fake_path(c, &db);
 
@@ -478,7 +491,7 @@ TEST(drop_path_on_backup)
 
     mqvpn_path_desc_t desc = {0};
     desc.struct_size = sizeof(desc);
-    desc.flags       = MQVPN_PATH_FLAG_BACKUP;
+    desc.flags = MQVPN_PATH_FLAG_BACKUP;
     snprintf(desc.iface, sizeof(desc.iface), "lte0");
 
     mqvpn_path_handle_t h = add_fake_path(c, &desc);

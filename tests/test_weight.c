@@ -22,13 +22,13 @@
         }                                                                          \
     } while (0)
 
-#define ASSERT_STR_EQ(a, b)                                                        \
-    do {                                                                           \
-        if (strcmp((a), (b)) != 0) {                                               \
-            fprintf(stderr, "FAIL %s:%d: \"%s\" != \"%s\"\n",                     \
-                    __FILE__, __LINE__, (a), (b));                                 \
-            return 1;                                                              \
-        }                                                                          \
+#define ASSERT_STR_EQ(a, b)                                                            \
+    do {                                                                               \
+        if (strcmp((a), (b)) != 0) {                                                   \
+            fprintf(stderr, "FAIL %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), \
+                    (b));                                                              \
+            return 1;                                                                  \
+        }                                                                              \
     } while (0)
 
 /* --- scheduler dispatch and properties --- */

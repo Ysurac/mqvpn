@@ -24,35 +24,38 @@ typedef struct mqvpn_client_cfg_s {
     const char *pinned_pubkey;   /* server key pins, override insecure (NULL = none) */
     int log_level;               /* mqvpn_log_level_t */
     const char *path_ifaces[MQVPN_MAX_PATH_IFACES]; /* network interfaces for multipath */
-    int n_paths;                /* number of path interfaces (0 = single-path) */
+    int n_paths; /* number of path interfaces (0 = single-path) */
     const char *backup_ifaces[MQVPN_MAX_PATH_IFACES]; /* failover-only interfaces */
-    int n_backup_paths;         /* number of backup interfaces */
+    int n_backup_paths;                               /* number of backup interfaces */
     int request_server_scheduler; /* 1=ask the server to use our scheduler (default 0) */
-    int scheduler;              /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin, 6=wrtt, 7=wrr, 8=redundant, 9=dscp */
-    int fec_enable;             /* 1=enable FEC */
-    int fec_scheme;             /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
-    const char *auth_key;       /* PSK for server authentication (NULL = no auth) */
-    const char *auth_username;  /* client username sent to server via x-user header (NULL = none) */
+    int scheduler;  /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin,
+                       6=wrtt, 7=wrr, 8=redundant, 9=dscp */
+    int fec_enable; /* 1=enable FEC */
+    int fec_scheme; /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
+    const char *auth_key;      /* PSK for server authentication (NULL = no auth) */
+    const char *auth_username; /* client username sent to server via x-user header (NULL =
+                                  none) */
     const char *dns_servers[4]; /* DNS servers to configure (NULL = no DNS override) */
     int n_dns;                  /* number of DNS servers */
     int reconnect;              /* 1=auto-reconnect on disconnect (default 1) */
     int reconnect_interval;     /* base reconnect interval in seconds (default 5) */
     int kill_switch;            /* 1=block traffic outside tunnel (default 0) */
-    int route_via_server;       /* 1=default via server tunnel IP instead of /1 trick (default 0) */
-    int no_routes;              /* 1=skip automatic route setup entirely (default 0) */
-    int manage_routes;          /* 1=manage host routes (default 1), 0=skip routing setup */
-    int control_port;           /* TCP port for JSON control API (0 = disabled) */
+    int route_via_server; /* 1=default via server tunnel IP instead of /1 trick (default
+                             0) */
+    int no_routes;        /* 1=skip automatic route setup entirely (default 0) */
+    int manage_routes;    /* 1=manage host routes (default 1), 0=skip routing setup */
+    int control_port;     /* TCP port for JSON control API (0 = disabled) */
     const char *control_addr;   /* bind address for control API (NULL = "127.0.0.1") */
     uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int tun_mtu;                /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
     int path_mtu;               /* 0=default packet size, >0=underlay MTU */
     int pmtud;                  /* 1=discover the path MTU, path_mtu is the cap */
     int cc;                     /* mqvpn_cc_t: congestion control algorithm */
-    int reinjection;                   /* mqvpn_reinjection_t; 0=off (default) */
-    int reinj_srtt_factor_pct;         /* deadline mode; percent, e.g. 110 = 1.10x srtt */
-    int reinj_hard_deadline_ms;        /* deadline mode */
-    int reinj_deadline_lower_bound_ms; /* deadline mode */
-    int redundant;                     /* send UDP on every path */
+    int reinjection;            /* mqvpn_reinjection_t; 0=off (default) */
+    int reinj_srtt_factor_pct;  /* deadline mode; percent, e.g. 110 = 1.10x srtt */
+    int reinj_hard_deadline_ms; /* deadline mode */
+    int reinj_deadline_lower_bound_ms;                   /* deadline mode */
+    int redundant;                                       /* send UDP on every path */
     uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS]; /* empty = all UDP */
     int n_redundant_ports;
     mqvpn_reorder_config_t
@@ -61,16 +64,16 @@ typedef struct mqvpn_client_cfg_s {
     uint64_t recv_rate_limit;     /* [Advanced] RecvRateLimit, bytes/sec; 0 = off */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
-    int sync_path_labels;         /* [Multipath] SyncPathLabels; default 1 — announce this
-                                    * client's own weight/dscp_mask (mqvpn_path_label.h) to
-                                    * the server; 0 = never announce (client/server
-                                    * weight/dscp_mask configured independently) */
-    int push_path_labels;         /* [Multipath] PushPathLabels; default 0 — adopt a
-                                    * server-pushed weight/dscp_mask (MQVPN_CAPSULE_
-                                    * PATH_LABEL_PUSH) into the matching local path; 0 =
-                                    * ignore any such capsule received */
-    int tun_offload;              /* [Advanced] TunOffload; default 1 */
-    int tun_gro;                  /* [Advanced] TunGro; default 1 */
+    int sync_path_labels; /* [Multipath] SyncPathLabels; default 1 — announce this
+                           * client's own weight/dscp_mask (mqvpn_path_label.h) to
+                           * the server; 0 = never announce (client/server
+                           * weight/dscp_mask configured independently) */
+    int push_path_labels; /* [Multipath] PushPathLabels; default 0 — adopt a
+                           * server-pushed weight/dscp_mask (MQVPN_CAPSULE_
+                           * PATH_LABEL_PUSH) into the matching local path; 0 =
+                           * ignore any such capsule received */
+    int tun_offload;      /* [Advanced] TunOffload; default 1 */
+    int tun_gro;          /* [Advanced] TunGro; default 1 */
 } mqvpn_client_cfg_t;
 
 /* CLI → library config bridge (src/platform/client_config_bridge.c): forwards

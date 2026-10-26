@@ -384,7 +384,8 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
         return;
     }
     if (p->client) {
-        mqvpn_client_set_server_addr(p->client, (struct sockaddr *)&new_addr, new_addrlen);
+        mqvpn_client_set_server_addr(p->client, (struct sockaddr *)&new_addr,
+                                     new_addrlen);
     }
 }
 

@@ -243,8 +243,8 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
         if (strcmp(cfg->user_names[i], name) == 0) {
             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
             if (fixed_ip)
-                snprintf(cfg->user_fixed_ips[i], sizeof(cfg->user_fixed_ips[i]),
-                         "%s", fixed_ip);
+                snprintf(cfg->user_fixed_ips[i], sizeof(cfg->user_fixed_ips[i]), "%s",
+                         fixed_ip);
             return;
         }
     }
@@ -338,8 +338,7 @@ json_read_string_array(yyjson_val *arr, char out[][64], int max_items, int *n_it
 }
 
 static int
-json_add_user_cb(void *ctx, const char *name, const char *key,
-                 const char *fixed_ip)
+json_add_user_cb(void *ctx, const char *name, const char *key, const char *fixed_ip)
 {
     /* add_user_entry() logs and skips invalid/duplicate/overflow entries
      * rather than failing the whole parse; preserve that here. */
@@ -598,49 +597,46 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
 #define CFGK_OFF(field) offsetof(mqvpn_file_config_t, field)
 
 /* Row helpers keep the table readable; positional init otherwise. */
-#define CFG_STR(sec, ik, jk, field)                                        \
-    {                                                                      \
-        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
-            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
-    }
-#define CFG_STR_POST(sec, ik, jk, field, post)                               \
-    {                                                                        \
-        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
-            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
-    }
-#define CFG_BOOL(sec, ik, jk, field)                                          \
-    {                                                                         \
-        (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
-    }
-#define CFG_INT(sec, ik, jk, field, okfn)                                      \
-    {                                                                          \
-        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL \
-    }
-#define CFG_INT_FB(sec, ik, jk, field, okfn, fb)                                  \
-    {                                                                             \
-        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL \
-    }
-#define CFG_U32(sec, ik, jk, field)                                                      \
-    {                                                                                    \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL \
-    }
-#define CFG_U32_POST(sec, ik, jk, field, post)                                      \
-    {                                                                               \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
-            (post)                                                                  \
-    }
-#define CFG_U32_MAX_POST(sec, ik, jk, field, maxv, post)                            \
-    {                                                                               \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, (post) \
-    }
-#define CFG_U16(sec, ik, jk, field)                                                  \
-    {                                                                                \
-        (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
-    }
-#define CFG_U64(sec, ik, jk, field, maxv)                                         \
-    {                                                                             \
-        (sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
-    }
+#define CFG_STR(sec, ik, jk, field)             \
+    {(sec),                                     \
+     (ik),                                      \
+     (jk),                                      \
+     CFGK_STR,                                  \
+     CFGK_OFF(field),                           \
+     sizeof(((mqvpn_file_config_t *)0)->field), \
+     0,                                         \
+     NULL,                                      \
+     0,                                         \
+     0,                                         \
+     NULL}
+#define CFG_STR_POST(sec, ik, jk, field, post)  \
+    {(sec),                                     \
+     (ik),                                      \
+     (jk),                                      \
+     CFGK_STR,                                  \
+     CFGK_OFF(field),                           \
+     sizeof(((mqvpn_file_config_t *)0)->field), \
+     0,                                         \
+     NULL,                                      \
+     0,                                         \
+     0,                                         \
+     (post)}
+#define CFG_BOOL(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL}
+#define CFG_INT(sec, ik, jk, field, okfn) \
+    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL}
+#define CFG_INT_FB(sec, ik, jk, field, okfn, fb) \
+    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL}
+#define CFG_U32(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL}
+#define CFG_U32_POST(sec, ik, jk, field, post) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, (post)}
+#define CFG_U32_MAX_POST(sec, ik, jk, field, maxv, post) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, (post)}
+#define CFG_U16(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL}
+#define CFG_U64(sec, ik, jk, field, maxv) \
+    {(sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL}
 
 static const cfg_key_desc_t cfg_keys[] = {
     /* [Interface] */
@@ -709,7 +705,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_MULTIPATH, "CongestionControl", "congestion_control", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
-    CFG_BOOL(SEC_MULTIPATH, "ReinjectionControl", "reinjection_control", reinjection_control),
+    CFG_BOOL(SEC_MULTIPATH, "ReinjectionControl", "reinjection_control",
+             reinjection_control),
     CFG_STR(SEC_MULTIPATH, "ReinjectionMode", "reinjection_mode", reinjection_mode),
     CFG_STR(SEC_MULTIPATH, "ReinjCtl", "reinj_ctl", reinjection_mode),
     CFG_BOOL(SEC_MULTIPATH, "Fec", "fec", fec_enable),
@@ -1559,7 +1556,8 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->udp_gso = 1;
     cfg->udp_gro = 1;
     cfg->sync_path_labels = 1;
-    cfg->push_path_labels = 0; /* opt-in; memset above already zeroes this, set explicitly for clarity */
+    cfg->push_path_labels =
+        0; /* opt-in; memset above already zeroes this, set explicitly for clarity */
     cfg->tun_offload = 1;
     cfg->tun_gro = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */

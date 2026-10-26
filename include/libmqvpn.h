@@ -211,55 +211,56 @@ typedef enum {
 } mqvpn_mode_t;
 
 typedef enum {
-    MQVPN_CC_BBR2      = 0, /* default */
-    MQVPN_CC_BBR       = 1,
-    MQVPN_CC_CUBIC     = 2,
-    MQVPN_CC_NEW_RENO  = 3,
-    MQVPN_CC_COPA      = 4,
+    MQVPN_CC_BBR2 = 0, /* default */
+    MQVPN_CC_BBR = 1,
+    MQVPN_CC_CUBIC = 2,
+    MQVPN_CC_NEW_RENO = 3,
+    MQVPN_CC_COPA = 4,
     MQVPN_CC_UNLIMITED = 5,
-    MQVPN_CC_NONE      = 6, /* alias for UNLIMITED: no congestion control */
+    MQVPN_CC_NONE = 6, /* alias for UNLIMITED: no congestion control */
 } mqvpn_cc_t;
 
 typedef enum {
-    MQVPN_SCHED_MINRTT      = 0,
-    MQVPN_SCHED_WLB         = 1,
-    MQVPN_SCHED_BACKUP      = 2,
-    MQVPN_SCHED_BACKUP_FEC  = 3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
-    MQVPN_SCHED_RAP         = 4,
+    MQVPN_SCHED_MINRTT = 0,
+    MQVPN_SCHED_WLB = 1,
+    MQVPN_SCHED_BACKUP = 2,
+    MQVPN_SCHED_BACKUP_FEC =
+        3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
+    MQVPN_SCHED_RAP = 4,
     MQVPN_SCHED_WLB_UDP_PIN = 5, /* WLB + 5-tuple pin for UDP flows. */
-    MQVPN_SCHED_WRTT        = 6, /* Weight+RTT: higher weight wins; equal-weight paths
-                                   * broken by min RTT. Overflow to lower-weight paths
-                                   * when cwnd-full. Set via mqvpn_path_desc_t.weight
-                                   * (like ip route nexthop weight N). Default: 1.
-                                   * Uplink weight is client-set (mqvpn_path_desc_t /
-                                   * mqvpn_client_set_path_weight()); downlink weight is
-                                   * set independently server-side via
-                                   * mqvpn_server_set_path_weight() — each side only
-                                   * schedules the packets *it* sends. */
-    MQVPN_SCHED_WRR         = 7, /* Weighted Round Robin: interleaves packets across
-                                   * all usable paths in proportion to weight (smooth
-                                   * WRR), unlike WRTT's single-path-until-cwnd-blocked
-                                   * bias. Set via mqvpn_path_desc_t.weight. Default: 1.
-                                   * Same client/server split as MQVPN_SCHED_WRTT above. */
-    MQVPN_SCHED_REDUNDANT   = 8, /* Broadcast every packet on every usable path
-                                   * (AVAILABLE and STANDBY alike). Maximizes loss
-                                   * resilience at the cost of bandwidth; intended for
-                                   * low-bitrate, loss/latency-critical traffic. */
-    MQVPN_SCHED_DSCP        = 9, /* Policy routing by DSCP class: packets carrying a
-                                   * DSCP codepoint (the inner IP header's traffic
-                                   * class, 1-63) are sent on the path(s) assigned
-                                   * that class via mqvpn_path_desc_t.dscp_mask /
-                                   * MQVPN_DSCP_BIT() (like 'ip rule ... fwmark N
-                                   * table T'); min RTT breaks ties between paths
-                                   * sharing a class. Untagged packets (DSCP 0, the
-                                   * default) and any class with no assigned path
-                                   * currently usable fall back to plain MinRTT
-                                   * across every path rather than stalling. Uplink
-                                   * assignment is client-set (mqvpn_path_desc_t /
-                                   * mqvpn_client_set_path_dscp_mask()); downlink
-                                   * assignment is set independently server-side via
-                                   * mqvpn_server_set_path_dscp_mask() — each side
-                                   * only schedules the packets *it* sends. */
+    MQVPN_SCHED_WRTT = 6,        /* Weight+RTT: higher weight wins; equal-weight paths
+                                  * broken by min RTT. Overflow to lower-weight paths
+                                  * when cwnd-full. Set via mqvpn_path_desc_t.weight
+                                  * (like ip route nexthop weight N). Default: 1.
+                                  * Uplink weight is client-set (mqvpn_path_desc_t /
+                                  * mqvpn_client_set_path_weight()); downlink weight is
+                                  * set independently server-side via
+                                  * mqvpn_server_set_path_weight() — each side only
+                                  * schedules the packets *it* sends. */
+    MQVPN_SCHED_WRR = 7,         /* Weighted Round Robin: interleaves packets across
+                                  * all usable paths in proportion to weight (smooth
+                                  * WRR), unlike WRTT's single-path-until-cwnd-blocked
+                                  * bias. Set via mqvpn_path_desc_t.weight. Default: 1.
+                                  * Same client/server split as MQVPN_SCHED_WRTT above. */
+    MQVPN_SCHED_REDUNDANT = 8,   /* Broadcast every packet on every usable path
+                                  * (AVAILABLE and STANDBY alike). Maximizes loss
+                                  * resilience at the cost of bandwidth; intended for
+                                  * low-bitrate, loss/latency-critical traffic. */
+    MQVPN_SCHED_DSCP = 9,        /* Policy routing by DSCP class: packets carrying a
+                                  * DSCP codepoint (the inner IP header's traffic
+                                  * class, 1-63) are sent on the path(s) assigned
+                                  * that class via mqvpn_path_desc_t.dscp_mask /
+                                  * MQVPN_DSCP_BIT() (like 'ip rule ... fwmark N
+                                  * table T'); min RTT breaks ties between paths
+                                  * sharing a class. Untagged packets (DSCP 0, the
+                                  * default) and any class with no assigned path
+                                  * currently usable fall back to plain MinRTT
+                                  * across every path rather than stalling. Uplink
+                                  * assignment is client-set (mqvpn_path_desc_t /
+                                  * mqvpn_client_set_path_dscp_mask()); downlink
+                                  * assignment is set independently server-side via
+                                  * mqvpn_server_set_path_dscp_mask() — each side
+                                  * only schedules the packets *it* sends. */
 } mqvpn_scheduler_t;
 
 /* Build a DSCP class bitmask for mqvpn_path_desc_t.dscp_mask /
@@ -295,9 +296,9 @@ typedef enum {
 } mqvpn_reorder_profile_t;
 
 typedef enum {
-    MQVPN_FEC_SCHEME_REED_SOLOMON      = 0,
-    MQVPN_FEC_SCHEME_XOR               = 1,
-    MQVPN_FEC_SCHEME_PACKET_MASK       = 2,
+    MQVPN_FEC_SCHEME_REED_SOLOMON = 0,
+    MQVPN_FEC_SCHEME_XOR = 1,
+    MQVPN_FEC_SCHEME_PACKET_MASK = 2,
     MQVPN_FEC_SCHEME_GALOIS_CALCULATION = 3,
 } mqvpn_fec_scheme_t;
 
@@ -532,7 +533,7 @@ typedef struct {
     uint32_t struct_size;
     mqvpn_path_handle_t handle;
     mqvpn_path_status_t status;
-    char name[16]; /* interface name */
+    char name[16];  /* interface name */
     uint32_t flags; /* MQVPN_PATH_FLAG_* bitmask (e.g. MQVPN_PATH_FLAG_BACKUP) */
     int srtt_ms;
     uint64_t bytes_tx;
@@ -1126,8 +1127,7 @@ MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle
  * (an explicit server-side call always overrides the client's report).
  */
 MQVPN_API int mqvpn_client_set_path_weight(mqvpn_client_t *client,
-                                            mqvpn_path_handle_t handle,
-                                            uint32_t weight);
+                                           mqvpn_path_handle_t handle, uint32_t weight);
 
 /**
  * Set the DSCP scheduler class bitmask for a path identified by its handle
@@ -1142,8 +1142,8 @@ MQVPN_API int mqvpn_client_set_path_weight(mqvpn_client_t *client,
  * only for pinning the server to a different mask than the client.
  */
 MQVPN_API int mqvpn_client_set_path_dscp_mask(mqvpn_client_t *client,
-                                               mqvpn_path_handle_t handle,
-                                               uint64_t dscp_mask);
+                                              mqvpn_path_handle_t handle,
+                                              uint64_t dscp_mask);
 
 /*
  * Drop a path slot on platform-detected removal (carrier loss, RTM_DELLINK,
@@ -1466,11 +1466,13 @@ MQVPN_API int mqvpn_server_set_path_dscp_mask(mqvpn_server_t *server, const char
  * user, with no separate action needed on the router — see
  * mqvpn_path_label.h's "Problem 3" and MQVPN_CAPSULE_PATH_LABEL_PUSH.
  */
-MQVPN_API int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *server, const char *user,
-                                                     const char *iface, uint32_t weight);
+MQVPN_API int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *server,
+                                                    const char *user, const char *iface,
+                                                    uint32_t weight);
 MQVPN_API int mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *server,
-                                                        const char *user, const char *iface,
-                                                        uint64_t dscp_mask);
+                                                       const char *user,
+                                                       const char *iface,
+                                                       uint64_t dscp_mask);
 
 /* ─── Utility API ─── */
 

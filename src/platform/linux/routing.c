@@ -42,9 +42,8 @@
 static void
 exec_ip(char *const argv[])
 {
-    static const char *const paths[] = {
-        "/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip", NULL
-    };
+    static const char *const paths[] = {"/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip",
+                                        "/bin/ip", NULL};
     execvp("ip", argv);
     for (int i = 0; paths[i]; i++)
         execv(paths[i], argv);
@@ -187,16 +186,19 @@ discover_route(const char *server_ip, sa_family_t af, const char *oif, char *gat
  * nexthops, falls back to the first nexthop found.
  * Returns 1 on success (gateway/iface filled), 0 on failure. */
 static int
-discover_route_from_show(const char *server_ip, sa_family_t af,
-                         char *gateway, size_t gw_len,
-                         char *iface,   size_t if_len,
+discover_route_from_show(const char *server_ip, sa_family_t af, char *gateway,
+                         size_t gw_len, char *iface, size_t if_len,
                          const char *want_iface)
 {
     int fds[2];
     if (pipe(fds) < 0) return 0;
 
     pid_t pid = fork();
-    if (pid < 0) { close(fds[0]); close(fds[1]); return 0; }
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return 0;
+    }
 
     if (pid == 0) {
         const char *v = (af == AF_INET6) ? "-6" : "-4";
@@ -231,12 +233,12 @@ discover_route_from_show(const char *server_ip, sa_family_t af,
      * We prefer the nexthop whose dev matches want_iface; if that is not
      * found we fall back to the first nexthop encountered.  Single-path
      * entries (no "nexthop" keyword) are handled by scanning the whole line. */
-    char pref_gw[INET6_ADDRSTRLEN]  = {0}; /* nexthop matching want_iface */
-    char pref_dev[IFNAMSIZ]         = {0};
+    char pref_gw[INET6_ADDRSTRLEN] = {0}; /* nexthop matching want_iface */
+    char pref_dev[IFNAMSIZ] = {0};
     char first_gw[INET6_ADDRSTRLEN] = {0}; /* first nexthop seen (fallback) */
-    char first_dev[IFNAMSIZ]        = {0};
-    char cur_gw[INET6_ADDRSTRLEN]   = {0};
-    char cur_dev[IFNAMSIZ]          = {0};
+    char first_dev[IFNAMSIZ] = {0};
+    char cur_gw[INET6_ADDRSTRLEN] = {0};
+    char cur_dev[IFNAMSIZ] = {0};
 
     char *saveptr = NULL;
     for (char *tok = strtok_r(out, " \t\r\n", &saveptr); tok;
@@ -245,11 +247,11 @@ discover_route_from_show(const char *server_ip, sa_family_t af,
             /* Commit the nexthop we just finished parsing */
             if (cur_dev[0]) {
                 if (!first_dev[0]) {
-                    snprintf(first_gw,  sizeof(first_gw),  "%s", cur_gw);
+                    snprintf(first_gw, sizeof(first_gw), "%s", cur_gw);
                     snprintf(first_dev, sizeof(first_dev), "%s", cur_dev);
                 }
                 if (!pref_dev[0] && want_iface && strcmp(cur_dev, want_iface) == 0) {
-                    snprintf(pref_gw,  sizeof(pref_gw),  "%s", cur_gw);
+                    snprintf(pref_gw, sizeof(pref_gw), "%s", cur_gw);
                     snprintf(pref_dev, sizeof(pref_dev), "%s", cur_dev);
                 }
             }
@@ -265,23 +267,23 @@ discover_route_from_show(const char *server_ip, sa_family_t af,
     /* Commit the last nexthop block (or single-path entry) */
     if (cur_dev[0]) {
         if (!first_dev[0]) {
-            snprintf(first_gw,  sizeof(first_gw),  "%s", cur_gw);
+            snprintf(first_gw, sizeof(first_gw), "%s", cur_gw);
             snprintf(first_dev, sizeof(first_dev), "%s", cur_dev);
         }
         if (!pref_dev[0] && want_iface && strcmp(cur_dev, want_iface) == 0) {
-            snprintf(pref_gw,  sizeof(pref_gw),  "%s", cur_gw);
+            snprintf(pref_gw, sizeof(pref_gw), "%s", cur_gw);
             snprintf(pref_dev, sizeof(pref_dev), "%s", cur_dev);
         }
     }
 
     /* Use preferred match; fall back to first nexthop if not found */
-    const char *use_gw  = pref_dev[0] ? pref_gw  : first_gw;
+    const char *use_gw = pref_dev[0] ? pref_gw : first_gw;
     const char *use_dev = pref_dev[0] ? pref_dev : first_dev;
 
     if (!use_dev[0]) return 0;
 
     snprintf(gateway, gw_len, "%s", use_gw);
-    snprintf(iface,   if_len,  "%s", use_dev);
+    snprintf(iface, if_len, "%s", use_dev);
     return 1;
 }
 
@@ -309,13 +311,12 @@ setup_routes(platform_ctx_t *p)
                 break;
             }
 
-            if (discover_route_from_show(p->server_ip_str, af,
-                                         p->orig_gateway, sizeof(p->orig_gateway),
-                                         p->orig_iface,   sizeof(p->orig_iface),
-                                         first_iface)) {
+            if (discover_route_from_show(p->server_ip_str, af, p->orig_gateway,
+                                         sizeof(p->orig_gateway), p->orig_iface,
+                                         sizeof(p->orig_iface), first_iface)) {
                 if (first_iface && strcmp(p->orig_iface, first_iface) == 0)
-                    LOG_INF("route lookup fallback via first path %s: gw=%s",
-                            first_iface, p->orig_gateway);
+                    LOG_INF("route lookup fallback via first path %s: gw=%s", first_iface,
+                            p->orig_gateway);
                 else
                     LOG_INF("route lookup fallback via first nexthop %s: gw=%s",
                             p->orig_iface, p->orig_gateway);
@@ -358,8 +359,7 @@ setup_routes(platform_ctx_t *p)
                         "falling back to first path iface %s",
                         p->server_ip_str, p->orig_iface);
             } else {
-                LOG_WRN("could not determine original iface for %s",
-                        p->server_ip_str);
+                LOG_WRN("could not determine original iface for %s", p->server_ip_str);
                 return -1;
             }
         }
@@ -402,14 +402,16 @@ setup_routes(platform_ctx_t *p)
                 LOG_WRN("failed to set catch-all routes via %s on %s", gw, p->tun.name);
             else
                 LOG_WRN("failed to set catch-all routes via %s", p->tun.name);
-            const char *u1[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
+            const char *u1[] = {"ip",  "route",     "del", "0.0.0.0/1",
+                                "dev", p->tun.name, NULL};
             const char *u2[] = {"ip",  "route",     "del", "128.0.0.0/1",
                                 "dev", p->tun.name, NULL};
             (void)run_ip_cmd(u1);
             (void)run_ip_cmd(u2);
             if (p->orig_gateway[0]) {
-                const char *u3[] = {"ip",  ip_flag,         "route", "del",         host_cidr,
-                                    "via", p->orig_gateway, "dev",   p->orig_iface, NULL};
+                const char *u3[] = {"ip",          ip_flag, "route",         "del",
+                                    host_cidr,     "via",   p->orig_gateway, "dev",
+                                    p->orig_iface, NULL};
                 (void)run_ip_cmd(u3);
             }
             return -1;
@@ -459,7 +461,7 @@ cleanup_routes(platform_ctx_t *p)
         p->routing6_configured = 0;
     }
 
-    const char *d3[]  = {"ip", "route", "del", "0.0.0.0/1",  "dev", p->tun.name, NULL};
+    const char *d3[] = {"ip", "route", "del", "0.0.0.0/1", "dev", p->tun.name, NULL};
     const char *d4[] = {"ip", "route", "del", "128.0.0.0/1", "dev", p->tun.name, NULL};
     (void)run_ip_cmd(d3);
     (void)run_ip_cmd(d4);

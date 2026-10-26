@@ -12,9 +12,9 @@
 #include "path_rotation.h"
 #include "path_error_policy.h"
 #include "mqvpn_scheduler.h"
-#include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
+#include "mqvpn_sched_names.h"     /* mqvpn_reinj_to_name for the startup log */
 #include "mqvpn_xquic_err_names.h" /* annotate |err:NNN| in cb_xqc_log_write */
-#include "auth.h" /* mqvpn_auth_debug_fingerprint for the startup log */
+#include "auth.h"                  /* mqvpn_auth_debug_fingerprint for the startup log */
 #include "cert_pin.h"
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
@@ -736,8 +736,8 @@ get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
      * whole connection (xquic refused the PATH_ABANDON, so the slot stays
      * xquic-live), and the closing frames must still reach the server —
      * fall through to a live sibling. */
-    int closing_removed_initial = p && xqc_path_id == 0 && !p->transport_attached &&
-                                  c->initial_path_removed;
+    int closing_removed_initial =
+        p && xqc_path_id == 0 && !p->transport_attached && c->initial_path_removed;
     if (p && !closing_removed_initial)
         return p; /* even if dropped: caller checks transport_attached */
     int pidx = c->primary_path_idx;
@@ -1317,7 +1317,7 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     static const char prefix[] = "[xquic] ";
     memcpy(msg, prefix, sizeof(prefix) - 1);
     mqvpn_xquic_annotate_err_codes((const char *)buf, size, msg + sizeof(prefix) - 1,
-                                    sizeof(msg) - (sizeof(prefix) - 1));
+                                   sizeof(msg) - (sizeof(prefix) - 1));
     c->cbs.log(ml, msg, c->user_ctx);
 }
 
@@ -2186,11 +2186,13 @@ process_capsules(cli_stream_t *stream)
                                                             p->xqc_path_id, dscp_mask);
                             }
                         }
-                        LOG_I(c, "adopted server-pushed path_label: iface=%s weight=%u "
-                                 "dscp_mask=%" PRIu64,
+                        LOG_I(c,
+                              "adopted server-pushed path_label: iface=%s weight=%u "
+                              "dscp_mask=%" PRIu64,
                               iface, weight, dscp_mask);
                     } else {
-                        LOG_D(c, "server-pushed path_label for unknown iface=%s (ignored)",
+                        LOG_D(c,
+                              "server-pushed path_label for unknown iface=%s (ignored)",
                               iface);
                     }
                 }
@@ -3096,18 +3098,19 @@ client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *ifac
                                     weight, dscp_mask);
     if (n <= 0) return;
 
-    uint8_t cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
+    uint8_t
+        cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
     size_t cap_written = 0;
-    xqc_int_t xret = xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
-                                               MQVPN_CAPSULE_PATH_LABEL, label_payload,
-                                               (size_t)n);
+    xqc_int_t xret =
+        xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
+                                  MQVPN_CAPSULE_PATH_LABEL, label_payload, (size_t)n);
     if (xret != XQC_OK) {
         LOG_W(c, "path_label capsule encode failed: %d", xret);
         return;
     }
 
-    ssize_t sret = xqc_h3_request_send_body(c->conn->masque_request, cap_buf,
-                                            cap_written, 0);
+    ssize_t sret =
+        xqc_h3_request_send_body(c->conn->masque_request, cap_buf, cap_written, 0);
     if (sret < 0) {
         LOG_W(c, "path_label capsule send failed: path_id=%" PRIu64 " iface=%s ret=%zd",
               path_id, iface, sret);
@@ -4277,7 +4280,8 @@ path_xquic_abandon_due(const path_entry_t *p)
 }
 
 int
-mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint32_t weight)
+mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                             uint32_t weight)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -4296,7 +4300,8 @@ mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint
          * already-live path needs its own fresh capsule or the server
          * keeps applying the stale value it saw at activation. */
         if (p->name[0]) {
-            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight, p->dscp_mask);
+            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight,
+                                       p->dscp_mask);
         }
     }
     return MQVPN_OK;
@@ -4304,7 +4309,7 @@ mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint
 
 int
 mqvpn_client_set_path_dscp_mask(mqvpn_client_t *c, mqvpn_path_handle_t handle,
-                                 uint64_t dscp_mask)
+                                uint64_t dscp_mask)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -4318,7 +4323,8 @@ mqvpn_client_set_path_dscp_mask(mqvpn_client_t *c, mqvpn_path_handle_t handle,
         xqc_conn_set_path_dscp_mask(c->engine, &c->conn->cid, p->xqc_path_id, dscp_mask);
         /* Re-announce — same reasoning as mqvpn_client_set_path_weight() above. */
         if (p->name[0]) {
-            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight, p->dscp_mask);
+            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight,
+                                       p->dscp_mask);
         }
     }
     return MQVPN_OK;
@@ -5574,8 +5580,8 @@ mqvpn_client_get_info(const mqvpn_client_t *c, mqvpn_client_info_t *out)
         out->bytes_rx += st.paths_info[p].path_recv_bytes;
 
     int np = 0;
-    for (uint32_t p = 0;
-         st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS; p++) {
+    for (uint32_t p = 0; st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS;
+         p++) {
         const xqc_path_metrics_t *pm = &st.paths_info[p];
 
         mqvpn_path_stats_t *ps = &out->paths[np];
@@ -5615,7 +5621,8 @@ mqvpn_client_get_reinject(const mqvpn_client_t *c, mqvpn_internal_client_reinjec
 
     xqc_conn_stats_t st = xqc_conn_get_stats(c->engine, &c->conn->cid);
     for (uint32_t p = 0;
-         st.paths_info && p < st.paths_info_count && out->n_paths < MQVPN_MAX_PATHS; p++) {
+         st.paths_info && p < st.paths_info_count && out->n_paths < MQVPN_MAX_PATHS;
+         p++) {
         const xqc_path_metrics_t *pm = &st.paths_info[p];
         out->paths[out->n_paths].path_id = pm->path_id;
         out->paths[out->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;

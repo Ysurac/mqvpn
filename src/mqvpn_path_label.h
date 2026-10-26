@@ -156,8 +156,7 @@ int mqvpn_path_label_encode(uint8_t *buf, size_t buf_len, uint64_t path_id,
  * treat this the same as an unrecognized capsule: skip and continue —
  * never tear down the connection over it). */
 int mqvpn_path_label_decode(const uint8_t *payload, size_t payload_len,
-                            uint64_t *path_id_out, char *iface_out,
-                            size_t iface_out_cap, uint32_t *weight_out,
-                            uint64_t *dscp_mask_out);
+                            uint64_t *path_id_out, char *iface_out, size_t iface_out_cap,
+                            uint32_t *weight_out, uint64_t *dscp_mask_out);
 
 #endif /* MQVPN_PATH_LABEL_H */

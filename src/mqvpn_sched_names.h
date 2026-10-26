@@ -31,16 +31,16 @@
  * (verified against src/main.c, src/mqvpn_config.c as of this table's
  * introduction) — if an alias is ever added, add a row with the same
  * canonical name reused for to_name() and a distinct string for from_name(). */
-#define MQVPN_SCHED_LIST(X)                 \
-    X(MQVPN_SCHED_MINRTT, "minrtt")         \
-    X(MQVPN_SCHED_WLB, "wlb")               \
-    X(MQVPN_SCHED_BACKUP, "backup")         \
-    X(MQVPN_SCHED_BACKUP_FEC, "backup_fec") \
-    X(MQVPN_SCHED_RAP, "rap")               \
+#define MQVPN_SCHED_LIST(X)                   \
+    X(MQVPN_SCHED_MINRTT, "minrtt")           \
+    X(MQVPN_SCHED_WLB, "wlb")                 \
+    X(MQVPN_SCHED_BACKUP, "backup")           \
+    X(MQVPN_SCHED_BACKUP_FEC, "backup_fec")   \
+    X(MQVPN_SCHED_RAP, "rap")                 \
     X(MQVPN_SCHED_WLB_UDP_PIN, "wlb_udp_pin") \
-    X(MQVPN_SCHED_WRTT, "wrtt")             \
-    X(MQVPN_SCHED_WRR, "wrr")               \
-    X(MQVPN_SCHED_REDUNDANT, "redundant")   \
+    X(MQVPN_SCHED_WRTT, "wrtt")               \
+    X(MQVPN_SCHED_WRR, "wrr")                 \
+    X(MQVPN_SCHED_REDUNDANT, "redundant")     \
     X(MQVPN_SCHED_DSCP, "dscp")
 
 #define MQVPN_CC_LIST(X)               \

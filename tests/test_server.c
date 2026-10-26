@@ -746,7 +746,8 @@ TEST(server_set_path_weight_no_matching_session)
 
 TEST(server_set_path_dscp_mask_null_args)
 {
-    ASSERT_EQ(mqvpn_server_set_path_dscp_mask(NULL, "alice", 0, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask(NULL, "alice", 0, 1),
+              MQVPN_ERR_INVALID_ARG);
 
     reset_mocks();
     mqvpn_config_t *cfg = make_server_config();
@@ -802,10 +803,12 @@ TEST(server_set_path_weight_by_iface_null_args)
 
     ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, NULL, "wlan0", 1),
               MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "", "wlan0", 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "", "wlan0", 1),
+              MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", NULL, 1),
               MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", "", 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", "", 1),
+              MQVPN_ERR_INVALID_ARG);
     /* 16 chars — one past MQVPN_PATH_LABEL_IFACE_MAX (15) */
     ASSERT_EQ(mqvpn_server_set_path_weight_by_iface(s, "alice", "abcdefghijklmnop", 1),
               MQVPN_ERR_INVALID_ARG);
@@ -853,9 +856,8 @@ TEST(server_set_path_dscp_mask_by_iface_null_args)
               MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "", 1),
               MQVPN_ERR_INVALID_ARG);
-    ASSERT_EQ(
-        mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "abcdefghijklmnop", 1),
-        MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "abcdefghijklmnop", 1),
+              MQVPN_ERR_INVALID_ARG);
 
     mqvpn_server_destroy(s);
 }
@@ -872,9 +874,9 @@ TEST(server_set_path_dscp_mask_by_iface_no_matching_session)
     ASSERT_NOT_NULL(s);
     ASSERT_EQ(mqvpn_server_start(s), MQVPN_OK);
 
-    ASSERT_EQ(mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "wlan0",
-                                                        MQVPN_DSCP_BIT(46)),
-              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(
+        mqvpn_server_set_path_dscp_mask_by_iface(s, "alice", "wlan0", MQVPN_DSCP_BIT(46)),
+        MQVPN_ERR_INVALID_ARG);
 
     mqvpn_server_destroy(s);
 }
@@ -2685,9 +2687,9 @@ TEST(server_remove_user_releases_pinned_ip)
  */
 
 typedef struct {
-    int               fd;
+    int fd;
     struct sockaddr_in peer;
-    socklen_t          peer_len;
+    socklen_t peer_len;
 } probe_ctx_t;
 
 static ssize_t
@@ -2699,12 +2701,19 @@ probe_write_socket(const unsigned char *buf, size_t size, const struct sockaddr 
 }
 
 static void
-probe_set_event_timer(xqc_msec_t wake_after, void *ud) { (void)ud; (void)wake_after; }
+probe_set_event_timer(xqc_msec_t wake_after, void *ud)
+{
+    (void)ud;
+    (void)wake_after;
+}
 
 static void
 probe_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *ud)
 {
-    (void)lvl; (void)buf; (void)size; (void)ud;
+    (void)lvl;
+    (void)buf;
+    (void)size;
+    (void)ud;
 }
 
 TEST(server_no_crash_on_non_h3_probe)
@@ -2758,27 +2767,27 @@ TEST(server_no_crash_on_non_h3_probe)
      * the server does not support.  This exercises the path where the server
      * creates a QUIC connection but H3 is never initialised because ALPN
      * selection returns SSL_TLSEXT_ERR_NOACK instead of matching "h3". */
-    probe_ctx_t probe = { .fd = probe_fd };
+    probe_ctx_t probe = {.fd = probe_fd};
     memcpy(&probe.peer, &svr_addr, sizeof(svr_addr));
     probe.peer_len = sizeof(svr_addr);
 
     xqc_engine_ssl_config_t probe_ssl = {0};
     probe_ssl.ciphers = XQC_TLS_CIPHERS;
-    probe_ssl.groups  = XQC_TLS_GROUPS;
+    probe_ssl.groups = XQC_TLS_GROUPS;
 
     xqc_engine_callback_t probe_eng_cbs = {
         .set_event_timer = probe_set_event_timer,
-        .log_callbacks   = { .xqc_log_write_err  = probe_log_write,
-                             .xqc_log_write_stat = probe_log_write },
+        .log_callbacks = {.xqc_log_write_err = probe_log_write,
+                          .xqc_log_write_stat = probe_log_write},
     };
-    xqc_transport_callbacks_t probe_tcbs = { .write_socket = probe_write_socket };
+    xqc_transport_callbacks_t probe_tcbs = {.write_socket = probe_write_socket};
 
     xqc_config_t xcfg;
     xqc_engine_get_default_config(&xcfg, XQC_ENGINE_CLIENT);
     xcfg.cfg_log_level = XQC_LOG_ERROR;
 
     xqc_engine_t *probe_engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xcfg, &probe_ssl,
-                                                    &probe_eng_cbs, &probe_tcbs, &probe);
+                                                   &probe_eng_cbs, &probe_tcbs, &probe);
     ASSERT_NOT_NULL(probe_engine);
 
     /* Register "probe" as a no-op ALPN so xqc_connect accepts it.  The server
@@ -2797,10 +2806,9 @@ TEST(server_no_crash_on_non_h3_probe)
     css.cert_verify_flag = XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
 
     /* Connect with "probe" ALPN — deliberately not "h3" */
-    const xqc_cid_t *pcid = xqc_connect(probe_engine, &cs, NULL, 0,
-                                         "127.0.0.1", 0, &css,
-                                         (struct sockaddr *)&svr_addr, sizeof(svr_addr),
-                                         "probe", &probe);
+    const xqc_cid_t *pcid =
+        xqc_connect(probe_engine, &cs, NULL, 0, "127.0.0.1", 0, &css,
+                    (struct sockaddr *)&svr_addr, sizeof(svr_addr), "probe", &probe);
     ASSERT_NOT_NULL(pcid);
 
     /* Pump: probe → server → server tries to respond via cb_write_socket.
@@ -2821,8 +2829,8 @@ TEST(server_no_crash_on_non_h3_probe)
             ssize_t n = recvfrom(svr_fd, buf, sizeof(buf), MSG_DONTWAIT,
                                  (struct sockaddr *)&from, &from_len);
             if (n <= 0) break;
-            mqvpn_server_on_socket_recv(svr, buf, (size_t)n,
-                                        (struct sockaddr *)&from, from_len);
+            mqvpn_server_on_socket_recv(svr, buf, (size_t)n, (struct sockaddr *)&from,
+                                        from_len);
         }
 
         for (;;) {
@@ -2839,8 +2847,8 @@ TEST(server_no_crash_on_non_h3_probe)
         mqvpn_server_tick(svr);
 
         struct pollfd pfds[2] = {
-            { .fd = svr_fd,   .events = POLLIN },
-            { .fd = probe_fd, .events = POLLIN },
+            {.fd = svr_fd, .events = POLLIN},
+            {.fd = probe_fd, .events = POLLIN},
         };
         poll(pfds, 2, 5);
     }

@@ -148,7 +148,7 @@ struct mqvpn_config_s {
     mqvpn_scheduler_t scheduler;
     int allow_client_scheduler;   /* server: honour a client scheduler request */
     int request_server_scheduler; /* client: ask the server to use our scheduler */
-    mqvpn_cc_t        cc;
+    mqvpn_cc_t cc;
     int fec_enable;
     mqvpn_fec_scheme_t fec_scheme;
 
@@ -260,13 +260,13 @@ struct mqvpn_config_s {
      * array-of-struct, for the same reason those are parallel arrays.
      * Consulted in mqvpn_server.c's svr_connect_ip_on_body() the first time
      * a connection announces a PATH_LABEL for a matching iface. */
-    char     path_policy_user[MQVPN_MAX_PATH_POLICY][64];
-    char     path_policy_iface[MQVPN_MAX_PATH_POLICY][16]; /* MQVPN_PATH_LABEL_IFACE_MAX+1 */
-    int      path_policy_has_weight[MQVPN_MAX_PATH_POLICY];
+    char path_policy_user[MQVPN_MAX_PATH_POLICY][64];
+    char path_policy_iface[MQVPN_MAX_PATH_POLICY][16]; /* MQVPN_PATH_LABEL_IFACE_MAX+1 */
+    int path_policy_has_weight[MQVPN_MAX_PATH_POLICY];
     uint32_t path_policy_weight[MQVPN_MAX_PATH_POLICY];
-    int      path_policy_has_dscp_mask[MQVPN_MAX_PATH_POLICY];
+    int path_policy_has_dscp_mask[MQVPN_MAX_PATH_POLICY];
     uint64_t path_policy_dscp_mask[MQVPN_MAX_PATH_POLICY];
-    int      n_path_policy;
+    int n_path_policy;
 };
 
 /* ─── State transition validation (M0-5) ─── */

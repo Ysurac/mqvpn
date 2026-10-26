@@ -28,8 +28,12 @@
 /* ── Concrete bodies for the two opaque server/client types ─────────────── *
  * libmqvpn.h forward-declares these as "struct mqvpn_server_s" etc.        *
  * We only use them via pointer in dispatch(), so a dummy body suffices.     */
-struct mqvpn_server_s { int _; };
-struct mqvpn_client_s { int _; };
+struct mqvpn_server_s {
+    int _;
+};
+struct mqvpn_client_s {
+    int _;
+};
 
 /* ── Headers (declares types and API functions) ──────────────────────────── */
 #include "libmqvpn.h"
@@ -37,22 +41,27 @@ struct mqvpn_client_s { int _; };
 #include "log.h"
 
 /* ── Stub log functions (replaces log.c) ────────────────────────────────── */
-void mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...)
+void
+mqvpn_log(mqvpn_log_level_t level, const char *fmt, ...)
 {
     (void)level;
     (void)fmt;
 }
-void mqvpn_log_set_level(mqvpn_log_level_t level) { (void)level; }
+void
+mqvpn_log_set_level(mqvpn_log_level_t level)
+{
+    (void)level;
+}
 
 /* ── Stub state ──────────────────────────────────────────────────────────── */
 static mqvpn_internal_fec_entry_t g_fec_entries[MQVPN_MAX_USERS];
 static int g_fec_n = 0; /* entry count; -1 = FEC not built */
 
 /* Configurable return values for user management stubs */
-static int g_add_user_rc      = MQVPN_OK;
-static int g_set_fixed_ip_rc  = MQVPN_OK;
-static int g_remove_user_rc   = MQVPN_OK;
-static int g_list_users_n     = 0;
+static int g_add_user_rc = MQVPN_OK;
+static int g_set_fixed_ip_rc = MQVPN_OK;
+static int g_remove_user_rc = MQVPN_OK;
+static int g_list_users_n = 0;
 static char g_list_users_names[MQVPN_MAX_USERS][64];
 
 /* Configurable state for stats/status/FEC/reorder stubs */
@@ -77,7 +86,8 @@ static int g_set_fixed_ip_calls = 0;
 static int g_remove_user_calls = 0;
 static char g_last_add_name[128];
 
-int mqvpn_server_add_user(mqvpn_server_t *s, const char *n, const char *k)
+int
+mqvpn_server_add_user(mqvpn_server_t *s, const char *n, const char *k)
 {
     (void)s;
     (void)k;
@@ -86,13 +96,27 @@ int mqvpn_server_add_user(mqvpn_server_t *s, const char *n, const char *k)
     return g_add_user_rc;
 }
 
-int mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *n, const char *ip)
-{ (void)s; (void)n; (void)ip; g_set_fixed_ip_calls++; return g_set_fixed_ip_rc; }
+int
+mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *n, const char *ip)
+{
+    (void)s;
+    (void)n;
+    (void)ip;
+    g_set_fixed_ip_calls++;
+    return g_set_fixed_ip_rc;
+}
 
-int mqvpn_server_remove_user(mqvpn_server_t *s, const char *n)
-{ (void)s; (void)n; g_remove_user_calls++; return g_remove_user_rc; }
+int
+mqvpn_server_remove_user(mqvpn_server_t *s, const char *n)
+{
+    (void)s;
+    (void)n;
+    g_remove_user_calls++;
+    return g_remove_user_rc;
+}
 
-int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
+int
+mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
 {
     (void)s;
     int n = g_list_users_n < max ? g_list_users_n : max;
@@ -101,7 +125,8 @@ int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
     return n;
 }
 
-int mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *st)
+int
+mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *st)
 {
     (void)s;
     memset(st, 0, sizeof(*st));
@@ -113,12 +138,23 @@ int mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *st)
     return MQVPN_OK;
 }
 
-int mqvpn_server_get_n_clients(const mqvpn_server_t *s) { (void)s; return g_n_clients; }
+int
+mqvpn_server_get_n_clients(const mqvpn_server_t *s)
+{
+    (void)s;
+    return g_n_clients;
+}
 
-uint64_t mqvpn_server_uptime_seconds(const mqvpn_server_t *s) { (void)s; return g_uptime; }
+uint64_t
+mqvpn_server_uptime_seconds(const mqvpn_server_t *s)
+{
+    (void)s;
+    return g_uptime;
+}
 
-int mqvpn_server_get_client_info(const mqvpn_server_t *s,
-                                  mqvpn_client_info_t *out, int max, int *n)
+int
+mqvpn_server_get_client_info(const mqvpn_server_t *s, mqvpn_client_info_t *out, int max,
+                             int *n)
 {
     (void)s;
     int nn = g_client_info_n < max ? g_client_info_n : max;
@@ -128,13 +164,24 @@ int mqvpn_server_get_client_info(const mqvpn_server_t *s,
     return MQVPN_OK;
 }
 
-const char *mqvpn_version_string(void) { return "test"; }
+const char *
+mqvpn_version_string(void)
+{
+    return "test";
+}
 
-const char *mqvpn_server_scheduler_label(const mqvpn_server_t *s)
-{ (void)s; return "none"; }
+const char *
+mqvpn_server_scheduler_label(const mqvpn_server_t *s)
+{
+    (void)s;
+    return "none";
+}
 
-const char *mqvpn_path_state_label(int state)
-{ return state == 2 ? "active" : "validating"; }
+const char *
+mqvpn_path_state_label(int state)
+{
+    return state == 2 ? "active" : "validating";
+}
 
 int
 mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
@@ -147,9 +194,9 @@ mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
     return n;
 }
 
-int mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s,
-                                       const char *user,
-                                       mqvpn_internal_fec_stats_t *out)
+int
+mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s, const char *user,
+                                  mqvpn_internal_fec_stats_t *out)
 {
     (void)s;
     (void)user;
@@ -157,8 +204,9 @@ int mqvpn_server_get_client_fec_stats(const mqvpn_server_t *s,
     return g_client_fec_rc;
 }
 
-int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
-                                    mqvpn_internal_fec_entry_t *out, int max)
+int
+mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s, mqvpn_internal_fec_entry_t *out,
+                               int max)
 {
     (void)s;
     if (g_fec_n < 0) return -1;
@@ -169,7 +217,8 @@ int mqvpn_server_get_all_fec_stats(const mqvpn_server_t *s,
 
 static uint64_t g_reorder_max_us = 0; /* residence_max_us the getter reports */
 
-int mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_t *out)
+int
+mqvpn_server_get_reorder_stats(const mqvpn_server_t *s, mqvpn_reorder_stats_t *out)
 {
     (void)s;
     if (out) {
@@ -188,11 +237,13 @@ static char g_srv_set_weight_user[64];
 static uint64_t g_srv_set_weight_path_id;
 static uint32_t g_srv_set_weight_weight;
 
-int mqvpn_server_set_path_weight(mqvpn_server_t *s, const char *user, uint64_t path_id,
-                                 uint32_t weight)
+int
+mqvpn_server_set_path_weight(mqvpn_server_t *s, const char *user, uint64_t path_id,
+                             uint32_t weight)
 {
     (void)s;
-    snprintf(g_srv_set_weight_user, sizeof(g_srv_set_weight_user), "%s", user ? user : "");
+    snprintf(g_srv_set_weight_user, sizeof(g_srv_set_weight_user), "%s",
+             user ? user : "");
     g_srv_set_weight_path_id = path_id;
     g_srv_set_weight_weight = weight;
     return g_srv_set_weight_rc;
@@ -203,8 +254,9 @@ static char g_srv_set_dscp_mask_user[64];
 static uint64_t g_srv_set_dscp_mask_path_id;
 static uint64_t g_srv_set_dscp_mask_mask;
 
-int mqvpn_server_set_path_dscp_mask(mqvpn_server_t *s, const char *user, uint64_t path_id,
-                                    uint64_t dscp_mask)
+int
+mqvpn_server_set_path_dscp_mask(mqvpn_server_t *s, const char *user, uint64_t path_id,
+                                uint64_t dscp_mask)
 {
     (void)s;
     snprintf(g_srv_set_dscp_mask_user, sizeof(g_srv_set_dscp_mask_user), "%s",
@@ -221,8 +273,9 @@ static char g_srv_set_weight_iface_user[64];
 static char g_srv_set_weight_iface_iface[32];
 static uint32_t g_srv_set_weight_iface_weight;
 
-int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user,
-                                          const char *iface, uint32_t weight)
+int
+mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *s, const char *user,
+                                      const char *iface, uint32_t weight)
 {
     (void)s;
     snprintf(g_srv_set_weight_iface_user, sizeof(g_srv_set_weight_iface_user), "%s",
@@ -250,14 +303,15 @@ static char g_srv_set_dscp_mask_iface_user[64];
 static char g_srv_set_dscp_mask_iface_iface[32];
 static uint64_t g_srv_set_dscp_mask_iface_mask;
 
-int mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user,
-                                             const char *iface, uint64_t dscp_mask)
+int
+mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user,
+                                         const char *iface, uint64_t dscp_mask)
 {
     (void)s;
     snprintf(g_srv_set_dscp_mask_iface_user, sizeof(g_srv_set_dscp_mask_iface_user), "%s",
              user ? user : "");
-    snprintf(g_srv_set_dscp_mask_iface_iface, sizeof(g_srv_set_dscp_mask_iface_iface), "%s",
-             iface ? iface : "");
+    snprintf(g_srv_set_dscp_mask_iface_iface, sizeof(g_srv_set_dscp_mask_iface_iface),
+             "%s", iface ? iface : "");
     g_srv_set_dscp_mask_iface_mask = dscp_mask;
     return g_srv_set_dscp_mask_iface_rc;
 }
@@ -272,45 +326,68 @@ static uint64_t g_cli_uptime = 0;
 static mqvpn_client_state_t g_cli_state = MQVPN_STATE_IDLE;
 static int g_cli_stats_rc = MQVPN_OK;
 static mqvpn_stats_t g_cli_stats_tmpl;
-static int g_cli_info_rc = 0;        /* 0 = not connected, 1 = filled */
+static int g_cli_info_rc = 0; /* 0 = not connected, 1 = filled */
 static mqvpn_client_info_t g_cli_info_tmpl;
-static int g_cli_reinject_rc = 0;    /* 0 = not connected, 1 = filled */
+static int g_cli_reinject_rc = 0; /* 0 = not connected, 1 = filled */
 static mqvpn_internal_client_reinject_t g_cli_reinject_tmpl;
-static int g_cli_fec_rc = -1;        /* -1 = not built, 0 = not connected, 1 = filled */
+static int g_cli_fec_rc = -1; /* -1 = not built, 0 = not connected, 1 = filled */
 static mqvpn_internal_fec_stats_t g_cli_fec_tmpl;
 static int g_cli_reorder_rc = 0;
 static mqvpn_reorder_stats_t g_cli_reorder_tmpl;
 
-const char *mqvpn_client_scheduler_label(const mqvpn_client_t *c)
-{ (void)c; return g_cli_scheduler_label; }
-
-uint64_t mqvpn_client_uptime_seconds(const mqvpn_client_t *c)
-{ (void)c; return g_cli_uptime; }
-
-mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *c)
-{ (void)c; return g_cli_state; }
-
-int mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
-{ (void)c; *out = g_cli_stats_tmpl; return g_cli_stats_rc; }
-
-int mqvpn_client_get_info(const mqvpn_client_t *c, mqvpn_client_info_t *out)
+const char *
+mqvpn_client_scheduler_label(const mqvpn_client_t *c)
 {
     (void)c;
-    if (g_cli_info_rc == 1) *out = g_cli_info_tmpl;
-    else memset(out, 0, sizeof(*out));
+    return g_cli_scheduler_label;
+}
+
+uint64_t
+mqvpn_client_uptime_seconds(const mqvpn_client_t *c)
+{
+    (void)c;
+    return g_cli_uptime;
+}
+
+mqvpn_client_state_t
+mqvpn_client_get_state(const mqvpn_client_t *c)
+{
+    (void)c;
+    return g_cli_state;
+}
+
+int
+mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
+{
+    (void)c;
+    *out = g_cli_stats_tmpl;
+    return g_cli_stats_rc;
+}
+
+int
+mqvpn_client_get_info(const mqvpn_client_t *c, mqvpn_client_info_t *out)
+{
+    (void)c;
+    if (g_cli_info_rc == 1)
+        *out = g_cli_info_tmpl;
+    else
+        memset(out, 0, sizeof(*out));
     return g_cli_info_rc;
 }
 
-int mqvpn_client_get_reinject(const mqvpn_client_t *c,
-                              mqvpn_internal_client_reinject_t *out)
+int
+mqvpn_client_get_reinject(const mqvpn_client_t *c, mqvpn_internal_client_reinject_t *out)
 {
     (void)c;
-    if (g_cli_reinject_rc == 1) *out = g_cli_reinject_tmpl;
-    else out->n_paths = 0;
+    if (g_cli_reinject_rc == 1)
+        *out = g_cli_reinject_tmpl;
+    else
+        out->n_paths = 0;
     return g_cli_reinject_rc;
 }
 
-int mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats_t *out)
+int
+mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats_t *out)
 {
     (void)c;
     memset(out, 0, sizeof(*out));
@@ -318,7 +395,8 @@ int mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats
     return g_cli_fec_rc;
 }
 
-int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c, mqvpn_reorder_stats_t *out)
+int
+mqvpn_client_get_reorder_stats(const mqvpn_client_t *c, mqvpn_reorder_stats_t *out)
 {
     (void)c;
     if (out) *out = g_cli_reorder_tmpl;
@@ -329,20 +407,32 @@ int mqvpn_client_get_reorder_stats(const mqvpn_client_t *c, mqvpn_reorder_stats_
 #include "platform_internal.h"
 
 /* Configurable return values for path management stubs */
-static int g_add_path_rc          = 0;
-static int g_remove_path_rc       = 0;
-static int g_set_path_weight_rc   = 0;
+static int g_add_path_rc = 0;
+static int g_remove_path_rc = 0;
+static int g_set_path_weight_rc = 0;
 static int g_set_path_dscp_mask_rc = 0;
-static int g_list_paths_n         = 0;
+static int g_list_paths_n = 0;
 static char g_list_paths_names[MQVPN_MAX_PATHS][IFNAMSIZ];
 
-int platform_add_path(platform_ctx_t *p, const char *iface, int backup)
-{ (void)p; (void)iface; (void)backup; return g_add_path_rc; }
+int
+platform_add_path(platform_ctx_t *p, const char *iface, int backup)
+{
+    (void)p;
+    (void)iface;
+    (void)backup;
+    return g_add_path_rc;
+}
 
-int platform_remove_path(platform_ctx_t *p, const char *iface)
-{ (void)p; (void)iface; return g_remove_path_rc; }
+int
+platform_remove_path(platform_ctx_t *p, const char *iface)
+{
+    (void)p;
+    (void)iface;
+    return g_remove_path_rc;
+}
 
-int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
+int
+platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
 {
     (void)p;
     int n = g_list_paths_n < max ? g_list_paths_n : max;
@@ -351,17 +441,29 @@ int platform_list_paths(platform_ctx_t *p, char names[][IFNAMSIZ], int max)
     return n;
 }
 
-int platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight)
-{ (void)p; (void)iface; (void)weight; return g_set_path_weight_rc; }
+int
+platform_set_path_weight(platform_ctx_t *p, const char *iface, uint32_t weight)
+{
+    (void)p;
+    (void)iface;
+    (void)weight;
+    return g_set_path_weight_rc;
+}
 
-int platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_mask)
-{ (void)p; (void)iface; (void)dscp_mask; return g_set_path_dscp_mask_rc; }
+int
+platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_mask)
+{
+    (void)p;
+    (void)iface;
+    (void)dscp_mask;
+    return g_set_path_dscp_mask_rc;
+}
 
 /* ── Pull in the implementation under test ──────────────────────────────── */
 #include "../src/platform/linux/control_socket.c"
 
 /* ── Test infrastructure ─────────────────────────────────────────────────── */
-static int g_run    = 0;
+static int g_run = 0;
 static int g_passed = 0;
 
 #define TEST(name)                 \
@@ -376,22 +478,23 @@ static int g_passed = 0;
     }                              \
     static void test_##name(void)
 
-#define ASSERT_STR_EQ(a, b)                                           \
-    do {                                                              \
-        if (strcmp((a), (b)) != 0) {                                  \
-            printf("FAIL\n    %s:%d:\n      got:  \"%s\"\n"           \
-                   "      want: \"%s\"\n", __FILE__, __LINE__, (a), (b)); \
-            exit(1);                                                   \
-        }                                                             \
+#define ASSERT_STR_EQ(a, b)                                 \
+    do {                                                    \
+        if (strcmp((a), (b)) != 0) {                        \
+            printf("FAIL\n    %s:%d:\n      got:  \"%s\"\n" \
+                   "      want: \"%s\"\n",                  \
+                   __FILE__, __LINE__, (a), (b));           \
+            exit(1);                                        \
+        }                                                   \
     } while (0)
 
-#define ASSERT_CONTAINS(haystack, needle)                                  \
-    do {                                                                   \
-        if (!strstr((haystack), (needle))) {                               \
-            printf("FAIL\n    %s:%d: \"%s\" not found in \"%s\"\n",       \
-                   __FILE__, __LINE__, (needle), (haystack));              \
-            exit(1);                                                       \
-        }                                                                  \
+#define ASSERT_CONTAINS(haystack, needle)                                               \
+    do {                                                                                \
+        if (!strstr((haystack), (needle))) {                                            \
+            printf("FAIL\n    %s:%d: \"%s\" not found in \"%s\"\n", __FILE__, __LINE__, \
+                   (needle), (haystack));                                               \
+            exit(1);                                                                    \
+        }                                                                               \
     } while (0)
 
 /* Stand-in for the platform's transport getter (ctrl_rx_stats_fn). Non-zero
@@ -461,13 +564,13 @@ TEST(get_all_fec_stats_one_entry)
     g_fec_n = 1;
     memset(g_fec_entries, 0, sizeof(g_fec_entries));
     strncpy(g_fec_entries[0].user, "alice", sizeof(g_fec_entries[0].user) - 1);
-    g_fec_entries[0].stats.enable_fec        = 1;
-    g_fec_entries[0].stats.mp_state          = 1;
-    g_fec_entries[0].stats.mp_state_label    = "active_with_standby";
-    g_fec_entries[0].stats.fec_send_cnt      = 42;
-    g_fec_entries[0].stats.fec_recover_cnt   = 17;
-    g_fec_entries[0].stats.lost_dgram_cnt    = 3;
-    g_fec_entries[0].stats.total_app_bytes   = 9000;
+    g_fec_entries[0].stats.enable_fec = 1;
+    g_fec_entries[0].stats.mp_state = 1;
+    g_fec_entries[0].stats.mp_state_label = "active_with_standby";
+    g_fec_entries[0].stats.fec_send_cnt = 42;
+    g_fec_entries[0].stats.fec_recover_cnt = 17;
+    g_fec_entries[0].stats.lost_dgram_cnt = 3;
+    g_fec_entries[0].stats.total_app_bytes = 9000;
     g_fec_entries[0].stats.standby_app_bytes = 1234;
 
     char resp[4096];
@@ -485,7 +588,7 @@ TEST(get_all_fec_stats_two_entries)
     g_fec_n = 2;
     memset(g_fec_entries, 0, sizeof(g_fec_entries));
     strncpy(g_fec_entries[0].user, "alice", sizeof(g_fec_entries[0].user) - 1);
-    strncpy(g_fec_entries[1].user, "bob",   sizeof(g_fec_entries[1].user) - 1);
+    strncpy(g_fec_entries[1].user, "bob", sizeof(g_fec_entries[1].user) - 1);
     g_fec_entries[0].stats.mp_state_label = "single_path";
     g_fec_entries[1].stats.mp_state_label = "single_path";
 
@@ -526,8 +629,8 @@ TEST(add_user_success)
 {
     g_add_user_rc = MQVPN_OK;
     char resp[256];
-    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"s3cr3t\"}",
-                  resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"s3cr3t\"}", resp,
+                  sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
 }
 
@@ -551,8 +654,8 @@ TEST(add_user_server_failure)
 {
     g_add_user_rc = MQVPN_ERR_INVALID_ARG;
     char resp[256];
-    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"s3cr3t\"}",
-                  resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"s3cr3t\"}", resp,
+                  sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "add_user failed");
     g_add_user_rc = MQVPN_OK;
@@ -560,7 +663,7 @@ TEST(add_user_server_failure)
 
 TEST(add_user_with_fixed_ip_success)
 {
-    g_add_user_rc     = MQVPN_OK;
+    g_add_user_rc = MQVPN_OK;
     g_set_fixed_ip_rc = MQVPN_OK;
     char resp[256];
     call_dispatch("{\"cmd\":\"add_user\",\"name\":\"carol\","
@@ -571,7 +674,7 @@ TEST(add_user_with_fixed_ip_success)
 
 TEST(add_user_with_fixed_ip_failure)
 {
-    g_add_user_rc     = MQVPN_OK;
+    g_add_user_rc = MQVPN_OK;
     g_set_fixed_ip_rc = MQVPN_ERR_INVALID_ARG;
     char resp[256];
     call_dispatch("{\"cmd\":\"add_user\",\"name\":\"carol\","
@@ -597,8 +700,8 @@ TEST(set_user_fixed_ip_success)
 TEST(set_user_fixed_ip_missing_name)
 {
     char resp[256];
-    call_dispatch("{\"cmd\":\"set_user_fixed_ip\",\"fixed_ip\":\"10.0.0.50\"}",
-                  resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_user_fixed_ip\",\"fixed_ip\":\"10.0.0.50\"}", resp,
+                  sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "name required");
 }
@@ -658,7 +761,7 @@ TEST(list_users_two_entries)
 {
     g_list_users_n = 2;
     strncpy(g_list_users_names[0], "alice", 63);
-    strncpy(g_list_users_names[1], "bob",   63);
+    strncpy(g_list_users_names[1], "bob", 63);
     char resp[512];
     call_dispatch("{\"cmd\":\"list_users\"}", resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":true");
@@ -947,10 +1050,10 @@ TEST(get_fec_stats_not_built)
 TEST(get_fec_stats_success)
 {
     memset(&g_client_fec_tmpl, 0, sizeof(g_client_fec_tmpl));
-    g_client_fec_tmpl.enable_fec      = 1;
-    g_client_fec_tmpl.mp_state        = 1;
-    g_client_fec_tmpl.mp_state_label  = "active_with_standby";
-    g_client_fec_tmpl.fec_send_cnt    = 142;
+    g_client_fec_tmpl.enable_fec = 1;
+    g_client_fec_tmpl.mp_state = 1;
+    g_client_fec_tmpl.mp_state_label = "active_with_standby";
+    g_client_fec_tmpl.fec_send_cnt = 142;
     g_client_fec_tmpl.fec_recover_cnt = 17;
     g_client_fec_rc = 1;
     char resp[1024];
@@ -1141,7 +1244,8 @@ TEST(remove_path_success)
 {
     g_remove_path_rc = 0;
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"remove_path\",\"iface\":\"eth0\"}", resp, sizeof(resp));
+    call_dispatch_client("{\"cmd\":\"remove_path\",\"iface\":\"eth0\"}", resp,
+                         sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
 }
 
@@ -1173,8 +1277,9 @@ TEST(set_path_weight_success)
 TEST(set_path_weight_out_of_range)
 {
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":99999}",
-                         resp, sizeof(resp));
+    call_dispatch_client(
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":99999}", resp,
+        sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "weight must be 0-65535");
 }
@@ -1182,8 +1287,8 @@ TEST(set_path_weight_out_of_range)
 TEST(set_path_weight_missing_weight)
 {
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\"}",
-                         resp, sizeof(resp));
+    call_dispatch_client("{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\"}", resp,
+                         sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "weight required");
 }
@@ -1192,8 +1297,9 @@ TEST(set_path_dscp_mask_success)
 {
     g_set_path_dscp_mask_rc = 0;
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":3}",
-                         resp, sizeof(resp));
+    call_dispatch_client(
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":3}", resp,
+        sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
 }
 
@@ -1204,9 +1310,9 @@ TEST(set_path_dscp_mask_hex)
     /* 0x400000000000 == 1ULL << 46 (EF), built via MQVPN_DSCP_BIT(46).
      * Unquoted: a bare 0x token is the documented extension (dispatch
      * reads numbers as raw text with yyjson's extended-number syntax). */
-    call_dispatch_client(
-        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":0x400000000000}",
-        resp, sizeof(resp));
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_"
+                         "mask\":0x400000000000}",
+                         resp, sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
 }
 
@@ -1214,8 +1320,9 @@ TEST(set_path_dscp_mask_platform_failure)
 {
     g_set_path_dscp_mask_rc = -1;
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":3}",
-                         resp, sizeof(resp));
+    call_dispatch_client(
+        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":3}", resp,
+        sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "path not found");
     g_set_path_dscp_mask_rc = 0;
@@ -1224,8 +1331,8 @@ TEST(set_path_dscp_mask_platform_failure)
 TEST(set_path_dscp_mask_missing_mask)
 {
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\"}",
-                         resp, sizeof(resp));
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\"}", resp,
+                         sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "dscp_mask required");
 }
@@ -1233,8 +1340,8 @@ TEST(set_path_dscp_mask_missing_mask)
 TEST(set_path_dscp_mask_missing_iface)
 {
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"dscp_mask\":3}",
-                         resp, sizeof(resp));
+    call_dispatch_client("{\"cmd\":\"set_path_dscp_mask\",\"dscp_mask\":3}", resp,
+                         sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "iface required");
 }
@@ -1247,8 +1354,9 @@ TEST(set_path_weight_server_success)
 {
     g_srv_set_weight_rc = MQVPN_OK;
     char resp[256];
-    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"path_id\":2,\"weight\":10}",
-                  resp, sizeof(resp));
+    call_dispatch(
+        "{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"path_id\":2,\"weight\":10}",
+        resp, sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
     ASSERT_STR_EQ(g_srv_set_weight_user, "alice");
     if (g_srv_set_weight_path_id != 2 || g_srv_set_weight_weight != 10) {
@@ -1262,8 +1370,9 @@ TEST(set_path_weight_server_user_not_found)
 {
     g_srv_set_weight_rc = MQVPN_ERR_INVALID_ARG;
     char resp[256];
-    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"nobody\",\"path_id\":0,\"weight\":1}",
-                  resp, sizeof(resp));
+    call_dispatch(
+        "{\"cmd\":\"set_path_weight\",\"user\":\"nobody\",\"path_id\":0,\"weight\":1}",
+        resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "user not found");
     g_srv_set_weight_rc = MQVPN_OK;
@@ -1273,8 +1382,9 @@ TEST(set_path_weight_server_path_not_found)
 {
     g_srv_set_weight_rc = MQVPN_ERR_ENGINE;
     char resp[256];
-    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"path_id\":99,\"weight\":1}",
-                  resp, sizeof(resp));
+    call_dispatch(
+        "{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"path_id\":99,\"weight\":1}",
+        resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "path not found");
     g_srv_set_weight_rc = MQVPN_OK;
@@ -1302,9 +1412,9 @@ TEST(set_path_weight_server_by_iface_success)
 {
     g_srv_set_weight_iface_rc = MQVPN_OK;
     char resp[256];
-    call_dispatch(
-        "{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"iface\":\"wlan0\",\"weight\":10}",
-        resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"iface\":\"wlan0\","
+                  "\"weight\":10}",
+                  resp, sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
     ASSERT_STR_EQ(g_srv_set_weight_iface_user, "alice");
     ASSERT_STR_EQ(g_srv_set_weight_iface_iface, "wlan0");
@@ -1321,14 +1431,14 @@ TEST(set_path_weight_server_iface_takes_priority_over_path_id)
     g_srv_set_weight_rc = MQVPN_OK;
     g_srv_set_weight_path_id = 999; /* pre-dirty: must NOT be touched */
     char resp[256];
-    call_dispatch(
-        "{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"iface\":\"wlan0\","
-        "\"path_id\":2,\"weight\":10}",
-        resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"alice\",\"iface\":\"wlan0\","
+                  "\"path_id\":2,\"weight\":10}",
+                  resp, sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
     ASSERT_STR_EQ(g_srv_set_weight_iface_iface, "wlan0");
     if (g_srv_set_weight_path_id != 999) {
-        printf("FAIL\n    path_id-keyed setter was called; iface should have taken priority\n");
+        printf("FAIL\n    path_id-keyed setter was called; iface should have taken "
+               "priority\n");
         exit(1);
     }
 }
@@ -1337,9 +1447,9 @@ TEST(set_path_weight_server_by_iface_user_not_found)
 {
     g_srv_set_weight_iface_rc = MQVPN_ERR_INVALID_ARG;
     char resp[256];
-    call_dispatch(
-        "{\"cmd\":\"set_path_weight\",\"user\":\"nobody\",\"iface\":\"wlan0\",\"weight\":1}",
-        resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_weight\",\"user\":\"nobody\",\"iface\":\"wlan0\","
+                  "\"weight\":1}",
+                  resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "user not found");
     g_srv_set_weight_iface_rc = MQVPN_OK;
@@ -1349,14 +1459,12 @@ TEST(set_path_dscp_mask_server_success)
 {
     g_srv_set_dscp_mask_rc = MQVPN_OK;
     char resp[256];
-    call_dispatch(
-        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"path_id\":2,"
-        "\"dscp_mask\":0x400000000000}",
-        resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"path_id\":2,"
+                  "\"dscp_mask\":0x400000000000}",
+                  resp, sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
     ASSERT_STR_EQ(g_srv_set_dscp_mask_user, "alice");
-    if (g_srv_set_dscp_mask_path_id != 2 ||
-        g_srv_set_dscp_mask_mask != (1ULL << 46)) {
+    if (g_srv_set_dscp_mask_path_id != 2 || g_srv_set_dscp_mask_mask != (1ULL << 46)) {
         printf("FAIL\n    captured path_id/mask mismatch: %" PRIu64 "/%" PRIu64 "\n",
                g_srv_set_dscp_mask_path_id, g_srv_set_dscp_mask_mask);
         exit(1);
@@ -1367,9 +1475,9 @@ TEST(set_path_dscp_mask_server_user_not_found)
 {
     g_srv_set_dscp_mask_rc = MQVPN_ERR_INVALID_ARG;
     char resp[256];
-    call_dispatch(
-        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"nobody\",\"path_id\":0,\"dscp_mask\":0}",
-        resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"user\":\"nobody\",\"path_id\":0,"
+                  "\"dscp_mask\":0}",
+                  resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "user not found");
     g_srv_set_dscp_mask_rc = MQVPN_OK;
@@ -1379,9 +1487,9 @@ TEST(set_path_dscp_mask_server_path_not_found)
 {
     g_srv_set_dscp_mask_rc = MQVPN_ERR_ENGINE;
     char resp[256];
-    call_dispatch(
-        "{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"path_id\":99,\"dscp_mask\":0}",
-        resp, sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"path_id\":99,"
+                  "\"dscp_mask\":0}",
+                  resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "path not found");
     g_srv_set_dscp_mask_rc = MQVPN_OK;
@@ -1399,8 +1507,8 @@ TEST(set_path_dscp_mask_server_missing_user)
 TEST(set_path_dscp_mask_server_missing_path_id)
 {
     char resp[256];
-    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"dscp_mask\":0}", resp,
-                  sizeof(resp));
+    call_dispatch("{\"cmd\":\"set_path_dscp_mask\",\"user\":\"alice\",\"dscp_mask\":0}",
+                  resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "iface or path_id required");
 }
@@ -1436,7 +1544,8 @@ TEST(set_path_dscp_mask_server_iface_takes_priority_over_path_id)
     ASSERT_STR_EQ(resp, "{\"ok\":true}");
     ASSERT_STR_EQ(g_srv_set_dscp_mask_iface_iface, "wlan0");
     if (g_srv_set_dscp_mask_path_id != 999) {
-        printf("FAIL\n    path_id-keyed setter was called; iface should have taken priority\n");
+        printf("FAIL\n    path_id-keyed setter was called; iface should have taken "
+               "priority\n");
         exit(1);
     }
 }
@@ -1466,7 +1575,7 @@ TEST(list_paths_empty)
 TEST(list_paths_two_entries)
 {
     g_list_paths_n = 2;
-    strncpy(g_list_paths_names[0], "eth0",  IFNAMSIZ - 1);
+    strncpy(g_list_paths_names[0], "eth0", IFNAMSIZ - 1);
     strncpy(g_list_paths_names[1], "wlan0", IFNAMSIZ - 1);
     char resp[512];
     call_dispatch_client("{\"cmd\":\"list_paths\"}", resp, sizeof(resp));
@@ -1496,7 +1605,8 @@ TEST(set_path_weight_rejects_non_numbers)
         "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":1.5}",
         "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":3e0}",
         "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":true}",
-        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":99999999999999999999}",
+        ("{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":"
+         "99999999999999999999}"),
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         char resp[256];
@@ -1505,8 +1615,9 @@ TEST(set_path_weight_rejects_non_numbers)
     }
     /* Not JSON: the request itself is refused. */
     char resp[256];
-    call_dispatch_client("{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":3abc}",
-                         resp, sizeof(resp));
+    call_dispatch_client(
+        "{\"cmd\":\"set_path_weight\",\"iface\":\"eth0\",\"weight\":3abc}", resp,
+        sizeof(resp));
     ASSERT_STR_EQ(resp, "{\"ok\":false,\"error\":\"missing cmd\"}");
 }
 
@@ -1517,7 +1628,8 @@ TEST(set_path_dscp_mask_rejects_non_numbers)
         "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":-1}",
         "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":+3}",
         "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":1.5}",
-        "{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":0x10000000000000000}",
+        ("{\"cmd\":\"set_path_dscp_mask\",\"iface\":\"eth0\",\"dscp_mask\":"
+         "0x10000000000000000}"),
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         char resp[256];
@@ -1585,7 +1697,8 @@ TEST(add_user_rejects_overlong_key)
     char key[300];
     memset(key, 'k', sizeof(key) - 1);
     key[sizeof(key) - 1] = '\0';
-    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"a\",\"key\":\"%s\"}", key);
+    snprintf(req, sizeof(req), "{\"cmd\":\"add_user\",\"name\":\"a\",\"key\":\"%s\"}",
+             key);
     g_add_user_calls = 0;
     char resp[256];
     call_dispatch(req, resp, sizeof(resp));
@@ -1755,12 +1868,12 @@ parse_resp(const char *resp)
     return yyjson_read(resp, strlen(resp), YYJSON_READ_ALLOW_INVALID_UNICODE);
 }
 
-#define ASSERT_TRUE(cond)                                                    \
-    do {                                                                     \
-        if (!(cond)) {                                                       \
-            printf("FAIL\n    %s:%d: %s\n", __FILE__, __LINE__, #cond);     \
-            exit(1);                                                         \
-        }                                                                    \
+#define ASSERT_TRUE(cond)                                               \
+    do {                                                                \
+        if (!(cond)) {                                                  \
+            printf("FAIL\n    %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            exit(1);                                                    \
+        }                                                               \
     } while (0)
 
 TEST(response_strings_escaped)
@@ -1772,8 +1885,8 @@ TEST(response_strings_escaped)
     ASSERT_STR_EQ(resp, "{\"ok\":true,\"users\":[\"a\\\"b\\\\c\"]}");
     yyjson_doc *d = parse_resp(resp);
     yyjson_val *root = yyjson_doc_get_root(d);
-    ASSERT_TRUE(yyjson_equals_str(yyjson_arr_get(yyjson_obj_get(root, "users"), 0),
-                                  "a\"b\\c"));
+    ASSERT_TRUE(
+        yyjson_equals_str(yyjson_arr_get(yyjson_obj_get(root, "users"), 0), "a\"b\\c"));
     yyjson_doc_free(d);
     g_list_users_n = 0;
 
@@ -1959,7 +2072,8 @@ TEST(frame_requires_json_object)
     char cut[128];
     if (frame("POST / HTTP/1.1\r\n", NULL, 0) != -1 || frame("  x", NULL, 0) != -1 ||
         frame("\n\n", NULL, 0) != 0 || frame(" {\"cmd\":\"get_", NULL, 0) != 0 ||
-        frame("{\"cmd\":\"get_status\"}\n{\"cmd\":\"add_user\"}", cut, sizeof(cut)) != 1) {
+        frame("{\"cmd\":\"get_status\"}\n{\"cmd\":\"add_user\"}", cut, sizeof(cut)) !=
+            1) {
         printf("FAIL\n    framing verdicts wrong\n");
         exit(1);
     }
@@ -2014,7 +2128,8 @@ io_socket(int *port)
     cs->eb = event_base_new();
     cs->listen_fd = loopback_listener(port);
     cs->rx_stats = test_rx_stats;
-    cs->ev_accept = event_new(cs->eb, cs->listen_fd, EV_READ | EV_PERSIST, ctrl_on_accept, cs);
+    cs->ev_accept =
+        event_new(cs->eb, cs->listen_fd, EV_READ | EV_PERSIST, ctrl_on_accept, cs);
     event_add(cs->ev_accept, NULL);
     return cs;
 }

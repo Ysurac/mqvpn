@@ -25,7 +25,7 @@
 
 /* ── Test infrastructure ── */
 
-static int g_run    = 0;
+static int g_run = 0;
 static int g_passed = 0;
 
 #define TEST(name)                 \
@@ -40,38 +40,49 @@ static int g_passed = 0;
     }                              \
     static void test_##name(void)
 
-#define ASSERT_EQ(a, b)                                                                      \
-    do {                                                                                     \
-        long long _a = (long long)(a), _b = (long long)(b);                                  \
-        if (_a != _b) {                                                                      \
-            printf("FAIL\n    %s:%d  %s == %lld, expected %lld\n", __FILE__, __LINE__, #a,   \
-                   _a, _b);                                                                  \
-            exit(1);                                                                         \
-        }                                                                                    \
+#define ASSERT_EQ(a, b)                                                                \
+    do {                                                                               \
+        long long _a = (long long)(a), _b = (long long)(b);                            \
+        if (_a != _b) {                                                                \
+            printf("FAIL\n    %s:%d  %s == %lld, expected %lld\n", __FILE__, __LINE__, \
+                   #a, _a, _b);                                                        \
+            exit(1);                                                                   \
+        }                                                                              \
     } while (0)
 
-#define ASSERT_NE(a, b)                                                                      \
-    do {                                                                                     \
-        long long _a = (long long)(a), _b = (long long)(b);                                  \
-        if (_a == _b) {                                                                      \
-            printf("FAIL\n    %s:%d  %s == %lld (unexpected equal)\n", __FILE__, __LINE__,   \
-                   #a, _a);                                                                  \
-            exit(1);                                                                         \
-        }                                                                                    \
+#define ASSERT_NE(a, b)                                                          \
+    do {                                                                         \
+        long long _a = (long long)(a), _b = (long long)(b);                      \
+        if (_a == _b) {                                                          \
+            printf("FAIL\n    %s:%d  %s == %lld (unexpected equal)\n", __FILE__, \
+                   __LINE__, #a, _a);                                            \
+            exit(1);                                                             \
+        }                                                                        \
     } while (0)
 
-#define ASSERT_NOT_NULL(a)                                                               \
-    do {                                                                                 \
-        if ((a) == NULL) {                                                               \
-            printf("FAIL\n    %s:%d  %s is NULL\n", __FILE__, __LINE__, #a);             \
-            exit(1);                                                                     \
-        }                                                                                \
+#define ASSERT_NOT_NULL(a)                                                   \
+    do {                                                                     \
+        if ((a) == NULL) {                                                   \
+            printf("FAIL\n    %s:%d  %s is NULL\n", __FILE__, __LINE__, #a); \
+            exit(1);                                                         \
+        }                                                                    \
     } while (0)
 
 /* ── Mock callbacks ── */
 
-static void dummy_tun_output(const uint8_t *p, size_t l, void *u) { (void)p;(void)l;(void)u; }
-static void dummy_config_ready(const mqvpn_tunnel_info_t *i, void *u) { (void)i;(void)u; }
+static void
+dummy_tun_output(const uint8_t *p, size_t l, void *u)
+{
+    (void)p;
+    (void)l;
+    (void)u;
+}
+static void
+dummy_config_ready(const mqvpn_tunnel_info_t *i, void *u)
+{
+    (void)i;
+    (void)u;
+}
 
 static mqvpn_client_t *
 make_test_client(void)
@@ -80,7 +91,7 @@ make_test_client(void)
     mqvpn_config_set_server(cfg, "127.0.0.1", 443);
 
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
-    cbs.tun_output          = dummy_tun_output;
+    cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
 
     mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
@@ -252,8 +263,8 @@ TEST(closed_slot_reused_by_add_path)
     mqvpn_path_desc_t d2 = make_desc("usb1", 0);
     mqvpn_path_handle_t h2 = add_path(c, &d2, &t2);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
-    ASSERT_NE(h2, h1);               /* new handle */
-    ASSERT_EQ(count_paths(c), 1);    /* slot reused, count unchanged */
+    ASSERT_NE(h2, h1);            /* new handle */
+    ASSERT_EQ(count_paths(c), 1); /* slot reused, count unchanged */
     ASSERT_EQ(path_status(c, h2), MQVPN_PATH_PENDING);
     ASSERT_EQ(path_status(c, h1), -1); /* old incarnation no longer listed */
 

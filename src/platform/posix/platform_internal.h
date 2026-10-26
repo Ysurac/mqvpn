@@ -93,8 +93,8 @@ struct platform_ctx {
      * connection (see tun_fatal_error). Plain data, safe to copy. */
     mqvpn_tunnel_info_t last_tunnel_info;
     int have_tunnel_info;
-    int tun_rebuilds;              /* in-place rebuilds inside the current window */
-    time_t tun_rebuild_window;     /* start of that window (seconds) */
+    int tun_rebuilds;          /* in-place rebuilds inside the current window */
+    time_t tun_rebuild_window; /* start of that window (seconds) */
     /* External MTU change guard (netlink_mon.c handle_tun_newlink): counts
      * restores inside the current window so a fight with another MTU
      * manager cannot turn into a busy loop. */
@@ -111,8 +111,8 @@ struct platform_ctx {
                              * removes them (the only gate it needs) */
     int routing6_configured;
     int routing_set_up_once; /* Linux: setup_routes() succeeded at least once */
-    int manage_routes; /* 1=run setup_routes/cleanup_routes (default 1) */
-    int pmtud;         /* 1=PMTUD: path sockets send with DF set */
+    int manage_routes;       /* 1=run setup_routes/cleanup_routes (default 1) */
+    int pmtud;               /* 1=PMTUD: path sockets send with DF set */
 #if defined(__linux__)
     /* [Advanced] UdpGro — effective RX GRO mode. Config-derived state kept
      * here (pattern: manage_routes above) so the netlink re-add path can
@@ -143,8 +143,8 @@ struct platform_ctx {
                            * pin is deleted. Unused on Linux. */
     char server_ip_str[INET6_ADDRSTRLEN];
     char server_tunnel_ip[INET_ADDRSTRLEN]; /* server-side tunnel IP (peer on TUN) */
-    int route_via_server;   /* 1=use default via server_tunnel_ip instead of /1 trick */
-    int no_routes;          /* 1=skip automatic route setup entirely */
+    int route_via_server; /* 1=use default via server_tunnel_ip instead of /1 trick */
+    int no_routes;        /* 1=skip automatic route setup entirely */
     int server_port;
     int has_v6;
 

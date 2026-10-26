@@ -872,7 +872,8 @@ test_alloc_at_already_used_rejected(void)
     struct in_addr out;
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 10, &out), 0, "first alloc_at 10");
     /* Second call for the same offset must fail */
-    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 10, &out) < 0, "duplicate alloc_at rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 10, &out) < 0,
+                "duplicate alloc_at rejected");
 }
 
 static void
@@ -887,7 +888,7 @@ test_alloc_at_beyond_pool_size_rejected(void)
                 "offset 15 (> pool_size) rejected");
     /* Offset 14 == pool_size is the last valid slot */
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 14, &out), 0,
-                "offset 14 (== pool_size) is the last valid slot");
+                  "offset 14 (== pool_size) is the last valid slot");
     char str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &out, str, sizeof(str));
     ASSERT_EQ_STR(str, "10.0.0.14", "offset 14 gives 10.0.0.14");

@@ -41,7 +41,7 @@ typedef struct {
     size_t path_len;
     const char *auth_token; /* Bearer payload, not NUL-terminated */
     size_t auth_token_len;
-    char x_user[64]; /* x-user header value, NUL-terminated */
+    char x_user[64];   /* x-user header value, NUL-terminated */
     int has_sched_hdr; /* request carried mqvpn-scheduler */
     const char *sched; /* raw value, not NUL-terminated */
     size_t sched_len;

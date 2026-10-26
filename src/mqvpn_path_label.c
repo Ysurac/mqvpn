@@ -42,7 +42,8 @@ mqvpn_path_label_decode(const uint8_t *payload, size_t payload_len, uint64_t *pa
                         char *iface_out, size_t iface_out_cap, uint32_t *weight_out,
                         uint64_t *dscp_mask_out)
 {
-    if (!payload || !path_id_out || !iface_out || !weight_out || !dscp_mask_out) return -1;
+    if (!payload || !path_id_out || !iface_out || !weight_out || !dscp_mask_out)
+        return -1;
     if (iface_out_cap < MQVPN_PATH_LABEL_IFACE_MAX + 1) return -1;
     if (payload_len < 9) return -1;
 

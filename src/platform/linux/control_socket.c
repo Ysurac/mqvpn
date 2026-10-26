@@ -41,7 +41,8 @@
  * (one-shot, see get_status's per-path output; does NOT persist —
  * path_id can change on reconnect):
  *   {"cmd":"set_path_weight",    "user":"alice","iface":"wlan0","weight":3}
- *   {"cmd":"set_path_dscp_mask", "user":"alice","iface":"wlan0","dscp_mask":70368744177664}
+ *   {"cmd":"set_path_dscp_mask",
+ * "user":"alice","iface":"wlan0","dscp_mask":70368744177664}
  *   {"cmd":"set_path_weight",    "user":"alice","path_id":2,"weight":3}
  *   {"cmd":"set_path_dscp_mask", "user":"alice","path_id":2,"dscp_mask":70368744177664}
  * `iface` takes priority if both are given. The iface form can be issued
@@ -1084,7 +1085,8 @@ ctrl_conn_reply(ctrl_conn_t *conn, char *buf, size_t len)
         ctrl_conn_finish(conn);
         return;
     }
-    conn->ev = event_new(conn->cs->eb, conn->fd, EV_WRITE | EV_PERSIST, ctrl_on_write, conn);
+    conn->ev =
+        event_new(conn->cs->eb, conn->fd, EV_WRITE | EV_PERSIST, ctrl_on_write, conn);
     if (!conn->ev || event_add(conn->ev, NULL) < 0) ctrl_conn_close(conn);
 }
 
@@ -1189,7 +1191,8 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
             if (fr < 0) {
                 /* Not a JSON object — e.g. an HTTP request from a browser or
                  * a cross-site POST. Refuse it before parsing anything. */
-                ctrl_conn_reply_str(conn, "{\"ok\":false,\"error\":\"invalid request\"}\n");
+                ctrl_conn_reply_str(conn,
+                                    "{\"ok\":false,\"error\":\"invalid request\"}\n");
                 return;
             }
             if (fr > 0) break;
@@ -1269,7 +1272,8 @@ ctrl_reject(ctrl_socket_t *cs, int cfd)
         close(cfd);
         return;
     }
-    struct timeval tv = {CTRL_REJECT_LINGER_MS / 1000, (CTRL_REJECT_LINGER_MS % 1000) * 1000};
+    struct timeval tv = {CTRL_REJECT_LINGER_MS / 1000,
+                         (CTRL_REJECT_LINGER_MS % 1000) * 1000};
     if (event_add(r->ev, &tv) < 0) ctrl_reject_free(r);
 }
 
