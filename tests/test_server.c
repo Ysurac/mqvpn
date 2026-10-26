@@ -1012,7 +1012,7 @@ drain_and_tick_two_paths(mqvpn_server_t *svr, void *svr_tctx, mqvpn_client_t *cl
 static mqvpn_path_status_t
 get_path_status_or_invalid(mqvpn_client_t *cli, mqvpn_path_handle_t h)
 {
-    mqvpn_path_info_t infos[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t infos[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     if (mqvpn_client_get_paths(cli, infos, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
         return (mqvpn_path_status_t)-1;
@@ -2300,7 +2300,7 @@ build_udp4(uint8_t *pkt, size_t len, const uint8_t src[4], const uint8_t dst[4],
 static void
 get_path_bytes(mqvpn_client_t *cli, mqvpn_path_handle_t h, uint64_t *tx, uint64_t *rx)
 {
-    mqvpn_path_info_t infos[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t infos[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     *tx = *rx = 0;
     ASSERT_EQ(mqvpn_client_get_paths(cli, infos, MQVPN_MAX_PATHS, &n), MQVPN_OK);
@@ -2970,7 +2970,7 @@ reentry_probe_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status,
 static int
 count_active_paths(mqvpn_client_t *cli)
 {
-    mqvpn_path_info_t pi[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t pi[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     if (mqvpn_client_get_paths(cli, pi, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return -1;
     int active = 0;

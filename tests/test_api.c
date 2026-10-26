@@ -1356,7 +1356,7 @@ TEST(client_get_state_null)
 TEST(client_get_stats)
 {
     mqvpn_client_t *c = make_test_client();
-    mqvpn_stats_t stats;
+    mqvpn_stats_t stats = {0};
 
     ASSERT_EQ(mqvpn_client_get_stats(c, &stats), MQVPN_OK);
     ASSERT_EQ(stats.struct_size, sizeof(mqvpn_stats_t));
@@ -1373,7 +1373,7 @@ TEST(client_get_stats)
 TEST(client_get_interest)
 {
     mqvpn_client_t *c = make_test_client();
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {0};
 
     ASSERT_EQ(mqvpn_client_get_interest(c, &interest), MQVPN_OK);
     ASSERT_EQ(interest.struct_size, sizeof(mqvpn_interest_t));
@@ -1430,7 +1430,7 @@ TEST(client_add_path)
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     /* Query paths */
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -1449,7 +1449,7 @@ TEST(path_initial_stats_zero)
     snprintf(desc.iface, sizeof(desc.iface), "wlan0");
     add_fake_path(c, &desc, NULL);
 
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -1473,7 +1473,7 @@ TEST(path_stats_after_recv)
     memset(pkt, 0xAB, sizeof(pkt));
     mqvpn_client_on_socket_recv(c, h, pkt, sizeof(pkt), NULL, 0);
 
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -1485,7 +1485,7 @@ TEST(path_stats_after_recv)
 TEST(get_paths_null_safety)
 {
     mqvpn_client_t *c = make_test_client();
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
 
     ASSERT_EQ(mqvpn_client_get_paths(NULL, info, 4, &n), MQVPN_ERR_INVALID_ARG);
@@ -1530,7 +1530,7 @@ TEST(client_set_tun_active)
     ASSERT_EQ(mqvpn_client_set_tun_active(c, 1, 5), MQVPN_OK);
 
     /* Interest should reflect tun_readable */
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {0};
     mqvpn_client_get_interest(c, &interest);
     /* tun_readable = 1 since tun_active=1 and no backpressure */
     ASSERT_EQ(interest.tun_readable, 1);
@@ -1583,7 +1583,7 @@ TEST(path_backup_flag_stored)
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     /* get_paths must reflect the backup flag */
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -1606,7 +1606,7 @@ TEST(path_primary_flag_clear)
     mqvpn_path_handle_t h = add_fake_path(c, &desc, NULL);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -1629,7 +1629,7 @@ TEST(path_backup_status_pending_before_connect)
     mqvpn_path_handle_t h = add_fake_path(c, &desc, NULL);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -1656,7 +1656,7 @@ TEST(path_backup_mixed_with_primary)
     ASSERT_NE(hp, (mqvpn_path_handle_t)-1);
     ASSERT_NE(hb, (mqvpn_path_handle_t)-1);
 
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 2);
@@ -1981,7 +1981,7 @@ TEST(drop_path_sets_closed)
     ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
 
     /* Verify path is now CLOSED */
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     mqvpn_client_get_paths(c, info, 4, &n);
     ASSERT_EQ(n, 1);
@@ -2002,7 +2002,7 @@ TEST(drop_path_double_drop)
     ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
     ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
 
-    mqvpn_path_info_t info[4];
+    mqvpn_path_info_t info[4] = {0};
     int n = 0;
     mqvpn_client_get_paths(c, info, 4, &n);
     ASSERT_EQ(n, 1);
@@ -2080,7 +2080,7 @@ TEST(activation_failure_first_retry_marks_create_wait)
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     /* Sanity: freshly added paths are PENDING. */
-    mqvpn_path_info_t info[2];
+    mqvpn_path_info_t info[2] = {0};
     int n = 0;
     mqvpn_client_get_paths(c, info, 2, &n);
     ASSERT_EQ(n, 1);
@@ -2149,7 +2149,7 @@ TEST(activation_failure_eventually_closes_path)
     /* Hammer the failure path until the retry budget is exhausted.  We
      * don't want the test to encode the exact PATH_RECREATE_MAX_RETRIES
      * value, so we call enough times to overshoot any reasonable cap. */
-    mqvpn_path_info_t info[2];
+    mqvpn_path_info_t info[2] = {0};
     int n = 0;
     int closed = 0;
     for (int i = 0; i < 32; i++) {
@@ -2256,7 +2256,7 @@ TEST(path_create_permanent_failure_marks_closed_immediately)
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
 
     /* Slot is freshly added: status=PENDING, active=1. */
-    mqvpn_path_info_t info[2];
+    mqvpn_path_info_t info[2] = {0};
     int n = 0;
     mqvpn_client_get_paths(c, info, 2, &n);
     ASSERT_EQ(n, 1);
@@ -2325,7 +2325,7 @@ TEST(path_create_permanent_failure_idempotent)
     ASSERT_EQ(mqvpn_client_test_apply_path_create_permanent_failure(c, h), 0);
     ASSERT_EQ(g_path_event_count, 1);
 
-    mqvpn_path_info_t info[2];
+    mqvpn_path_info_t info[2] = {0};
     int n = 0;
     mqvpn_client_get_paths(c, info, 2, &n);
     ASSERT_EQ(n, 1);
@@ -4270,7 +4270,7 @@ TEST(add_path_rejects_oversized_local_addr_len)
     desc.local_addr_len = sizeof(desc.local_addr) + 1;
     ASSERT_EQ(mqvpn_client_add_path(c, &desc, fake_path_ops(), t, NULL),
               (mqvpn_path_handle_t)-1);
-    mqvpn_path_info_t info[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t info[MQVPN_MAX_PATHS] = {0};
     int n = -1;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, MQVPN_MAX_PATHS, &n), MQVPN_OK);
     ASSERT_EQ(n, 0); /* no slot was consumed */
@@ -4288,7 +4288,7 @@ TEST(add_path_struct_size_partway_through_optional_field_ignores_it)
     partial.struct_size = (uint32_t)(offsetof(mqvpn_path_ops_t, get_stats) + 1);
     mqvpn_path_handle_t h = mqvpn_client_add_path(c, NULL, &partial, t, NULL);
     ASSERT_NE(h, (mqvpn_path_handle_t)-1);
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
     ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
     ASSERT_EQ(t->get_stats_calls, 0u); /* not installed */
     mqvpn_client_destroy(c);
@@ -4323,7 +4323,7 @@ TEST(null_ctx_minimal_ops_is_legal)
     unsigned before = g_fake_stateless_sends;
     ASSERT_EQ(mqvpn_client_test_transport_send(c, h, &d, 1), 1);
     ASSERT_EQ(g_fake_stateless_sends, before + 1);
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
     ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
     ASSERT_EQ(st.udp_tx_sends, 0u); /* no get_stats: contributes nothing */
     ASSERT_EQ(st.bytes_tx, 16u);    /* but the core still counts bytes */
@@ -4350,12 +4350,12 @@ TEST(released_ordering_and_retired_stats_survive_cycles)
         /* duplicate notification: no-op, no second release */
         ASSERT_EQ(mqvpn_client_on_platform_path_released(c, h), MQVPN_OK);
         ASSERT_EQ(t->release_calls, 1u);
-        mqvpn_stats_t st;
+        mqvpn_stats_t st = {0};
         ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
         ASSERT_EQ(st.udp_tx_sends, expect_sends); /* retired, never double counted */
     }
     /* The slot was reused every time: the table did not grow. */
-    mqvpn_path_info_t info[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t info[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, MQVPN_MAX_PATHS, &n), MQVPN_OK);
     ASSERT_EQ(n, 1);
@@ -4373,7 +4373,7 @@ TEST(add_while_dropped_slot_unreleased_appends)
     mqvpn_path_handle_t h1 = add_fake_path(c, NULL, &t1);
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h1, h0);
-    mqvpn_path_info_t info[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t info[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, MQVPN_MAX_PATHS, &n), MQVPN_OK);
     ASSERT_EQ(n, 2);
@@ -4405,7 +4405,7 @@ TEST(get_stats_failure_consumes_nothing_but_release_runs)
     mqvpn_path_handle_t h = add_fake_path(c, NULL, &t);
     t->stats_rc = MQVPN_ERR_ENGINE;
     t->sends_accepted = 5;
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
     ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
     ASSERT_EQ(st.udp_tx_sends, 0u); /* live snapshot unavailable → nothing */
     ASSERT_EQ(mqvpn_client_drop_path(c, h), MQVPN_OK);
@@ -4486,7 +4486,7 @@ TEST(send_accept_all_carries_initial_packet_and_bytes)
     mqvpn_client_tick(c);
     ASSERT_NE(t->n_captured, 0u);
     ASSERT_NE(t->captured_len[0], 0u);
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
     ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
     uint64_t sum = 0;
     for (unsigned i = 0; i < t->n_captured; i++)
@@ -4508,7 +4508,7 @@ TEST(would_block_keeps_connection_alive_and_counts_nothing)
     ASSERT_EQ(mqvpn_client_get_state(c),
               MQVPN_STATE_CONNECTING); /* EAGAIN never closes */
     ASSERT_EQ(mock_log_count_containing("socket exception"), 0);
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
     ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
     ASSERT_EQ(st.bytes_tx, 0u);
     ASSERT_EQ(st.udp_tx_sends, 0u); /* a WOULD_BLOCK call is not a send */
@@ -4549,7 +4549,7 @@ TEST(would_block_does_not_latch_the_transport)
     ASSERT_EQ(t->n_captured, 1u);
     ASSERT_NE(t->captured_len[0], 0u);
 
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
     ASSERT_EQ(mqvpn_client_get_stats(c, &st), MQVPN_OK);
     ASSERT_EQ(st.udp_tx_sends, 1u); /* the blocked call is still not a send */
     ASSERT_EQ(st.bytes_tx, (uint64_t)t->captured_len[0]);
@@ -4617,7 +4617,7 @@ TEST(transport_send_mapping_partial_would_block_zero_bogus)
 {
     fake_transport_t *t;
     mqvpn_client_t *c = make_connecting_client(&t, FAKE_PARTIAL, 1);
-    mqvpn_path_info_t info[1];
+    mqvpn_path_info_t info[1] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, info, 1, &n), MQVPN_OK);
     mqvpn_path_handle_t h = info[0].handle;
@@ -4626,7 +4626,7 @@ TEST(transport_send_mapping_partial_would_block_zero_bogus)
      * by coincidence. */
     uint8_t a[10] = {0}, b[20] = {0}, d[35] = {0}, e[40] = {0}; /* MSan-clean */
     mqvpn_datagram_t bufs[4] = {{a, 10}, {b, 20}, {d, 35}, {e, 40}};
-    mqvpn_stats_t st;
+    mqvpn_stats_t st = {0};
 
     t->partial_k = 2;
     ASSERT_EQ(mqvpn_client_test_transport_send(c, h, bufs, 4), 2);

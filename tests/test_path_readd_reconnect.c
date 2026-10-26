@@ -101,7 +101,7 @@ make_test_client(void)
 static int
 path_status(mqvpn_client_t *c, mqvpn_path_handle_t h)
 {
-    mqvpn_path_info_t info[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t info[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     if (mqvpn_client_get_paths(c, info, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return -1;
     for (int i = 0; i < n; i++)
@@ -112,7 +112,7 @@ path_status(mqvpn_client_t *c, mqvpn_path_handle_t h)
 static int
 count_paths(mqvpn_client_t *c)
 {
-    mqvpn_path_info_t info[MQVPN_MAX_PATHS];
+    mqvpn_path_info_t info[MQVPN_MAX_PATHS] = {0};
     int n = 0;
     mqvpn_client_get_paths(c, info, MQVPN_MAX_PATHS, &n);
     return n;

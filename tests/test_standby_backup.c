@@ -153,7 +153,7 @@ add_fake_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc)
 static int
 find_path_info(mqvpn_client_t *c, mqvpn_path_handle_t h, mqvpn_path_info_t *out)
 {
-    mqvpn_path_info_t infos[8];
+    mqvpn_path_info_t infos[8] = {0};
     int n = 0;
     if (mqvpn_client_get_paths(c, infos, 8, &n) != MQVPN_OK) return 0;
     for (int i = 0; i < n; i++) {
@@ -291,7 +291,7 @@ TEST(two_backup_paths_both_reported)
     ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
     ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
 
-    mqvpn_path_info_t infos[8];
+    mqvpn_path_info_t infos[8] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, infos, 8, &n), MQVPN_OK);
     ASSERT_EQ(n, 2);
@@ -407,7 +407,7 @@ TEST(get_paths_counts_backup_paths)
     add_fake_path(c, &dp);
     add_fake_path(c, &db);
 
-    mqvpn_path_info_t infos[4];
+    mqvpn_path_info_t infos[4] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, infos, 4, &n), MQVPN_OK);
     ASSERT_EQ(n, 2);
@@ -428,7 +428,7 @@ TEST(get_paths_truncates_to_max_out)
     add_fake_path(c, &d);
 
     /* Request only 2 slots */
-    mqvpn_path_info_t infos[2];
+    mqvpn_path_info_t infos[2] = {0};
     int n = 0;
     ASSERT_EQ(mqvpn_client_get_paths(c, infos, 2, &n), MQVPN_OK);
     ASSERT_EQ(n, 2); /* truncated */

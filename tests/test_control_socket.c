@@ -97,7 +97,7 @@ int mqvpn_server_list_users(const mqvpn_server_t *s, char names[][64], int max)
     (void)s;
     int n = g_list_users_n < max ? g_list_users_n : max;
     for (int i = 0; i < n; i++)
-        strncpy(names[i], g_list_users_names[i], 63);
+        snprintf(names[i], 64, "%s", g_list_users_names[i]);
     return n;
 }
 
