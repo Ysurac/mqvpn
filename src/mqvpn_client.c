@@ -3106,10 +3106,10 @@ client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *ifac
         return;
     }
 
-    xqc_int_t sret = xqc_h3_request_send_body(c->conn->masque_request, cap_buf,
-                                              cap_written, 0);
+    ssize_t sret = xqc_h3_request_send_body(c->conn->masque_request, cap_buf,
+                                            cap_written, 0);
     if (sret < 0) {
-        LOG_W(c, "path_label capsule send failed: path_id=%" PRIu64 " iface=%s ret=%d",
+        LOG_W(c, "path_label capsule send failed: path_id=%" PRIu64 " iface=%s ret=%zd",
               path_id, iface, sret);
     } else {
         LOG_D(c, "announced path_label: path_id=%" PRIu64 " iface=%s", path_id, iface);
