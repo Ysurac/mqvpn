@@ -729,8 +729,10 @@ path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
         now - p->path_stable_since_us < PATH_STABLE_THRESHOLD_US)
         return;
 
-    client_log(c, MQVPN_LOG_INFO, "path %s: stable for 30s, resetting retry budget",
-               p->name);
+    /* The window re-arms every 30s for as long as the path is up, so only a
+     * reset that undoes earlier retries is worth an INFO line. */
+    client_log(c, p->recreate_retries > 0 ? MQVPN_LOG_INFO : MQVPN_LOG_DEBUG,
+               "path %s: stable for 30s, resetting retry budget", p->name);
     p->recreate_retries = 0;
     p->path_stable_since_us = now; /* sec 6.3 re-arm: next 30s window starts now */
 }
