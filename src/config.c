@@ -654,6 +654,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_BOOL(SEC_INTERFACE, "Reconnect", "reconnect", reconnect),
     CFG_INT(SEC_INTERFACE, "ReconnectInterval", "reconnect_interval", reconnect_interval,
             cfgk_int_positive),
+    CFG_INT(SEC_INTERFACE, "StatusInterval", "status_interval", status_interval,
+            cfgk_int_nonneg),
     CFG_INT(SEC_INTERFACE, "MTU", "mtu", tun_mtu, cfgk_int_mtu),
     CFG_INT(SEC_INTERFACE, "PathMTU", "path_mtu", path_mtu, cfgk_int_mtu),
     /* strict: a value that is not a boolean is reported, not read as off */
@@ -1551,6 +1553,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
+    cfg->status_interval = 30;
     cfg->no_routes = 0;
     cfg->manage_routes = 1;
     cfg->udp_gso = 1;

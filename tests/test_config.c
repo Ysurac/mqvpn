@@ -1040,6 +1040,30 @@ test_reconnect_interval_invalid_string(void)
     ASSERT_EQ_INT(cfg.reconnect_interval, 5, "invalid interval → default 5");
 }
 
+static void
+test_status_interval(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.status_interval, 30, "default status interval 30s");
+
+    const char *ini = "[Interface]\n"
+                      "StatusInterval = 0\n";
+    char *path = write_tmp(ini);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.status_interval, 0, "StatusInterval = 0 turns the log off");
+
+    ini = "[Interface]\n"
+          "StatusInterval = -1\n";
+    path = write_tmp(ini);
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.status_interval, 30, "negative status interval -> default 30");
+}
+
 /* ================================================================
  *  MTU config tests
  * ================================================================ */
@@ -3713,6 +3737,7 @@ main(void)
     test_reconnect_config_true();
     test_reconnect_interval_invalid();
     test_reconnect_interval_invalid_string();
+    test_status_interval();
 
     /* MTU tests */
     test_mtu_default();

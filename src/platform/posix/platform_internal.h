@@ -113,6 +113,7 @@ struct platform_ctx {
     int routing_set_up_once; /* Linux: setup_routes() succeeded at least once */
     int manage_routes;       /* 1=run setup_routes/cleanup_routes (default 1) */
     int pmtud;               /* 1=PMTUD: path sockets send with DF set */
+    int status_interval_sec; /* [STATUS] log period, 0=off */
 #if defined(__linux__)
     /* [Advanced] UdpGro — effective RX GRO mode. Config-derived state kept
      * here (pattern: manage_routes above) so the netlink re-add path can

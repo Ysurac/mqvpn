@@ -23,6 +23,7 @@ LogLevel = info
 # NoRoutes = false               # set to true on router/embedded integrations to keep host routes untouched
 # Reconnect = true
 # ReconnectInterval = 5
+# StatusInterval = 30           # seconds between [STATUS] log lines, 0 = off
 # RouteViaServer = false   # add a host route to the server IP before setting the default route
 
 [Control]

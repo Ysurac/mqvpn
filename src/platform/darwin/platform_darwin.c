@@ -47,9 +47,8 @@
 #  include <netinet/in.h>
 #  include <net/if.h>
 
-#  define STATUS_INTERVAL_SEC 30
-#  define BULK_READ_COUNT     64
-#  define TUN_BUF_SIZE        65536
+#  define BULK_READ_COUNT 64
+#  define TUN_BUF_SIZE    65536
 static void status_log_cb(evutil_socket_t fd, short what, void *arg);
 
 /* ================================================================
@@ -199,9 +198,10 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     mqvpn_client_set_tun_active(p->client, 1, p->tun.fd);
 
     /* Start periodic status log */
-    if (!p->ev_status) p->ev_status = evtimer_new(p->eb, status_log_cb, p);
+    if (p->status_interval_sec > 0 && !p->ev_status)
+        p->ev_status = evtimer_new(p->eb, status_log_cb, p);
     if (p->ev_status) {
-        struct timeval tv = {.tv_sec = STATUS_INTERVAL_SEC};
+        struct timeval tv = {.tv_sec = p->status_interval_sec};
         event_add(p->ev_status, &tv);
     }
 
@@ -389,7 +389,7 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
 
     /* Re-arm timer */
     if (p->ev_status) {
-        struct timeval tv = {.tv_sec = STATUS_INTERVAL_SEC};
+        struct timeval tv = {.tv_sec = p->status_interval_sec};
         event_add(p->ev_status, &tv);
     }
 }
@@ -576,6 +576,7 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
     ctx.pmtud = cfg->pmtud;
+    ctx.status_interval_sec = cfg->status_interval;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {

@@ -186,6 +186,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | Block traffic outside the VPN tunnel (client only). Active from startup until the process exits, including while disconnected or reconnecting and after the connection is given up (`Reconnect = false`). Always blocks IPv6 outside the tunnel too, even when the tunnel carries IPv4 only; DHCP and IPv6 neighbor discovery stay allowed. Also stops applications that bind to a specific network adapter from bypassing the tunnel. With the kill switch on, re-resolving a server host name during a reconnect only works if the DNS resolver is reachable while blocked; otherwise the previously resolved address is kept. | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Wait in seconds before the first reconnection attempt (client only). Each further failed attempt doubles the wait, up to 60 seconds; values above 60 act as 60. The wait starts again from this value after a successful connection. | `5` |
+| `StatusInterval` | Seconds between the `[STATUS]` lines the client logs at `info` level (connection and per-path counters). `0` turns them off. | `30` |
 | `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself; the log then shows `manage_routes=off: host routing table left untouched`. Same switch as `NoRoutes = true`: routes are installed only when `ManageRoutes` is true and `NoRoutes` is false. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `NoRoutes` | Skip all automatic route setup and manage routes yourself (client only; CLI `--no-routes`). Equivalent to `ManageRoutes = false`. | `false` |
 | `RouteViaServer` | Route all traffic through the server's tunnel address instead of the tunnel interface: installs the catch-all routes `0.0.0.0/1` and `128.0.0.0/1` via the server's tunnel IP (client only; CLI `--route-via-server`). The host's own default route is left untouched. | `false` |
@@ -446,7 +447,7 @@ JSON configs are flat (except the `reorder`, `hybrid` and `advanced` objects abo
 | INI | JSON |
 |-----|------|
 | `[Interface]` `TunName`, `Listen`, `Subnet`, `Subnet6`, `LogLevel`, `DNS`, `MTU` | `tun_name`, `listen`, `subnet`, `subnet6`, `log_level`, `dns` (array), `mtu` |
-| `[Interface]` `KillSwitch`, `Reconnect`, `ReconnectInterval` | `kill_switch`, `reconnect`, `reconnect_interval` |
+| `[Interface]` `KillSwitch`, `Reconnect`, `ReconnectInterval`, `StatusInterval` | `kill_switch`, `reconnect`, `reconnect_interval`, `status_interval` |
 | `[Interface]` `ManageRoutes`, `NoRoutes`, `RouteViaServer` | `manage_routes`, `no_routes`, `route_via_server` |
 | `[Server]` `Address`, `ServerName`, `Insecure`, `PinnedPubkey` | `server_addr`, `tls_server_name`, `insecure`, `pinned_pubkey` |
 | `[TLS]` `Cert`, `Key`, `Cipher` / `Ciphers` | `cert_file`, `key_file`, `cipher` / `ciphers` / `tls_ciphers` |

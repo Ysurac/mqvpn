@@ -797,6 +797,7 @@ main(int argc, char *argv[])
             .n_dns = n_dns,
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
+            .status_interval = file_cfg.status_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
             .route_via_server =
                 route_via_server >= 0 ? route_via_server : file_cfg.route_via_server,

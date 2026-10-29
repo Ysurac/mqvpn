@@ -181,6 +181,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `KillSwitch` | VPN 外への通信を遮断（クライアントのみ）。起動時からプロセス終了まで有効で、切断中・再接続中や、接続を諦めた後（`Reconnect = false`）も遮断し続ける。トンネルが IPv4 のみでも、トンネル外の IPv6 は常に遮断する。DHCP と IPv6 近隣探索は許可される。特定のネットワークアダプタに bind するアプリケーションがトンネルを迂回するのも防ぐ。キルスイッチ有効時、再接続でサーバーのホスト名を再解決できるのは、遮断中でも DNS リゾルバに到達できる場合のみで、そうでなければ前回解決したアドレスを使い続ける | `false` |
 | `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
 | `ReconnectInterval` | 最初の再接続試行までの待ち時間（秒、クライアントのみ）。失敗するたびに待ち時間が 2 倍になり、上限は 60 秒（60 を超える値は 60 として扱う）。接続に成功すると、次はこの値から数え直す | `5` |
+| `StatusInterval` | クライアントが `info` レベルで出力する `[STATUS]` 行（接続とパスごとのカウンタ）の間隔（秒）。`0` で出力しない | `30` |
 | `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定し、ログに `manage_routes=off: host routing table left untouched` が出る。`NoRoutes = true` と同じスイッチで、ルートが設定されるのは `ManageRoutes` が true かつ `NoRoutes` が false のときだけ。経路の設定だけでは、ソケットを特定のアダプタに bind するアプリケーションは止められない — 下の注記を参照 | `true` |
 | `NoRoutes` | 自動ルート設定をすべて行わず、ルートを自分で管理する（クライアントのみ、CLI では `--no-routes`）。`ManageRoutes = false` と同等 | `false` |
 | `RouteViaServer` | すべての通信をトンネルインターフェースではなくサーバーのトンネルアドレス経由にする: catch-all ルート `0.0.0.0/1` と `128.0.0.0/1` をサーバーのトンネル IP 経由で設定する（クライアントのみ、CLI では `--route-via-server`）。ホスト自身のデフォルトルートは変更しない | `false` |
@@ -438,7 +439,7 @@ JSON の設定は（上記の `reorder`、`hybrid`、`advanced` オブジェク�
 | INI | JSON |
 |-----|------|
 | `[Interface]` `TunName`, `Listen`, `Subnet`, `Subnet6`, `LogLevel`, `DNS`, `MTU` | `tun_name`, `listen`, `subnet`, `subnet6`, `log_level`, `dns`（配列）, `mtu` |
-| `[Interface]` `KillSwitch`, `Reconnect`, `ReconnectInterval` | `kill_switch`, `reconnect`, `reconnect_interval` |
+| `[Interface]` `KillSwitch`, `Reconnect`, `ReconnectInterval`, `StatusInterval` | `kill_switch`, `reconnect`, `reconnect_interval`, `status_interval` |
 | `[Interface]` `ManageRoutes`, `NoRoutes`, `RouteViaServer` | `manage_routes`, `no_routes`, `route_via_server` |
 | `[Server]` `Address`, `ServerName`, `Insecure`, `PinnedPubkey` | `server_addr`, `tls_server_name`, `insecure`, `pinned_pubkey` |
 | `[TLS]` `Cert`, `Key`, `Cipher` / `Ciphers` | `cert_file`, `key_file`, `cipher` / `ciphers` / `tls_ciphers` |
