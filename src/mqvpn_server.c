@@ -3048,7 +3048,7 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         return;
     }
     if (payload_len < 1) return;
-    if (s->config.scheduler == MQVPN_SCHED_REDUNDANT &&
+    if (conn->eff_sched == MQVPN_SCHED_REDUNDANT &&
         svr_dgram_is_copy(conn, payload, payload_len))
         return;
 
