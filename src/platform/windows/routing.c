@@ -57,6 +57,11 @@ add_route4(platform_win_ctx_t *p, const char *dst, int prefix, const NET_LUID *l
         LOG_ERR("CreateIpForwardEntry2(%s/%d): error %lu", dst, prefix, err);
         return -1;
     }
+    if (err == ERROR_OBJECT_ALREADY_EXISTS) {
+        /* Someone else's route: usable as is, but not ours to delete. */
+        LOG_INF("route %s/%d already exists, left unmanaged", dst, prefix);
+        return 0;
+    }
 
     store_route(p, &row);
     return 0;
@@ -87,6 +92,11 @@ add_route6(platform_win_ctx_t *p, const char *dst, int prefix, const NET_LUID *l
     if (err != NO_ERROR && err != ERROR_OBJECT_ALREADY_EXISTS) {
         LOG_ERR("CreateIpForwardEntry2(%s/%d v6): error %lu", dst, prefix, err);
         return -1;
+    }
+    if (err == ERROR_OBJECT_ALREADY_EXISTS) {
+        /* Someone else's route: usable as is, but not ours to delete. */
+        LOG_INF("route %s/%d v6 already exists, left unmanaged", dst, prefix);
+        return 0;
     }
 
     store_route(p, &row);

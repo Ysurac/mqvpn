@@ -31,6 +31,7 @@
 #  include "route_mon.h"
 #  include "vpn_client.h"
 #  include "log.h"
+#  include "platform/path_line.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 
 #  include <stdio.h>
@@ -173,6 +174,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     } else {
         LOG_INF("manage_routes=off: host routing table left untouched");
     }
+    /* The kill switch has been blocking since before the first connect
+     * (darwin_platform_run_client); this reload adds the pass rule for the
+     * utun just created. */
     if (setup_killswitch(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
         goto fail;
@@ -218,7 +222,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     return;
 
 fail:
-    cleanup_killswitch(p);
+    /* The kill switch stays loaded: this failure ends the process, and the
+     * final cleanup flushes the anchor after the loop exits. */
     if (p->manage_routes) cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
@@ -276,7 +281,6 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->paths[i].recover_failures = 0;
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         if (p->ev_recover) event_del(p->ev_recover);
-        cleanup_killswitch(p);
         if (p->manage_routes) cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
@@ -290,20 +294,34 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
-        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
-            event_base_loopbreak(p->eb);
+        /* The kill switch stays loaded through RECONNECTING (nothing leaks
+         * while the tunnel is down); only the utun's pass rule goes, by a
+         * reload now that tun.fd is -1. A failed reload keeps the old
+         * ruleset, whose pass rule names a utun that no longer exists. Not
+         * when shutting down: the final cleanup flushes the anchor anyway. */
+        if (p->killswitch_active && !p->shutting_down && setup_killswitch(p) < 0)
+            LOG_WRN("kill switch: could not drop the pass rule for the closed TUN");
+        /* CLOSED we did not ask for: the connection ended and the library
+         * will not retry it (reconnect off, or a rejected certificate), so
+         * exit non-zero rather than idle on a dead client. */
+        if (new_state == MQVPN_STATE_CLOSED && !p->shutting_down)
+            p->fatal_error = PLATFORM_FATAL_CLOSED;
+        if (new_state == MQVPN_STATE_CLOSED) event_base_loopbreak(p->eb);
     }
 }
 
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
      * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
-    const char *sn = mqvpn_path_status_string(status);
-    LOG_INF("path %lld -> %s", (long long)path, sn);
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
+    platform_fmt_path_line(line, sizeof(line), path, iface, status);
+    LOG_INF("%s", line);
 }
 
 static void
@@ -344,10 +362,12 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
     mqvpn_client_state_t state = mqvpn_client_get_state(p->client);
     if (state != MQVPN_STATE_ESTABLISHED) return;
 
-    mqvpn_stats_t stats;
+    mqvpn_stats_t stats = {.struct_size = sizeof(stats)};
     if (mqvpn_client_get_stats(p->client, &stats) != MQVPN_OK) return;
 
     mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+
+    paths[0].struct_size = sizeof(paths[0]); /* array stride */
     int n_paths = 0;
     mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
 
@@ -383,7 +403,7 @@ static void on_tick_timer(evutil_socket_t fd, short what, void *arg);
 void
 schedule_next_tick(platform_ctx_t *p)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_client_get_interest(p->client, &interest);
 
     int ms = interest.next_timer_ms;
@@ -555,6 +575,7 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.server_port = cfg->server_port;
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.manage_routes = cfg->manage_routes;
+    ctx.pmtud = cfg->pmtud;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -684,8 +705,10 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
         mqvpn_path_desc_t desc;
         platform_path_fill_desc(&ctx, s, &desc);
+        ctx.adding_iface = s->iface;
         s->handle = mqvpn_client_add_path(ctx.client, &desc, mqvpn_bind_posix_path_ops(),
                                           tctx, NULL);
+        ctx.adding_iface = NULL;
         if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
             mqvpn_bind_posix_path_free(tctx); /* add failed: still ours */
@@ -712,6 +735,15 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
 
+    /* Kill switch BEFORE the first connect, now that the server address is
+     * known (server_ip_str above): loading it only at tunnel-up left the
+     * handshake and every reconnect unprotected. The utun's pass rule is
+     * added by the reload in cb_tunnel_config_ready. */
+    if (setup_killswitch(&ctx) < 0) {
+        LOG_ERR("killswitch setup failed, aborting");
+        goto cleanup;
+    }
+
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
         LOG_ERR("client connect failed");
@@ -726,6 +758,8 @@ darwin_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = ctx.fatal_error ? 1 : 0;
     if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
         LOG_ERR("exiting: path release refused by the library");
+    else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
+        LOG_ERR("exiting: connection closed");
     else if (rc)
         LOG_ERR("exiting: tunnel setup failed");
 

@@ -6,15 +6,19 @@
  * linux/killswitch.c (iptables).
  *
  * Blocks all outbound traffic outside the VPN tunnel via a pf anchor
- * ("com.apple/250.mqvpn") loaded through `pfctl -a <anchor> -f -`. Rule
- * semantics (allow tun / allow lo / allow UDP-to-server / drop rest, with
- * the two-axis IPv4/IPv6 family gating) are copied EXACTLY from
- * linux/killswitch.c:48-113 — this is a syntax port, not a policy change.
- * In particular the KNOWN gap is inherited as-is: a v4-only tunnel with no
- * v6 config does NOT block native v6 traffic (no utun-inet6 pass rule is
- * ever emitted in that case, so nothing here stops v6 from routing around
- * the tunnel via the host's normal v6 route). Do not fix this unilaterally
- * in a Darwin-only slice — it's a cross-platform follow-up.
+ * ("com.apple/250.mqvpn") loaded through `pfctl -a <anchor> -f -`: allow
+ * lo0, allow the tun, allow UDP to the server, allow DHCP and ICMPv6
+ * router/neighbor discovery (so the physical links keep their leases and
+ * neighbors while everything else is blocked), drop the rest — for IPv4
+ * and, always, IPv6: a v4-only tunnel no longer leaves native IPv6 routing
+ * around it.
+ *
+ * Lifecycle: the anchor is loaded (and pf enabled) before the first
+ * connect, as soon as the server address is known, and stays loaded through
+ * every RECONNECTING. setup_killswitch() on an active kill switch reloads
+ * the ruleset in place (one atomic `-f -` replace), which is how the tun
+ * pass rule follows the utun: added at tunnel-up, dropped when the utun is
+ * destroyed. cleanup_killswitch() runs on final shutdown only.
  *
  * VERIFIED on real macOS 26.5 (arm64) — three items, each also flagged at
  * its exact use site below:
@@ -59,6 +63,15 @@
 
 #define MQVPN_PF_ANCHOR "com.apple/250.mqvpn"
 
+/* This runs as root: exec pfctl(8) by absolute path, never through the
+ * caller's PATH. The PATH-stub unit tests (tests/fake_cmd.h) build with
+ * MQVPN_DARWIN_EXEC_VIA_PATH so their fakes are found through PATH. */
+#ifdef MQVPN_DARWIN_EXEC_VIA_PATH
+#  define MQVPN_PFCTL_BIN "pfctl"
+#else
+#  define MQVPN_PFCTL_BIN "/sbin/pfctl"
+#endif
+
 /* ------------------------------------------------------------------ */
 /* exec helpers — twins of routing.c's run_route_cmd / dns.c's         */
 /* run_networksetup_capture, targeting "pfctl".                        */
@@ -79,7 +92,7 @@ run_pfctl(const char *const argv[])
          * switch loaded after exit (hardware-reproduced on macOS 26.5).
          * With SIG_IGN inherited the banner write fails with EPIPE, pfctl
          * ignores it and the flush still executes. */
-        execvp("pfctl", (char *const *)argv);
+        execvp(MQVPN_PFCTL_BIN, (char *const *)argv);
         _exit(127);
     }
     int status = 0;
@@ -126,7 +139,7 @@ run_pfctl_stdin(const char *const argv[], const char *text)
         if (dup2(fds[0], STDIN_FILENO) < 0) _exit(127);
         close(fds[0]);
         /* SIGPIPE stays SIG_IGN (inherited) — see run_pfctl. */
-        execvp("pfctl", (char *const *)argv);
+        execvp(MQVPN_PFCTL_BIN, (char *const *)argv);
         _exit(127);
     }
 
@@ -197,7 +210,7 @@ run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
         if (dup2(fds[1], STDERR_FILENO) < 0) _exit(127);
         close(fds[1]);
         /* SIGPIPE stays SIG_IGN (inherited) — see run_pfctl. */
-        execvp("pfctl", (char *const *)argv);
+        execvp(MQVPN_PFCTL_BIN, (char *const *)argv);
         _exit(127);
     }
 
@@ -232,41 +245,30 @@ run_pfctl_capture(const char *const argv[], char *out, size_t outlen)
 /* rule text builder                                                    */
 /* ------------------------------------------------------------------ */
 
-/* Builds the pf ruleset text for the anchor, replicating
- * linux/killswitch.c's iptables OUTPUT chain family gating exactly (see
- * the file header). pf's `quick` keyword makes each anchor a first-match-
- * wins list, so every "pass" line for a family MUST precede that family's
- * trailing "block" line; the relative order *among* the pass lines is
- * otherwise inert (lo0/tun/server-udp match disjoint traffic), so this
- * builder always emits them as: lo0 pass, [tun pass], [server pass],
- * block — same shape for both inet and inet6.
+/* Builds the pf ruleset text for the anchor. pf's `quick` keyword makes
+ * each anchor a first-match-wins list, so every "pass" line for a family
+ * MUST precede that family's trailing "block" line; the relative order
+ * *among* the pass lines is otherwise inert (they match disjoint traffic),
+ * so this builder always emits them as: lo0 pass, [tun pass], link
+ * maintenance pass, [server pass], block — same shape for inet and inet6.
  *
- * inet (v4) is unconditional: lo0 pass, tun pass, [server pass iff the
- * server is v4], block.
- *
- * inet6 is emitted only when `is_v6` (server is v6) or `has_v6` (tunnel
- * carries v6) — this single guarded block is algebraically equivalent to
- * the Linux code's two separately-triggered branches (verified case by
- * case against killswitch.c:70-112; see the gating truth table in the
- * task report / commit message):
- *   - the tun pass line is gated on `has_v6` alone (Linux's
- *     "IPv6 data plane TUN rule" block, killswitch.c:97-101);
- *   - the server pass line is gated on `is_v6` alone (Linux's
- *     `else { ip6tables ... }` branch, killswitch.c:79-94);
- *   - lo0 pass + block are gated on `is_v6 || has_v6`: Linux emits them
- *     unconditionally inside the is_v6 branch (killswitch.c:84-90), and
- *     AGAIN inside the has_v6 branch but only `if (!is_v6)`
- *     (killswitch.c:102-111) — so across all four (is_v6, has_v6)
- *     combinations they appear exactly once whenever is_v6 OR has_v6 is
- *     true, and never when both are false.
+ * Both families are always emitted (a v4-only tunnel must not leave native
+ * IPv6 open):
+ *   - the tun pass lines exist only while the utun does (tun.fd >= 0): the
+ *     ruleset is loaded before the first connect and reloaded when the utun
+ *     goes away, and a stale pass rule naming a destroyed utun would let
+ *     through whatever reuses that name; the inet6 one also needs `has_v6`;
+ *   - the server pass line goes in the server's family only;
+ *   - link maintenance: DHCPv4 (68 -> 67), DHCPv6 (546 -> 547) and ICMPv6
+ *     RS/RA/NS/NA (133-136).
  *
  * Uses a plain host match ("to <ip>") rather than Linux's explicit
  * "<ip>/<prefix>" CIDR for the server exception — pf's `to <addr>` with no
  * mask already matches that single host only (default /32 or /128), so
  * this is a syntax simplification, not a policy change.
  *
- * Returns 0 on success, -1 if `buf` was too small (defensive; ~1024 bytes
- * is generous for the <= 8 lines this ever produces).
+ * Returns 0 on success, -1 if `buf` was too small (defensive; 1024 bytes
+ * is generous for the <= 11 lines this ever produces).
  */
 static int
 build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
@@ -293,21 +295,24 @@ build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
         off += (size_t)n;                                   \
     } while (0)
 
+    int tun_exists = (p->tun.fd >= 0 && p->tun.name[0] != '\0');
+
     APPEND("pass out quick on lo0 inet\n");
-    APPEND("pass out quick on %s inet\n", p->tun.name);
+    if (tun_exists) APPEND("pass out quick on %s inet\n", p->tun.name);
+    APPEND("pass out quick inet proto udp from any port 68 to any port 67\n");
     if (!is_v6)
         APPEND("pass out quick inet proto udp to %s port = %d\n", p->server_ip_str,
                p->server_port);
     APPEND("block drop out quick inet\n");
 
-    if (is_v6 || p->has_v6) {
-        APPEND("pass out quick on lo0 inet6\n");
-        if (p->has_v6) APPEND("pass out quick on %s inet6\n", p->tun.name);
-        if (is_v6)
-            APPEND("pass out quick inet6 proto udp to %s port = %d\n", p->server_ip_str,
-                   p->server_port);
-        APPEND("block drop out quick inet6\n");
-    }
+    APPEND("pass out quick on lo0 inet6\n");
+    if (tun_exists && p->has_v6) APPEND("pass out quick on %s inet6\n", p->tun.name);
+    APPEND("pass out quick inet6 proto udp from any port 546 to any port 547\n");
+    APPEND("pass out quick inet6 proto icmp6 icmp6-type { 133, 134, 135, 136 }\n");
+    if (is_v6)
+        APPEND("pass out quick inet6 proto udp to %s port = %d\n", p->server_ip_str,
+               p->server_port);
+    APPEND("block drop out quick inet6\n");
 
 #undef APPEND
     return 0;
@@ -320,12 +325,28 @@ build_pf_rules(const platform_ctx_t *p, char *buf, size_t buflen)
 int
 setup_killswitch(platform_ctx_t *p)
 {
-    if (!p->killswitch_enabled || p->killswitch_active) return 0;
+    if (!p->killswitch_enabled) return 0;
 
-    char rules[1024];
+    char rules[2048];
     if (build_pf_rules(p, rules, sizeof(rules)) < 0) {
         LOG_WRN("failed to build pf kill switch rule text");
         return -1;
+    }
+
+    if (p->killswitch_active) {
+        /* Already loaded and pf already enabled (token held): replace the
+         * ruleset in place so the tun pass rule tracks the current utun. A
+         * failed replace leaves the previous ruleset loaded — still
+         * blocking — and is the caller's to judge; never unwind here, that
+         * would drop the block. */
+        const char *reload_argv[] = {"pfctl", "-a", MQVPN_PF_ANCHOR, "-f", "-", NULL};
+        if (run_pfctl_stdin(reload_argv, rules) < 0) {
+            LOG_WRN("failed to update pf kill switch rules in anchor %s",
+                    MQVPN_PF_ANCHOR);
+            return -1;
+        }
+        LOG_DBG("kill switch rules updated (pf anchor %s)", MQVPN_PF_ANCHOR);
+        return 0;
     }
 
     /* `-f -` is a single atomic ruleset replace on the pfctl side (unlike
@@ -460,10 +481,10 @@ kill_switch_flush_stale_anchor(void)
      * the file header's crash-residue note. This is deliberately a startup
      * step (darwin_platform_run_client's stale-recovery block) and NOT
      * part of setup_killswitch(), for two reasons:
-     *   (a) setup_killswitch only runs once the tunnel is up, but a stale
-     *       blocking anchor can prevent the connection from ever reaching
-     *       tunnel-up in the first place (e.g. this run's server differs
-     *       from the one the stale rules whitelist);
+     *   (a) setup_killswitch first runs only after the server name is
+     *       resolved, and a stale blocking anchor can prevent that
+     *       resolution (or, if this run's server differs from the one the
+     *       stale rules whitelist, the connection) from ever happening;
      *   (b) a restart WITHOUT --kill-switch never calls setup_killswitch
      *       at all, yet must still recover the host's connectivity.
      * A nonexistent/empty anchor failing this call is the NORMAL case

@@ -9,6 +9,7 @@
 
 #include "mqvpn_bind_winsock.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -33,6 +34,11 @@ void *mqvpn_seam_ws_calloc(size_t n, size_t sz);
 #define BIND_WINSOCK_DEFAULT_SOCKBUF (7 * 1024 * 1024)
 /* largest UDP payload; the platform's pre-bind read loop used the same */
 #define BIND_WINSOCK_RX_BUF 65536
+
+/* mstcpip.h in the Windows SDK, mswsock.h in mingw-w64: define it here */
+#ifndef SIO_UDP_CONNRESET
+#  define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 
 typedef struct {
     SOCKET sock; /* borrowed */
@@ -68,6 +74,21 @@ ws_apply_sockbuf(SOCKET s, int bytes, const char *label)
                 snd, rcv);
 }
 
+/* Winsock reports an ICMP port-unreachable for an earlier sendto() as
+ * WSAECONNRESET on a later recvfrom() of the same UDP socket, which ends a
+ * drain early and means nothing to QUIC (it has its own loss detection).
+ * Turn that reporting off. Best effort, like the buffers. */
+static void
+ws_disable_connreset(SOCKET s, const char *label)
+{
+    BOOL report = FALSE;
+    DWORD ret = 0;
+    if (WSAIoctl(s, SIO_UDP_CONNRESET, &report, (DWORD)sizeof(report), NULL, 0, &ret,
+                 NULL, NULL) == SOCKET_ERROR)
+        LOG_WRN("bind-winsock: SIO_UDP_CONNRESET off on %s: WSA %d", label,
+                WSAGetLastError());
+}
+
 /* ── ops ── */
 
 static int
@@ -85,6 +106,8 @@ ws_ops_send(void *vctx, const mqvpn_datagram_t *bufs, unsigned n,
             r = WS_SENDTO(c->sock, (const char *)bufs[sent].data, (int)bufs[sent].len, 0,
                           peer, peer_len);
         } while (r == SOCKET_ERROR && (err = WSAGetLastError()) == WSAEINTR);
+        /* too large for the interface with DF set (PMTUD): a lost packet */
+        if (r == SOCKET_ERROR && err == WSAEMSGSIZE) continue;
         if (r == SOCKET_ERROR) break;
         c->tx.tx_sends++;
         c->tx.tx_datagrams++;
@@ -122,6 +145,20 @@ mqvpn_bind_winsock_path_new(SOCKET sock, const mqvpn_bind_winsock_opts_t *opts,
     if (!WS_OPT_HAS(opts, socket_buf_bytes)) return MQVPN_ERR_INVALID_ARG;
     bind_winsock_ctx_t *c = WS_CALLOC(1, sizeof(*c));
     if (!c) return MQVPN_ERR_NO_MEMORY;
+    /* DF after the allocation and before anything else changes the socket,
+     * so a failure leaves it as it was: PMTUD cannot work on a socket that
+     * fragments, so the bind is refused (as the POSIX bind) */
+    if (WS_OPT_HAS(opts, dont_fragment) && opts->dont_fragment) {
+        struct sockaddr_storage ss;
+        int ss_len = (int)sizeof(ss);
+        if (getsockname(sock, (struct sockaddr *)&ss, &ss_len) != 0 ||
+            mqvpn_socket_set_dontfrag(sock, ss.ss_family) < 0) {
+            LOG_ERR("bind-winsock: cannot set DF on socket %llu: WSA %d",
+                    (unsigned long long)sock, WSAGetLastError());
+            free(c);
+            return MQVPN_ERR_INVALID_STATE;
+        }
+    }
     c->sock = sock;
     /* Prefix copy: a field is read only when the caller's struct_size covers
      * it whole, and opts is never retained. An uncovered tag stays "". */
@@ -131,6 +168,7 @@ mqvpn_bind_winsock_path_new(SOCKET sock, const mqvpn_bind_winsock_opts_t *opts,
     }
     char lbl[32];
     ws_apply_sockbuf(sock, opts->socket_buf_bytes, ws_label(c, lbl, sizeof(lbl)));
+    ws_disable_connreset(sock, ws_label(c, lbl, sizeof(lbl)));
     *out_ctx = c;
     return MQVPN_OK;
 }
@@ -172,10 +210,11 @@ mqvpn_bind_winsock_path_drain(void *vctx, mqvpn_client_t *client,
             int e = WSAGetLastError();
             if (e == WSAEINTR) continue;
             if (e == WSAEWOULDBLOCK) break;
-            /* Anything else ends the drain — WSAECONNRESET (an ICMP
-             * port-unreachable reported against an earlier send) included,
-             * exactly as the platform's pre-bind loop stopped on n <= 0. The
-             * level-triggered event re-fires for whatever is still queued. */
+            /* Anything else ends the drain, exactly as the platform's
+             * pre-bind loop stopped on n <= 0 — including WSAECONNRESET
+             * should the SIO_UDP_CONNRESET opt-out in path_new have failed.
+             * The level-triggered event re-fires for whatever is still
+             * queued. */
             return -1;
         }
         if (r == 0) break; /* zero-length datagram: stop, as the old loop did */

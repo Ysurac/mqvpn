@@ -5,7 +5,7 @@
  * libmqvpn — Multipath QUIC VPN library
  *
  * Public API header (single file).
- * Version: 0.17.0 (callback ABI version 3)
+ * Version: 0.18.0 (callback ABI version 3)
  *
  * Thread safety: All functions must be called from a single thread
  * (the "tick thread"). Debug builds assert this (ASSERT_TICK_THREAD inside the library).
@@ -38,7 +38,7 @@ extern "C" {
 /* ─── Version ─── */
 
 #define MQVPN_VERSION_MAJOR 0
-#define MQVPN_VERSION_MINOR 17
+#define MQVPN_VERSION_MINOR 18
 #define MQVPN_VERSION_PATCH 0
 
 /* ─── ABI ─── */
@@ -211,55 +211,56 @@ typedef enum {
 } mqvpn_mode_t;
 
 typedef enum {
-    MQVPN_CC_BBR2      = 0, /* default */
-    MQVPN_CC_BBR       = 1,
-    MQVPN_CC_CUBIC     = 2,
-    MQVPN_CC_NEW_RENO  = 3,
-    MQVPN_CC_COPA      = 4,
+    MQVPN_CC_BBR2 = 0, /* default */
+    MQVPN_CC_BBR = 1,
+    MQVPN_CC_CUBIC = 2,
+    MQVPN_CC_NEW_RENO = 3,
+    MQVPN_CC_COPA = 4,
     MQVPN_CC_UNLIMITED = 5,
-    MQVPN_CC_NONE      = 6, /* alias for UNLIMITED: no congestion control */
+    MQVPN_CC_NONE = 6, /* alias for UNLIMITED: no congestion control */
 } mqvpn_cc_t;
 
 typedef enum {
-    MQVPN_SCHED_MINRTT      = 0,
-    MQVPN_SCHED_WLB         = 1,
-    MQVPN_SCHED_BACKUP      = 2,
-    MQVPN_SCHED_BACKUP_FEC  = 3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
-    MQVPN_SCHED_RAP         = 4,
+    MQVPN_SCHED_MINRTT = 0,
+    MQVPN_SCHED_WLB = 1,
+    MQVPN_SCHED_BACKUP = 2,
+    MQVPN_SCHED_BACKUP_FEC =
+        3, /* FEC repair on standby path. Requires XQC_ENABLE_FEC build. */
+    MQVPN_SCHED_RAP = 4,
     MQVPN_SCHED_WLB_UDP_PIN = 5, /* WLB + 5-tuple pin for UDP flows. */
-    MQVPN_SCHED_WRTT        = 6, /* Weight+RTT: higher weight wins; equal-weight paths
-                                   * broken by min RTT. Overflow to lower-weight paths
-                                   * when cwnd-full. Set via mqvpn_path_desc_t.weight
-                                   * (like ip route nexthop weight N). Default: 1.
-                                   * Uplink weight is client-set (mqvpn_path_desc_t /
-                                   * mqvpn_client_set_path_weight()); downlink weight is
-                                   * set independently server-side via
-                                   * mqvpn_server_set_path_weight() — each side only
-                                   * schedules the packets *it* sends. */
-    MQVPN_SCHED_WRR         = 7, /* Weighted Round Robin: interleaves packets across
-                                   * all usable paths in proportion to weight (smooth
-                                   * WRR), unlike WRTT's single-path-until-cwnd-blocked
-                                   * bias. Set via mqvpn_path_desc_t.weight. Default: 1.
-                                   * Same client/server split as MQVPN_SCHED_WRTT above. */
-    MQVPN_SCHED_REDUNDANT   = 8, /* Broadcast every packet on every usable path
-                                   * (AVAILABLE and STANDBY alike). Maximizes loss
-                                   * resilience at the cost of bandwidth; intended for
-                                   * low-bitrate, loss/latency-critical traffic. */
-    MQVPN_SCHED_DSCP        = 9, /* Policy routing by DSCP class: packets carrying a
-                                   * DSCP codepoint (the inner IP header's traffic
-                                   * class, 1-63) are sent on the path(s) assigned
-                                   * that class via mqvpn_path_desc_t.dscp_mask /
-                                   * MQVPN_DSCP_BIT() (like 'ip rule ... fwmark N
-                                   * table T'); min RTT breaks ties between paths
-                                   * sharing a class. Untagged packets (DSCP 0, the
-                                   * default) and any class with no assigned path
-                                   * currently usable fall back to plain MinRTT
-                                   * across every path rather than stalling. Uplink
-                                   * assignment is client-set (mqvpn_path_desc_t /
-                                   * mqvpn_client_set_path_dscp_mask()); downlink
-                                   * assignment is set independently server-side via
-                                   * mqvpn_server_set_path_dscp_mask() — each side
-                                   * only schedules the packets *it* sends. */
+    MQVPN_SCHED_WRTT = 6,        /* Weight+RTT: higher weight wins; equal-weight paths
+                                  * broken by min RTT. Overflow to lower-weight paths
+                                  * when cwnd-full. Set via mqvpn_path_desc_t.weight
+                                  * (like ip route nexthop weight N). Default: 1.
+                                  * Uplink weight is client-set (mqvpn_path_desc_t /
+                                  * mqvpn_client_set_path_weight()); downlink weight is
+                                  * set independently server-side via
+                                  * mqvpn_server_set_path_weight() — each side only
+                                  * schedules the packets *it* sends. */
+    MQVPN_SCHED_WRR = 7,         /* Weighted Round Robin: interleaves packets across
+                                  * all usable paths in proportion to weight (smooth
+                                  * WRR), unlike WRTT's single-path-until-cwnd-blocked
+                                  * bias. Set via mqvpn_path_desc_t.weight. Default: 1.
+                                  * Same client/server split as MQVPN_SCHED_WRTT above. */
+    MQVPN_SCHED_REDUNDANT = 8,   /* Broadcast every packet on every usable path
+                                  * (AVAILABLE and STANDBY alike). Maximizes loss
+                                  * resilience at the cost of bandwidth; intended for
+                                  * low-bitrate, loss/latency-critical traffic. */
+    MQVPN_SCHED_DSCP = 9,        /* Policy routing by DSCP class: packets carrying a
+                                  * DSCP codepoint (the inner IP header's traffic
+                                  * class, 1-63) are sent on the path(s) assigned
+                                  * that class via mqvpn_path_desc_t.dscp_mask /
+                                  * MQVPN_DSCP_BIT() (like 'ip rule ... fwmark N
+                                  * table T'); min RTT breaks ties between paths
+                                  * sharing a class. Untagged packets (DSCP 0, the
+                                  * default) and any class with no assigned path
+                                  * currently usable fall back to plain MinRTT
+                                  * across every path rather than stalling. Uplink
+                                  * assignment is client-set (mqvpn_path_desc_t /
+                                  * mqvpn_client_set_path_dscp_mask()); downlink
+                                  * assignment is set independently server-side via
+                                  * mqvpn_server_set_path_dscp_mask() — each side
+                                  * only schedules the packets *it* sends. */
 } mqvpn_scheduler_t;
 
 /* Build a DSCP class bitmask for mqvpn_path_desc_t.dscp_mask /
@@ -274,7 +275,7 @@ typedef enum {
     MQVPN_REINJ_OFF = 0,
     MQVPN_REINJ_DEADLINE = 1, /* stream lane: lateness + LOW-class duplication */
     MQVPN_REINJ_IDLE = 2,     /* stream lane: duplicate unacked when send queue idle */
-    MQVPN_REINJ_DGRAM = 3,    /* datagram lane: duplicate every DATAGRAM once */
+    /* 3 was MQVPN_REINJ_DGRAM (removed); do not reuse */
 } mqvpn_reinjection_t;
 
 /* Flow-aware reorder-only datagram delivery (see reorder design spec).
@@ -295,9 +296,9 @@ typedef enum {
 } mqvpn_reorder_profile_t;
 
 typedef enum {
-    MQVPN_FEC_SCHEME_REED_SOLOMON      = 0,
-    MQVPN_FEC_SCHEME_XOR               = 1,
-    MQVPN_FEC_SCHEME_PACKET_MASK       = 2,
+    MQVPN_FEC_SCHEME_REED_SOLOMON = 0,
+    MQVPN_FEC_SCHEME_XOR = 1,
+    MQVPN_FEC_SCHEME_PACKET_MASK = 2,
     MQVPN_FEC_SCHEME_GALOIS_CALCULATION = 3,
 } mqvpn_fec_scheme_t;
 
@@ -463,6 +464,12 @@ typedef struct {
      * in on_client_connected. */
     uint8_t assigned_prefix6;
     int has_v6; /* 1 = IPv6 assigned */
+    /* Server's effective scheduler for this connection — appended under ABI 3.
+     * Client only (the server leaves both 0). has_server_scheduler = 0: the
+     * server did not report one (older server). Read only when struct_size
+     * covers these fields. */
+    int has_server_scheduler;
+    int server_scheduler; /* mqvpn_scheduler_t */
 } mqvpn_tunnel_info_t;
 
 typedef struct {
@@ -475,7 +482,8 @@ typedef struct {
     uint64_t dgram_acked;
     int srtt_ms;
     /* Hybrid-mode per-lane counters (0 unless hybrid classifier active).
-     * tcp/dgram/raw partition every classified packet exactly once. */
+     * tcp/dgram/raw partition every classified packet exactly once.
+     * pkts_lane_* and tcp_flows_* appended under ABI 2. */
     uint64_t pkts_lane_tcp;   /* packets actually handed to the TCP lane (lwIP) */
     uint64_t pkts_lane_dgram; /* packets sent via the datagram lane */
     uint64_t pkts_lane_raw;   /* packets sent via the raw lane, incl. TCP
@@ -494,11 +502,11 @@ typedef struct {
      * failures are not counted). */
     uint64_t tcp_flows_rejected;
     /* pkts_lane_tcp_dropped: client-only — TCP-lane packets lwIP refused
-     * (e.g. no matching pcb). Always 0 server-side. */
+     * (e.g. no matching pcb). Always 0 server-side. Appended under ABI 2. */
     uint64_t pkts_lane_tcp_dropped;
     /* raw_markers_active: client-only gauge — sticky-RAW markers currently
      * held in the TCP-lane flow table (5-tuples pinned to RAW under
-     * tcp=auto). Always 0 server-side. */
+     * tcp=auto). Always 0 server-side. Appended under ABI 2. */
     uint64_t raw_markers_active;
     /* Outer-UDP transmit offload counters, the live counterpart of the
      * "udp-tx: " teardown log line. udp_tx_datagrams / udp_tx_sends is the
@@ -515,7 +523,8 @@ typedef struct {
      * ever sees one datagram at a time because every receive arrives through
      * mqvpn_client_on_socket_recv() / mqvpn_server_on_socket_recv(). The
      * platform harvests those counters from the bind, and the server's
-     * control API reports them from there (see ctrl_socket_create). */
+     * control API reports them from there (see ctrl_socket_create).
+     * Appended under ABI 2. */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
 } mqvpn_stats_t;
@@ -524,7 +533,7 @@ typedef struct {
     uint32_t struct_size;
     mqvpn_path_handle_t handle;
     mqvpn_path_status_t status;
-    char name[16]; /* interface name */
+    char name[16];  /* interface name */
     uint32_t flags; /* MQVPN_PATH_FLAG_* bitmask (e.g. MQVPN_PATH_FLAG_BACKUP) */
     int srtt_ms;
     uint64_t bytes_tx;
@@ -586,9 +595,15 @@ typedef struct {
 } mqvpn_path_desc_t;
 
 /* Path descriptor flags */
-#define MQVPN_PATH_FLAG_BACKUP  (1u << 0)  /* standby/failover path: only used when all
-                                             * primary paths are unavailable, then put
-                                             * back to standby when a primary recovers */
+/* Backup (failover) path: created and validated like any other path but held
+ * in STANDBY (status MQVPN_PATH_STANDBY, PATH_STATUS_BACKUP sent to the
+ * peer), so it stays probed. Schedulers send no new data on a standby path
+ * while a working primary path exists, and return to the primaries when one
+ * recovers; the peer's schedulers do the same for the downlink. Exceptions:
+ * redundant replicates onto standby paths, backup_fec sends its FEC repair
+ * on them, and backup also uses a standby path that performs better than
+ * every primary (a slow or loaded primary). */
+#define MQVPN_PATH_FLAG_BACKUP (1u << 0)
 
 /* ─── Callback function types ─── */
 
@@ -744,6 +759,12 @@ MQVPN_API int mqvpn_config_set_insecure(mqvpn_config_t *cfg, int insecure);
  * MQVPN_ERR_INVALID_ARG, leaving the config unchanged, on a malformed list. */
 MQVPN_API int mqvpn_config_set_pinned_pubkey(mqvpn_config_t *cfg, const char *pins);
 MQVPN_API int mqvpn_config_set_scheduler(mqvpn_config_t *cfg, mqvpn_scheduler_t sched);
+/* Server only: when non-zero, a client that asks for a scheduler gets it for its
+ * own connection's download direction. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_allow_client_scheduler(mqvpn_config_t *cfg, int enabled);
+/* Client only: when non-zero, ask the server to use this config's scheduler for the
+ * download direction too. Needs a server with the knob above on. Default 0 (off). */
+MQVPN_API int mqvpn_config_set_request_server_scheduler(mqvpn_config_t *cfg, int enabled);
 MQVPN_API int mqvpn_config_set_cc(mqvpn_config_t *cfg, mqvpn_cc_t cc);
 MQVPN_API int mqvpn_config_set_fec(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_fec_scheme(mqvpn_config_t *cfg, mqvpn_fec_scheme_t scheme);
@@ -758,6 +779,15 @@ MQVPN_API int mqvpn_config_set_reinjection_deadline_params(mqvpn_config_t *cfg,
                                                            int srtt_factor_pct,
                                                            int hard_deadline_ms,
                                                            int deadline_lower_bound_ms);
+
+/* Redundant mode (client only): send each uplink UDP packet on every usable
+ * path. An empty port list (n_ports == 0) duplicates all UDP; otherwise only
+ * the listed destination ports. Returns MQVPN_ERR_INVALID_ARG for a NULL cfg,
+ * n_ports > MQVPN_REDUNDANT_MAX_PORTS, ports == NULL with n_ports > 0, or a 0
+ * port; duplicates are removed after the count check. */
+#define MQVPN_REDUNDANT_MAX_PORTS 16
+MQVPN_API int mqvpn_config_set_redundant(mqvpn_config_t *cfg, int enabled,
+                                         const uint16_t *ports, size_t n_ports);
 MQVPN_API int mqvpn_config_set_log_level(mqvpn_config_t *cfg, mqvpn_log_level_t level);
 MQVPN_API int mqvpn_config_set_multipath(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_reconnect(mqvpn_config_t *cfg, int enable,
@@ -771,6 +801,22 @@ MQVPN_API int mqvpn_config_set_killswitch_hint(mqvpn_config_t *cfg, int enable);
 MQVPN_API int mqvpn_config_set_init_max_path_id(mqvpn_config_t *cfg, uint64_t v);
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
+/* Underlay path MTU the outer QUIC packets are sized for: 0 = default
+ * (1400-byte packets, TUN MTU ~1382), 1280..9000 = largest IP packet the
+ * path carries. Packets are capped at xquic's limit (TUN MTU 1418).
+ * IPv6 requires capacity for 1280 inner bytes, including room for reorder:
+ * insufficient capacity fails server_start or notifies client tunnel_closed
+ * with MQVPN_ERR_INVALID_ARG when IPv6 is assigned. */
+MQVPN_API int mqvpn_config_set_path_mtu(mqvpn_config_t *cfg, int mtu);
+
+/* Discover the path MTU (both ends must enable it): packets start at a size
+ * any path carries and grow while larger probes are acknowledged, up to the
+ * PathMTU size (or the default cap). Default 0 (off).
+ * The UDP sockets must send with DF set, so that a probe that does not fit
+ * is lost rather than fragmented: the bundled binds and platform layers do
+ * it (mqvpn_bind_posix_opts_t / mqvpn_bind_winsock_opts_t dont_fragment); a
+ * caller with its own transport must set DF on its sockets itself. */
+MQVPN_API int mqvpn_config_set_pmtud(mqvpn_config_t *cfg, int enable);
 
 /* Override TUN MTU. 0 = auto (derived from MASQUE datagram MSS, floor 1280).
  * Positive values pin the TUN MTU on both client and server. Valid range: 68–65535. */
@@ -934,7 +980,11 @@ MQVPN_API int mqvpn_config_set_sync_path_labels(mqvpn_config_t *cfg, int enabled
  * a server-side pin has any effect on the client's own scheduling. */
 MQVPN_API int mqvpn_config_set_push_path_labels(mqvpn_config_t *cfg, int enabled);
 
-/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock) */
+/* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock). xquic's
+ * clock is process-wide: while a client or a server of the process runs,
+ * mqvpn_client_new() fails for a client on another clock, and
+ * mqvpn_server_new() (always on the library's clock) fails next to a client
+ * with an injected one. */
 typedef uint64_t (*mqvpn_clock_fn)(void *ctx);
 MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_fn,
                                      void *clock_ctx);
@@ -955,10 +1005,11 @@ MQVPN_API int mqvpn_config_set_clock(mqvpn_config_t *cfg, mqvpn_clock_fn clock_f
  * macOS that is the system-provided bundle, not the Keychain). Platforms
  * without an OS bundle at those paths (Windows, Android) must install a
  * verifier or set SSL_CERT_FILE; without one, every CA-signed chain is
- * rejected there. A library-side rejection (unknown issuer, self-signed,
- * expired, hostname mismatch) surfaces as the plain connection close,
- * tunnel_closed(MQVPN_ERR_CLOSED); only a verifier's rejection is reported
- * as MQVPN_ERR_TLS. insecure=1
+ * rejected there. A rejected certificate is reported once, as
+ * tunnel_closed(MQVPN_ERR_TLS), whether a verifier or the library (unknown
+ * issuer, self-signed, expired, hostname mismatch) rejected it, and the
+ * client then goes to CLOSED even with reconnect enabled. insecure=1
+ * checks nothing, so it never reports MQVPN_ERR_TLS, and
  * takes precedence over a verifier (a WARN is logged at client creation).
  * Passing fn=NULL restores library-side verification (ctx is ignored). ctx
  * must stay valid until the client is destroyed (the config is copied at
@@ -976,6 +1027,11 @@ MQVPN_API int mqvpn_config_set_tls_cert(mqvpn_config_t *cfg, const char *cert,
                                         const char *key);
 MQVPN_API int mqvpn_config_set_tls_ciphers(mqvpn_config_t *cfg, const char *ciphers);
 MQVPN_API int mqvpn_config_set_max_clients(mqvpn_config_t *cfg, int max);
+/* Most established tunnels one credential may hold at once (0 = unlimited,
+ * the default). The credential is the configured user, or the global key
+ * for every client using it whatever x-user name it sends. A request over
+ * the cap is refused with 403. Negative values are rejected. */
+MQVPN_API int mqvpn_config_set_max_sessions_per_user(mqvpn_config_t *cfg, int max);
 
 /* ─── Client API ─── */
 
@@ -1006,6 +1062,9 @@ MQVPN_API void mqvpn_client_destroy(mqvpn_client_t *client);
  * state_changed) may call them normally — e.g. cancelling further retries
  * via disconnect() from reconnect_scheduled is supported. */
 MQVPN_API int mqvpn_client_connect(mqvpn_client_t *client);
+/* 1 when the client's config enables PMTUD: a platform that opens its own
+ * path sockets sets DF on them (mqvpn_bind_posix_opts_t.dont_fragment). */
+MQVPN_API int mqvpn_client_pmtud_enabled(const mqvpn_client_t *client);
 MQVPN_API int mqvpn_client_disconnect(mqvpn_client_t *client);
 
 /*
@@ -1068,8 +1127,7 @@ MQVPN_API int mqvpn_client_remove_path(mqvpn_client_t *client, mqvpn_path_handle
  * (an explicit server-side call always overrides the client's report).
  */
 MQVPN_API int mqvpn_client_set_path_weight(mqvpn_client_t *client,
-                                            mqvpn_path_handle_t handle,
-                                            uint32_t weight);
+                                           mqvpn_path_handle_t handle, uint32_t weight);
 
 /**
  * Set the DSCP scheduler class bitmask for a path identified by its handle
@@ -1084,8 +1142,8 @@ MQVPN_API int mqvpn_client_set_path_weight(mqvpn_client_t *client,
  * only for pinning the server to a different mask than the client.
  */
 MQVPN_API int mqvpn_client_set_path_dscp_mask(mqvpn_client_t *client,
-                                               mqvpn_path_handle_t handle,
-                                               uint64_t dscp_mask);
+                                              mqvpn_path_handle_t handle,
+                                              uint64_t dscp_mask);
 
 /*
  * Drop a path slot on platform-detected removal (carrier loss, RTM_DELLINK,
@@ -1190,6 +1248,13 @@ MQVPN_API int mqvpn_client_tick(mqvpn_client_t *client);
 /* Query state */
 MQVPN_API mqvpn_client_state_t mqvpn_client_get_state(const mqvpn_client_t *client);
 
+/* Out-parameter structs (mqvpn_stats_t, mqvpn_interest_t, the
+ * mqvpn_path_info_t array) grow only by appending fields. Set struct_size to
+ * sizeof(*out) (for get_paths, in out[0]; it is the array stride) before the
+ * call: the client fills at most that many bytes and writes back the size it
+ * filled. A struct_size below the layout libmqvpn.so.4 shipped with (0
+ * included) is taken as that layout, so callers that never set it keep
+ * working. */
 MQVPN_API int mqvpn_client_get_stats(const mqvpn_client_t *client, mqvpn_stats_t *out);
 
 /* Lists every path slot the client has used, in slot order, CLOSED ones
@@ -1297,6 +1362,11 @@ MQVPN_API int mqvpn_server_get_n_clients(const mqvpn_server_t *server);
 MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server, const char *username,
                                     const char *key);
 
+/* Remove a user and close its active sessions. A server that was created with
+ * a credential, or that had one added, keeps requiring auth after the last
+ * credential is removed: every new request is then refused until a user is
+ * added. Only a server that never had a credential admits clients without
+ * auth. */
 MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server, const char *username);
 
 /* Assign or clear a fixed (pinned) IP for a user at runtime.
@@ -1396,11 +1466,13 @@ MQVPN_API int mqvpn_server_set_path_dscp_mask(mqvpn_server_t *server, const char
  * user, with no separate action needed on the router — see
  * mqvpn_path_label.h's "Problem 3" and MQVPN_CAPSULE_PATH_LABEL_PUSH.
  */
-MQVPN_API int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *server, const char *user,
-                                                     const char *iface, uint32_t weight);
+MQVPN_API int mqvpn_server_set_path_weight_by_iface(mqvpn_server_t *server,
+                                                    const char *user, const char *iface,
+                                                    uint32_t weight);
 MQVPN_API int mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *server,
-                                                        const char *user, const char *iface,
-                                                        uint64_t dscp_mask);
+                                                       const char *user,
+                                                       const char *iface,
+                                                       uint64_t dscp_mask);
 
 /* ─── Utility API ─── */
 

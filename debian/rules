@@ -1,38 +1,58 @@
 #!/usr/bin/make -f
 # debian/rules for mqvpn
+#
+# Builds the pinned BoringSSL and xquic submodules, then mqvpn, the same way
+# build.sh does (same build dirs, same xquic options, same BoringSSL
+# provenance guard), with the dpkg-buildflags hardening flags applied to all
+# three.
 
 export DH_VERBOSE = 1
 
-# Parallel build
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+include /usr/share/dpkg/architecture.mk
+
+# CMake takes CFLAGS/CXXFLAGS/LDFLAGS from the environment (exported above)
+# but ignores CPPFLAGS, which carries -D_FORTIFY_SOURCE: pass both explicitly.
+HARDENED_CFLAGS   = $(CPPFLAGS) $(CFLAGS)
+HARDENED_CXXFLAGS = $(CPPFLAGS) $(CXXFLAGS)
+
+JOBS = $(or $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS))),$(shell nproc))
 
 # Build directory used by debhelper
 B = $(CURDIR)/obj-$(DEB_HOST_GNU_TYPE)
 
-BORINGSSL_DIR  = $(CURDIR)/third_party/xquic/third_party/boringssl
+BORINGSSL_DIR   = $(CURDIR)/third_party/xquic/third_party/boringssl
 BORINGSSL_BUILD = $(BORINGSSL_DIR)/build
-XQUIC_DIR      = $(CURDIR)/third_party/xquic
-XQUIC_BUILD    = $(XQUIC_DIR)/build
+XQUIC_DIR       = $(CURDIR)/third_party/xquic
+XQUIC_BUILD     = $(XQUIC_DIR)/build
+
+BSSL_GUARD = bash -c '. $(CURDIR)/scripts/bssl_build_guard.sh && "$$0" "$$1" "$$2"'
 
 %:
 	dh $@
 
-# 1. Build BoringSSL (static, position-independent)
-$(BORINGSSL_BUILD)/ssl/libssl.a:
-	mkdir -p $(BORINGSSL_BUILD)
-	cd $(BORINGSSL_BUILD) && cmake \
+override_dh_auto_configure:
+	# 1. BoringSSL (static, position-independent). The guard wipes a build
+	# dir produced from a different BoringSSL source (see
+	# scripts/bssl_build_guard.sh); CMAKE_BUILD_TYPE=Release is mandatory.
+	# -fno-lto: BoringSSL compiles with -Werror, and its LTO IR would carry
+	# that into the libxquic.so link, where GCC 11 (arm64) raises a false
+	# -Wfree-nonheap-object in BN_MONT_CTX_free.
+	$(BSSL_GUARD) bssl_guard_build_dir $(BORINGSSL_DIR) $(BORINGSSL_BUILD)
+	cmake -S $(BORINGSSL_DIR) -B $(BORINGSSL_BUILD) \
 		-DBUILD_SHARED_LIBS=0 \
-		-DCMAKE_C_FLAGS="-fPIC" \
-		-DCMAKE_CXX_FLAGS="-fPIC" \
 		-DCMAKE_BUILD_TYPE=Release \
-		..
-	$(MAKE) -C $(BORINGSSL_BUILD) -j$(shell nproc) ssl crypto
-
-# 2. Build xquic
-$(XQUIC_BUILD)/libxquic.a: $(BORINGSSL_BUILD)/ssl/libssl.a
-	mkdir -p $(XQUIC_BUILD)
-	cd $(XQUIC_BUILD) && cmake \
+		-DCMAKE_C_FLAGS="$(HARDENED_CFLAGS) -fPIC -fno-lto" \
+		-DCMAKE_CXX_FLAGS="$(HARDENED_CXXFLAGS) -fPIC -fno-lto"
+	$(MAKE) -C $(BORINGSSL_BUILD) -j$(JOBS) ssl crypto
+	$(BSSL_GUARD) bssl_stamp_build_dir $(BORINGSSL_DIR) $(BORINGSSL_BUILD)
+	bash $(CURDIR)/scripts/ci_check_bssl_optimized.sh $(BORINGSSL_BUILD)
+	# 2. xquic (libxquic.so + libxquic-static.a); options as in build.sh.
+	cmake -S $(XQUIC_DIR) -B $(XQUIC_BUILD) \
 		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_FLAGS="$(HARDENED_CFLAGS)" \
 		-DSSL_TYPE=boringssl \
 		-DSSL_PATH=$(BORINGSSL_DIR) \
 		-DXQC_ENABLE_BBR2=ON \
@@ -42,36 +62,44 @@ $(XQUIC_BUILD)/libxquic.a: $(BORINGSSL_BUILD)/ssl/libssl.a
 		-DXQC_ENABLE_FEC=ON \
 		-DXQC_ENABLE_XOR=ON \
 		-DXQC_ENABLE_RSC=ON \
-		-DXQC_ENABLE_PKM=ON \
-		..
-	$(MAKE) -C $(XQUIC_BUILD) -j$(shell nproc)
-
-override_dh_auto_configure: $(XQUIC_BUILD)/libxquic.a
-	mkdir -p $(B)
-	cd $(B) && cmake \
+		-DXQC_ENABLE_PKM=ON
+	$(MAKE) -C $(XQUIC_BUILD) -j$(JOBS)
+	# 3. mqvpn
+	cmake -S $(CURDIR) -B $(B) \
 		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_FLAGS="$(HARDENED_CFLAGS)" \
 		-DCMAKE_INSTALL_PREFIX=/usr \
-		-DXQUIC_BUILD_DIR=$(XQUIC_BUILD) \
-		$(CURDIR)
+		-DXQUIC_BUILD_DIR=$(XQUIC_BUILD)
 
 override_dh_auto_build:
-	$(MAKE) -C $(B) -j$(shell nproc)
+	$(MAKE) -C $(B) -j$(JOBS)
 
 override_dh_auto_install:
 	$(MAKE) -C $(B) install DESTDIR=$(CURDIR)/debian/tmp
 
-	# cmake installs examples to $(prefix)/etc/mqvpn which becomes
-	# /usr/etc/mqvpn — move them to /etc/mqvpn instead.
-	install -d $(CURDIR)/debian/tmp/etc/mqvpn
-	if [ -d $(CURDIR)/debian/tmp/usr/etc/mqvpn ]; then \
-		mv $(CURDIR)/debian/tmp/usr/etc/mqvpn/* $(CURDIR)/debian/tmp/etc/mqvpn/; \
-		rmdir $(CURDIR)/debian/tmp/usr/etc/mqvpn; \
-		rmdir --ignore-fail-on-non-empty $(CURDIR)/debian/tmp/usr/etc; \
-	fi
+# dh_fixperms resets directories to 0755; /etc/mqvpn holds PSKs and TLS
+# private keys, so ship it 0750 (debian/mqvpn.postinst fixes existing ones).
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0750 debian/mqvpn/etc/mqvpn
 
+# Unit tests run in the build chroot and their failures fail the build.
+# check_cert_fixtures is excluded: it validates the committed certificate
+# fixtures with openssl and python3, which the package does not build-depend
+# on, and says nothing about the binaries being packaged.
 override_dh_auto_test:
-	# Unit tests require a build dir; run if available.
-	if [ -d $(B) ]; then cd $(B) && ctest --output-on-failure || true; fi
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cd $(B) && ctest --output-on-failure -j$(JOBS) -E '^check_cert_fixtures$$'
+endif
+
+# The units are installed under usr/lib/systemd/system, which older
+# debhelper releases (such as Ubuntu 22.04's) do not scan, while newer ones
+# would enable and start mqvpn-server on install. Keep the result
+# the same everywhere: never enable or start anything (both need a config
+# the admin writes first); debian/mqvpn.prerm stops and, on removal,
+# disables the services explicitly.
+override_dh_installsystemd:
+	dh_installsystemd --no-enable --no-start
 
 override_dh_builddeb:
 	# Keep .deb members broadly compatible with older dpkg versions.

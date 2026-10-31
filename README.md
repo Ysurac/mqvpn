@@ -258,11 +258,10 @@ Scheduler = wlb
 # Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
 # Scheduler = redundant         # broadcast every packet on every usable path (loss-critical, low-bitrate)
 # Scheduler = dscp               # route by inner packet's DSCP class (set per-path masks via control API)
-# ReinjectionControl = true
-# ReinjectionMode = default   # default|deadline|dgram
+# Reinjection = off          # off|deadline|idle|dgram (speculative duplication)
 # FecEnable = true
 # FecScheme = reed_solomon    # galois_calculation|packet_mask|reed_solomon|xor
-# CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited (default: bbr2)
+# CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited|none (default: bbr2)
 # SyncPathLabels = false      # default true. On the server: false = don't auto-adopt the
                                # client's own weight/dscp_mask. Configure client and server
                                # independently (see wrtt/dscp scheduler docs above); the
@@ -274,7 +273,7 @@ Enabled = true
 [Reorder]
 Enabled = on
 
-[Control]
+[Control]                  # or: Listen = 127.0.0.1:9090
 # Port = 9090          # enable JSON control API on this TCP port
 # Addr = 127.0.0.1    # bind address (default: 127.0.0.1, loopback only)
 ```
@@ -291,12 +290,14 @@ Address = 203.0.113.1:443
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
-# User = alice             # optional: identifies this client on the server (shown in status/logs)
+# Username = alice         # optional: identifies this client on the server (shown in status/logs)
 
 [Interface]
 DNS = 1.1.1.1, 8.8.8.8
-# RouteViaServer = false   # add a host route to the server IP before setting the default route
+# KillSwitch = false       # block traffic outside the tunnel, from startup until exit (also IPv6)
+# RouteViaServer = false   # catch-all routes 0.0.0.0/1 + 128.0.0.0/1 via the server's tunnel IP
 # NoRoutes = false         # skip all automatic route setup (manage routes manually)
+# ManageRoutes = true      # false = same as NoRoutes = true (upstream name)
 # MTU = 1280               # TUN MTU (1280–9000, default: auto = ~1382)
 
 [Multipath]
@@ -304,17 +305,16 @@ Scheduler = wlb
 # Scheduler = wrtt              # weighted RTT aggregation (set per-path weights via control API)
 # Scheduler = redundant         # broadcast every packet on every usable path (loss-critical, low-bitrate)
 # Scheduler = dscp               # route by inner packet's DSCP class (set per-path masks via control API)
-# ReinjectionControl = true
-# ReinjectionMode = deadline  # default|deadline|dgram
+# Reinjection = deadline     # off|deadline|idle|dgram (speculative duplication)
 # FecEnable = true
 # FecScheme = xor             # galois_calculation|packet_mask|reed_solomon|xor
-# CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited (default: bbr2)
+# CC = bbr2                   # bbr2|bbr|cubic|new_reno|copa|unlimited|none (default: bbr2)
 # SyncPathLabels = false      # default true. false = don't announce this client's own
                                # weight/dscp_mask to the server at all — the server then
                                # can't adopt it regardless of its own SyncPathLabels setting
 Path = eth0
 Path = wlan0
-# BackupPath = lte0   # failover-only: used only when all primary paths are down
+# BackupPath = lte0   # standby path: no traffic while a Path works (redundant and backup_fec still send over it)
 
 # [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
 # Enabled = true
@@ -322,7 +322,7 @@ Path = wlan0
 # [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
 # Enabled = on
 
-[Control]
+[Control]                  # or: Listen = 127.0.0.1:9091
 # Port = 9091          # enable JSON control API on this TCP port
 # Addr = 127.0.0.1    # bind address (default: 127.0.0.1, loopback only)
 ```
@@ -388,8 +388,7 @@ Client example:
     "scheduler": "wlb",
     "cc": "bbr2",
     "mtu": 1280,
-    "reinjection_control": true,
-    "reinjection_mode": "deadline",
+    "reinjection": "deadline",
     "fec_enable": true,
     "fec_scheme": "xor",
     "sync_path_labels": true,
@@ -403,8 +402,12 @@ Notes:
 - A `fixed_ip` in a user object pins that IPv4 address to the user. The address is removed from the dynamic pool at startup and never assigned to other clients. The INI equivalent is `User = name:key:fixed_ip`.
 - `auth_key` remains supported as a single legacy/global key.
 - `auth_username` is client-side only: the name sent to the server for identification in logs and status output. It does not affect authentication.
-- `mode` is optional if it can be inferred (`listen` implies server).
-- `manage_routes` defaults to `true`; set it to `false` on router/embedded integrations where an external orchestrator owns the host routing table and mqvpn should only bring up the TUN.
+- `mode` is optional if it can be inferred (`listen` implies server); an explicit `mode` always wins.
+- `manage_routes` defaults to `true`; set it to `false` (INI `ManageRoutes = false`, CLI `--no-manage-routes`) on router/embedded integrations where an external orchestrator owns the host routing table and mqvpn should only bring up the TUN. It is the same switch as `no_routes = true` / `--no-routes`: routes are installed only when `manage_routes` is true and `no_routes` is false.
+- `kill_switch` blocks traffic outside the tunnel from startup until the process exits, including while disconnected or reconnecting and after giving up with `reconnect` off. It always blocks IPv6 outside the tunnel, even on an IPv4-only tunnel; DHCP and IPv6 neighbor discovery stay allowed.
+- `reconnect_interval` is the wait before the first reconnection attempt; each further failure doubles it, up to 60 seconds.
+- `dns` entries must be IP addresses; other values are ignored with a warning.
+- INI files accept `#` / `;` comments at the end of a line when preceded by a space, and `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0` for booleans. The full key reference, including the JSON names, is in the [configuration guide](website/guide/configuration.md).
 - `sync_path_labels` defaults to `true` and is meaningful on **both** client and server configs, each gating its own half of the sync (server: adopt; client: announce); see "Disabling weight/DSCP sync entirely" under [Schedulers](#schedulers) above.
 - `path_policy` is server-only, JSON-only (no INI form): persisted per-(user,iface) `weight`/`dscp_mask` overrides, surviving a server restart or client reconnect. See "Persisting a server-side override" under [Schedulers](#schedulers) above.
 - `push_path_labels` defaults to `false` and, like `sync_path_labels`, is meaningful on **both** client and server configs (server: push a pinned value; client: adopt one received) — but unlike `sync_path_labels`, both sides must opt in. See "Pushing a server-side override down to the client" under [Schedulers](#schedulers) above.
@@ -507,10 +510,10 @@ high-bandwidth fibre link over a metered LTE backup while still drawing on
 both under load.
 
 **`redundant` — broadcast scheduler:** every packet is duplicated onto every
-currently usable path (both AVAILABLE and STANDBY, unlike the other
-schedulers' preference for AVAILABLE paths) instead of being split across
-them, trading bandwidth for maximum loss resilience — as long as one copy
-arrives, the data is delivered. There is no aggregation benefit and effective
+currently usable path (both AVAILABLE and STANDBY, whereas the other
+schedulers keep STANDBY paths idle while an AVAILABLE path works) instead
+of being split across them, trading bandwidth for maximum loss resilience —
+as long as one copy arrives, the data is delivered. There is no aggregation benefit and effective
 throughput is capped at the slowest usable path's share of bandwidth. Intended
 for low-bitrate, loss/latency-critical traffic (control channels, keepalives,
 VoIP) rather than bulk transfer. The receiving end lets the first copy of each
@@ -614,7 +617,7 @@ it) and a no-op when either side has it off.
 ```ini
 [Reorder]
 Enabled = on
-MaxWaitMs = 50           # reorder window: hold out-of-order datagrams up to this long
+MaxWaitMs = 50           # wait for a missing datagram this long (hold nominally <= 2x)
 CapPackets = 1024        # per-flow buffer cap (packets)
 
 # Optional: target specific inner flows with a tuned preset
@@ -639,7 +642,7 @@ or more active paths — silently inactive with only one.
 
 ```ini
 [Multipath]
-Reinjection = off                     # off (default) | deadline | idle | dgram
+Reinjection = off                     # off (default) | deadline | idle
 ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
 ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
 ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
@@ -647,7 +650,8 @@ ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; cla
 
 - `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
 - `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
-- `dgram` — for tunnels dedicated to real-time traffic (VoIP, gaming): every datagram-lane packet (UDP and other non-TCP traffic; hybrid-mode TCP is not duplicated) is sent over two links at once, so a lost packet or a dying link no longer causes dropouts or lag spikes. **Uses double the bandwidth for that traffic; not recommended for mixed tunnels** — it duplicates all inner UDP, including HTTP/3 video streams, so the usable speed of the datagram lane drops to a single link's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it removes them); plain UDP apps may otherwise see duplicate packets.
+
+The former `dgram` value was removed. To keep live UDP streams alive across a dropped link, use redundant mode, which covers client uploads (`[Multipath] Redundant = on`; see the [website guide](https://docs.mqvpn.org/guide/multipath#redundant-mode)); every link should be able to carry the stream on its own (recommended).
 
 Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
 API `get_status` response.
@@ -679,9 +683,9 @@ EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egres
 ```
 
 Disabled by default; existing users see no behavior change. See
-[docs/control-api.md §9](docs/control-api.md#9-hybrid-mode-configuration-keys)
-for the full `[Hybrid]` config key reference and the `get_stats` counters
-this mode exposes.
+[Configuration → `[Hybrid]`](website/guide/configuration.md#hybrid)
+for the full config key reference, and
+[Control API §5.4](docs/control-api.md#54-get_stats) for runtime counters.
 
 ## systemd
 
@@ -699,7 +703,7 @@ sudo systemctl enable --now mqvpn-client@home
 
 ## Control API
 
-Both the server and the client can be managed at runtime over a TCP port using newline-delimited JSON.
+Both the server and the client can be managed at runtime over a TCP port using newline-delimited JSON. Each connection carries one JSON object (`echo '{"cmd":...}' | nc` works); input that does not start with `{`, such as an HTTP request, is refused with `{"ok":false,"error":"invalid request"}`. The request and reply must complete within 5 seconds.
 
 Control API: see [docs/control-api.md](docs/control-api.md) for the full wire-protocol reference (every command, request/response schemas, error strings). `get_stats`/`get_status`/`get_build_info`/`get_fec_stats`/`get_all_fec_stats`/`get_reorder_stats` all work in client mode as well as server mode.
 
@@ -714,12 +718,14 @@ sudo bash install.sh --enable-control            # port 9090
 sudo bash install.sh --enable-control 9091
 ```
 
-#### From INI (`/etc/mqvpn/server.conf`)
+#### From INI (`/etc/mqvpn/server.conf` or a client config)
 
 ```ini
 [Control]
 Listen = 127.0.0.1:9090
 ```
+
+`Port = 9090` and `Addr = 127.0.0.1` can be used instead of (or to override half of) `Listen`, in client and server mode alike.
 
 #### From JSON (`/etc/mqvpn/server.json`)
 
@@ -729,7 +735,9 @@ Listen = 127.0.0.1:9090
 }
 ```
 
-#### From CLI (per-field override of the config file)
+(`"control_port"` / `"control_addr"` are the separate-key form.)
+
+#### From CLI (per-field override of the config file; `--control-port 0` disables)
 
 ```bash
 # Server — CLI
@@ -760,13 +768,15 @@ echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 909
 {"ok":true}
 ```
 
-Calling `add_user` with an existing name updates the key in place.
+Calling `add_user` with an existing name updates the key in place. Names are 1–63 bytes without `"`, `\` or control characters.
 
 To add a user with a fixed (pinned) IP that is permanently reserved for that user:
 
 ```bash
 echo '{"cmd":"add_user","name":"carol","key":"carol-secret","fixed_ip":"10.0.0.50"}' | nc 127.0.0.1 9090
 ```
+
+If the address is refused (`"fixed_ip invalid or unavailable"`), nothing is changed: a new user is not added and an existing user keeps its key.
 
 #### Set or clear a fixed IP for a user
 
@@ -793,6 +803,8 @@ echo '{"cmd":"remove_user","name":"carol"}' | nc 127.0.0.1 9090
 ```json
 {"ok":true}
 ```
+
+Removing a user also disconnects any active session authenticated with that name.
 
 #### List users
 
@@ -1164,7 +1176,7 @@ mqvpn [--config PATH] --mode client|server [options]
 
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
-  --backup-path IFACE    Failover-only interface; used only when all primary paths are down (repeatable)
+  --backup-path IFACE    Standby interface, no traffic while a --path interface works (repeatable)
   --auth-key KEY         PSK authentication
   --user NAME:KEY        Add server user credential (repeatable)
   --dns ADDR             DNS server (repeatable)
@@ -1175,17 +1187,17 @@ mqvpn [--config PATH] --mode client|server [options]
   --subnet CIDR          Client IPv4 pool (server)
   --subnet6 CIDR         Client IPv6 pool (server)
     --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|redundant|dscp Multipath scheduler (default: wlb)
-    --cc bbr2|bbr|cubic|new_reno|copa|unlimited Congestion control (default: bbr2)
-    --reinjection-control  Enable multipath reinjection control
-    --reinjection-mode default|deadline|dgram Reinjection control mode (default: default)
+    --cc bbr2|bbr|cubic|new_reno|copa|unlimited|none Congestion control (default: bbr2)
     --fec-enable          Enable FEC
     --no-fec              Disable FEC
     --fec-scheme galois_calculation|packet_mask|reed_solomon|xor FEC scheme (default: reed_solomon)
     --no-sync-path-labels  Don't sync per-path weight/dscp_mask between client/server (client and/or server, default: sync enabled)
     --push-path-labels     Push a server-pinned per-path weight/dscp_mask down to the client (client and server, default: off, both must opt in)
-  --route-via-server     Add host route to server IP before setting default route (client)
+  --route-via-server     Route via the server's tunnel IP (catch-all 0/1 + 128/1) (client)
   --no-routes            Skip all automatic route setup; manage routes manually (client)
-  --control-port PORT    TCP port for JSON control API (server)
+  --no-manage-routes     Same as --no-routes (upstream name; router/embedded integration)
+  --kill-switch          Block traffic outside the tunnel, from startup until exit (client)
+  --control-port PORT    TCP port for JSON control API (client or server; 0 disables)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --genkey               Generate PSK and exit
   --help                 Show all options

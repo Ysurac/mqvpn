@@ -229,4 +229,6 @@ cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # set your DEVELOPM
 
 CI builds the same project unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.
 
+The app keeps the server auth key in the keychain, in an item it shares with the PacketTunnel extension through the keychain group `<team ID>.com.mp0rta.mqvpnpoc.shared`. The team ID prefix comes from `DEVELOPMENT_TEAM`, so both targets must be signed by the same team; if you change the bundle identifiers, change the group in `ios/poc/project.yml` (the `keychain-access-groups` entitlement and the `MqvpnKeychainGroup` Info.plist key of both targets) to match. A key saved by an earlier build in the VPN configuration is moved to the keychain the first time the app starts.
+
 See [Getting Started](./getting-started) to test your build.

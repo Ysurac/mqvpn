@@ -15,12 +15,26 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+/* Compile-time test hooks for the two xquic sends that can run the engine
+ * (and so re-enter this file) when called outside an engine callback.
+ * tests/test_tcp_egress.c #include's this file with its own definitions to
+ * inject a re-entrant teardown; production expands to the real calls. */
+#ifndef MQVPN_TCP_EGRESS_H3_SEND_HEADERS
+#  define MQVPN_TCP_EGRESS_H3_SEND_HEADERS(req, hdrs, fin) \
+      xqc_h3_request_send_headers((req), (hdrs), (fin))
+#endif
+#ifndef MQVPN_TCP_EGRESS_H3_SEND_BODY
+#  define MQVPN_TCP_EGRESS_H3_SEND_BODY(req, data, len, fin) \
+      xqc_h3_request_send_body((req), (data), (len), (fin))
+#endif
 
 /* "/.well-known/mqvpn/tcp/" — byte-for-byte the prefix mqvpn_client.c's
  * connect-tcp request builder emits (snprintf("/.well-known/mqvpn/tcp/"
@@ -95,6 +109,19 @@ _Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
 _Static_assert(TCP_EGRESS_RELAY_BUDGET >= TCP_EGRESS_RELAY_CHUNK &&
                    TCP_EGRESS_RELAY_BUDGET % TCP_EGRESS_RELAY_CHUNK == 0,
                "relay budget must be a whole number of relay chunks");
+
+/* Most request body a flow may receive while CONNECTING (before the
+ * egress connect() completes and the 200 goes out). The client's TCP lane
+ * buffers uplink bytes locally until it sees the 2xx (tcp_lane_uplink.c,
+ * PENDING_STREAM), so a conforming client sends nothing here; the bound
+ * exists because the body has nowhere to go yet and xquic does not stop
+ * accepting it (see svr_tcp_egress_discard_body). Body received in this
+ * state is held in the downlink stash and relayed first once connected; a
+ * flow that exceeds the bound is reset. Same magnitude as the client's
+ * pre-2xx high-water (MQVPN_TCP_LANE_BP_HIGH_WATER, 256 KiB). */
+#define TCP_EGRESS_CONNECTING_BODY_CAP (256 * 1024)
+_Static_assert(TCP_EGRESS_CONNECTING_BODY_CAP >= TCP_EGRESS_RELAY_CHUNK,
+               "the CONNECTING hold buffer doubles as the downlink stash");
 
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
@@ -196,7 +223,109 @@ static const mqvpn_cidr_entry_t DEFAULT_DENY_V6[] = {
      * defense-in-depth) in exactly that case, and fails closed — see its
      * comment. */
     {6, 96, {[10] = 0xff, [11] = 0xff}},
+    /* Teredo 2001::/32 (RFC 4380): tunnels to an IPv4 relay/peer whose
+     * address is only recoverable obfuscated from the suffix — no sane
+     * connect-tcp target, so blocked outright rather than decoded. */
+    {6, 32, {0x20, 0x01}},
+    /* NAT64 local-use 64:ff9b:1::/48 (RFC 8215): the embedded IPv4
+     * position depends on an operator-chosen prefix length, so it cannot
+     * be checked against DEFAULT_DENY_V4 — blocked outright. The
+     * well-known 64:ff9b::/96 and 6to4 2002::/16 carry the IPv4 address
+     * at a fixed position and are checked through it instead
+     * (svr_tcp_egress_embedded_v4). */
+    {6, 48, {0x00, 0x64, 0xff, 0x9b, 0x00, 0x01}},
 };
+
+/* IPv6 forms that carry an IPv4 destination at a fixed position and reach
+ * it through a translator or relay: the NAT64 well-known prefix
+ * 64:ff9b::/96 (RFC 6052, address in the last 32 bits) and 6to4
+ * 2002::/16 (RFC 3056, address in bits 16..47). Evaluating only the IPv6
+ * form would let e.g. 64:ff9b::7f00:1 or 2002:7f00:1:: reach 127.0.0.1 on a
+ * server with such a translator on its path. Returns 1 and fills `v4` (4
+ * bytes, network order) for those forms, 0 otherwise. */
+static int
+svr_tcp_egress_embedded_v4(const uint8_t addr[16], uint8_t v4[4])
+{
+    static const uint8_t nat64_wkp[12] = {0x00, 0x64, 0xff, 0x9b};
+    if (memcmp(addr, nat64_wkp, sizeof(nat64_wkp)) == 0) {
+        memcpy(v4, addr + 12, 4);
+        return 1;
+    }
+    if (addr[0] == 0x20 && addr[1] == 0x02) {
+        memcpy(v4, addr + 2, 4);
+        return 1;
+    }
+    return 0;
+}
+
+/* ── The server's own addresses ──
+ *
+ * A destination equal to one of the server's own interface addresses
+ * reaches services listening on the server itself (its control API bound
+ * to a public address, an admin panel, ...) — the classic SSRF target that
+ * the private-range table cannot catch for a public address. Such targets
+ * are denied unless an EgressAllow entry covers them. The list comes from
+ * getifaddrs(), cached process-wide and refreshed at most every
+ * TCP_EGRESS_LOCAL_ADDR_REFRESH_US on lookup, so an address added later
+ * (DHCP renew, a new IPv6 prefix) is picked up within that window. If
+ * getifaddrs() fails the previous list is kept. */
+#define TCP_EGRESS_LOCAL_ADDR_MAX        256
+#define TCP_EGRESS_LOCAL_ADDR_REFRESH_US (30ULL * 1000000ULL)
+
+typedef struct {
+    uint8_t family; /* 4 or 6 */
+    uint8_t addr[16];
+} svr_tcp_egress_local_addr_t;
+
+static svr_tcp_egress_local_addr_t s_local_addrs[TCP_EGRESS_LOCAL_ADDR_MAX];
+static int s_n_local_addrs;
+static int s_local_addrs_loaded;
+static uint64_t s_local_addrs_at_us;
+
+static void
+svr_tcp_egress_local_addrs_refresh(uint64_t now_us)
+{
+    struct ifaddrs *ifa_list = NULL;
+    s_local_addrs_at_us = now_us;
+    s_local_addrs_loaded = 1;
+    if (getifaddrs(&ifa_list) != 0) return; /* keep the previous list */
+    int n = 0;
+    for (struct ifaddrs *ifa = ifa_list; ifa && n < TCP_EGRESS_LOCAL_ADDR_MAX;
+         ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)ifa->ifa_addr;
+            memset(&s_local_addrs[n], 0, sizeof(s_local_addrs[n]));
+            s_local_addrs[n].family = 4;
+            memcpy(s_local_addrs[n].addr, &sin->sin_addr.s_addr, 4);
+            n++;
+        } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+            const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)ifa->ifa_addr;
+            s_local_addrs[n].family = 6;
+            memcpy(s_local_addrs[n].addr, sin6->sin6_addr.s6_addr, 16);
+            n++;
+        }
+    }
+    s_n_local_addrs = n;
+    freeifaddrs(ifa_list);
+}
+
+/* 1 if (family, addr) is one of the server's own interface addresses. */
+static int
+svr_tcp_egress_is_local_addr(uint8_t family, const uint8_t addr[16])
+{
+    uint64_t now = svr_now_us();
+    if (!s_local_addrs_loaded || now < s_local_addrs_at_us ||
+        now - s_local_addrs_at_us >= TCP_EGRESS_LOCAL_ADDR_REFRESH_US)
+        svr_tcp_egress_local_addrs_refresh(now);
+    size_t len = family == 6 ? 16 : 4;
+    for (int i = 0; i < s_n_local_addrs; i++) {
+        if (s_local_addrs[i].family == family &&
+            memcmp(s_local_addrs[i].addr, addr, len) == 0)
+            return 1;
+    }
+    return 0;
+}
 
 int
 svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
@@ -230,7 +359,28 @@ svr_tcp_egress_acl_decide(uint8_t family, const uint8_t addr[16],
         if (mqvpn_cidr_match(&deny[i], family, addr)) return 0;
     }
 
+    /* An IPv6 form that reaches an embedded IPv4 destination is also judged
+     * as that IPv4 address (allow/default-deny/deny), so a translated
+     * literal cannot reach space the v4 table blocks. The v4 tunnel subnet
+     * is not known here; svr_tcp_egress_acl_allowed checks it. */
+    uint8_t v4[16] = {0};
+    if (family == 6 && svr_tcp_egress_embedded_v4(addr, v4)) {
+        static const mqvpn_cidr_entry_t no_tunnel = {0};
+        return svr_tcp_egress_acl_decide(4, v4, allow, n_allow, deny, n_deny, &no_tunnel);
+    }
+
     return 1;
+}
+
+/* 1 if an EgressAllow entry covers (family, addr). */
+static int
+svr_tcp_egress_allow_covers(uint8_t family, const uint8_t addr[16],
+                            const mqvpn_cidr_entry_t *allow, int n_allow)
+{
+    for (int i = 0; i < n_allow; i++) {
+        if (mqvpn_cidr_match(&allow[i], family, addr)) return 1;
+    }
+    return 0;
 }
 
 /* server-bound wrapper: resolves the target string and the server's own
@@ -270,8 +420,24 @@ svr_tcp_egress_acl_allowed(mqvpn_server_t *server, const char *target_host,
     mqvpn_cidr_entry_t tunnels[2]; /* [0]=v4, [1]=v6 (family=0 unless has_v6) */
     svr_get_egress_policy(server, &allow, &n_allow, &deny, &n_deny, tunnels);
 
-    return svr_tcp_egress_acl_decide(family, addr_bytes, allow, n_allow, deny, n_deny,
-                                     &tunnels[family == 6 ? 1 : 0]);
+    if (!svr_tcp_egress_acl_decide(family, addr_bytes, allow, n_allow, deny, n_deny,
+                                   &tunnels[family == 6 ? 1 : 0]))
+        return 0;
+
+    /* Embedded IPv4 (NAT64 well-known prefix, 6to4): the v4 tunnel subnet
+     * is denied for it too, unconditionally like the direct form. */
+    uint8_t v4[16] = {0};
+    int has_v4 = family == 6 && svr_tcp_egress_embedded_v4(addr_bytes, v4);
+    if (has_v4 && mqvpn_cidr_match(&tunnels[0], 4, v4)) return 0;
+
+    /* The server's own addresses, unless EgressAllow covers them. */
+    if (!svr_tcp_egress_allow_covers(family, addr_bytes, allow, n_allow) &&
+        svr_tcp_egress_is_local_addr(family, addr_bytes))
+        return 0;
+    if (has_v4 && !svr_tcp_egress_allow_covers(4, v4, allow, n_allow) &&
+        svr_tcp_egress_is_local_addr(4, v4))
+        return 0;
+    return 1;
 }
 
 /* svr_log-routed log macros — the only logging path this file has (see
@@ -307,7 +473,35 @@ svr_tcp_egress_respond(xqc_h3_request_t *h3_request, int status, uint8_t fin)
     xqc_http_headers_t resp_hdrs = {.headers = resp, .count = 1, .capacity = 1};
     /* Send-failure deliberately not escalated: returning an error from the
      * H3 read-notify path would kill the whole H3 connection. */
-    xqc_h3_request_send_headers(h3_request, &resp_hdrs, fin);
+    MQVPN_TCP_EGRESS_H3_SEND_HEADERS(h3_request, &resp_hdrs, fin);
+    return 0;
+}
+
+/* Read and drop whatever request body xquic holds for a stream no flow
+ * will ever relay (rejected at request time, or its connect failed).
+ * Left unread, the body would sit in xquic until the stream closes: up to
+ * MQVPN_H3_RECV_BODY_HIGH_WATER in the h3 buffer, then the rest held in
+ * the QUIC stream with the client stalled on flow control. Draining keeps
+ * the memory flat and lets the client finish; the bytes are discarded.
+ * Never runs the engine. */
+static void
+svr_tcp_egress_discard_body(xqc_h3_request_t *h3_request)
+{
+    uint8_t drain[4096];
+    uint8_t fin = 0;
+    while (xqc_h3_request_recv_body(h3_request, drain, sizeof(drain), &fin) > 0) {}
+}
+
+/* Final 4xx/5xx for a request that gets no flow: the response (fin=1),
+ * then the request body is discarded — the read notify for body arriving
+ * later lands in svr_tcp_egress_on_body's no-flow branch, which discards
+ * too. Only called from the request-header notify (inside the engine), so
+ * neither call can re-enter. */
+static int
+svr_tcp_egress_reject(xqc_h3_request_t *h3_request, int status)
+{
+    svr_tcp_egress_respond(h3_request, status, 1);
+    svr_tcp_egress_discard_body(h3_request);
     return 0;
 }
 
@@ -381,13 +575,32 @@ typedef struct svr_tcp_egress_flow_s {
      * true worst case (every admitted flow pauses once). At the 4096-flow
      * ceiling that is ~128 MiB, which is why the chunk's own comment treats
      * its size as a deployment-visible number and not an implementation
-     * detail. */
+     * detail. A flow whose client sent body while it was still CONNECTING
+     * holds that body in the downlink stash, up to
+     * TCP_EGRESS_CONNECTING_BODY_CAP (256 KiB) — conforming clients send
+     * none (they gate on the 2xx).
+     *
+     * Once ACTIVE, a downlink pause (egress socket full) stops reading
+     * recv_body, and that is what pushes back on the client: when
+     * MQVPN_H3_RECV_BODY_HIGH_WATER of body sits unread in xquic's h3
+     * buffer (recv_body_buf_high_water, set in mqvpn_server.c), xquic stops
+     * reading the QUIC stream, returns no more flow-control credit, and the
+     * client stalls instead of server memory growing for as long as the
+     * pause lasts. The resume path (writable -> flush_downlink_retry ->
+     * drain_body) calls recv_body again, and taking the buffer below the
+     * mark is what makes xquic read the stream again. */
     int downlink_paused; /* send()-side backpressure: downlink_stash holds
                           * one unsent chunk pulled out of xquic's body_buf
                           * (already destructively consumed — cannot be
                           * re-fetched, so it must live somewhere). */
     uint8_t *downlink_stash;
     size_t downlink_stash_len;
+    size_t downlink_stash_cap;  /* allocated bytes; >= TCP_EGRESS_RELAY_CHUNK
+                                 * once allocated (stash_downlink copies up
+                                 * to one chunk into it). Larger only when
+                                 * body that arrived while CONNECTING is held
+                                 * here, bounded by
+                                 * TCP_EGRESS_CONNECTING_BODY_CAP. */
     int fin_received_from_h3;   /* client fin observed (recv_body's *fin) —
                                  * latched once; shutdown(fd, SHUT_WR) may
                                  * still be DEFERRED if downlink_paused. */
@@ -424,6 +637,25 @@ typedef struct svr_tcp_egress_flow_s {
                           * -XQC_EAGAIN, so a dedicated retry is
                           * mandatory, not a redundant safety net). */
 
+    /* Re-entrancy guard. xqc_h3_request_send_headers/_send_body (and
+     * xqc_h3_request_close) can run xqc_engine_conn_logic when called from
+     * outside an engine callback (the fd-ready reactor, the tick sweep), and
+     * that engine run delivers read/write/close notifies — possibly for this
+     * very flow, whose teardown would then free it under the outer frame.
+     * Every entry point holds the flow (depth++) for its duration;
+     * svr_tcp_egress_flow_destroy on a held flow does all the bookkeeping
+     * immediately (fd closed, unlinked, counters, stream slot NULLed) but
+     * only marks it doomed, and the outermost frame frees it on release.
+     * Code that made a call which can run the engine checks `doomed`
+     * before touching the flow again. */
+    unsigned depth;
+    int doomed;
+
+    /* Interest last handed to svr_egress_fd_register (-1 = none yet), so
+     * svr_tcp_egress_update_fd_interest only calls into the platform when
+     * it actually changes — it runs on every relay event. */
+    int reg_want_read, reg_want_write;
+
     struct svr_tcp_egress_flow_s *prev, *next;
 } svr_tcp_egress_flow_t;
 
@@ -453,6 +685,30 @@ svr_tcp_egress_list_remove(svr_tcp_egress_flow_t **head, svr_tcp_egress_flow_t *
     ef->next = NULL;
 }
 
+static void
+svr_tcp_egress_flow_free(svr_tcp_egress_flow_t *ef)
+{
+    free(ef->downlink_stash);
+    free(ef->uplink_stash);
+    free(ef);
+}
+
+/* Re-entrancy guard (see the depth/doomed field comment). hold/release
+ * bracket every entry point's use of a flow; release frees a flow that was
+ * destroyed while held, once the outermost holder lets go. */
+static void
+svr_tcp_egress_hold(svr_tcp_egress_flow_t *ef)
+{
+    ef->depth++;
+}
+
+static void
+svr_tcp_egress_release(svr_tcp_egress_flow_t *ef)
+{
+    assert(ef->depth > 0);
+    if (--ef->depth == 0 && ef->doomed) svr_tcp_egress_flow_free(ef);
+}
+
 /* The ONLY teardown path for a flow (see the docstring in tcp_egress.h for
  * why every call site funnels through here). Bookkeeping invariant: every
  * live flow was counted exactly once, unconditionally, right after it was
@@ -468,6 +724,9 @@ svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow)
 {
     svr_tcp_egress_flow_t *ef = (svr_tcp_egress_flow_t *)flow;
     if (!server || !ef) return;
+    /* Already torn down while held: the bookkeeping below ran once, the
+     * memory is only waiting for the outermost frame to release it. */
+    if (ef->doomed) return;
 
     /* Unregister before close(): the platform reactor keys its registry
      * off the fd number (see platform_linux.c's egress fd slot table), so
@@ -502,9 +761,17 @@ svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow)
     void **stream_slot = svr_stream_tcp_egress_flow_ptr(ef->stream);
     if (stream_slot) *stream_slot = NULL;
 
-    free(ef->downlink_stash);
-    free(ef->uplink_stash);
-    free(ef);
+    if (ef->depth > 0) {
+        /* A frame up the stack still holds ef: it will see `doomed` and
+         * stop, and the outermost one frees it (svr_tcp_egress_release).
+         * The request and stream may be gone by then — forget them. */
+        ef->doomed = 1;
+        ef->fd = -1;
+        ef->h3_request = NULL;
+        ef->stream = NULL;
+        return;
+    }
+    svr_tcp_egress_flow_free(ef);
 }
 
 /* Errno -> H3 :status for a failed egress connect(), whether discovered
@@ -562,7 +829,9 @@ svr_tcp_egress_errno_to_status(int err)
  *     close/closing-notify funnel is a no-op — the same exactly-once
  *     guard svr_tcp_egress_fail_connect has always relied on.
  *
- * Either way `ef` is freed when these functions return, so every call site
+ * Either way `ef` is gone when these functions return — freed, or, while an
+ * entry point holds it (svr_tcp_egress_hold), doomed and freed by the
+ * outermost svr_tcp_egress_release — so every call site
  * of on_relay_error in this file is its LAST statement before an
  * unconditional `return`/`break` out of the enclosing function, exactly
  * like the client's tcp_lane_flow_status_t discipline (tcp_lane.c), just
@@ -574,7 +843,7 @@ svr_tcp_egress_abort(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     xqc_h3_request_t *req = ef->h3_request;
     svr_tcp_egress_flow_destroy(server, ef);
-    xqc_h3_request_close(req);
+    if (req) xqc_h3_request_close(req);
 }
 
 static void
@@ -679,19 +948,24 @@ svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
 /* The ONE place fd interest is computed from flow state (per this task's
  * design note: hand-written (want_read, want_write) pairs at every call
  * site WILL drift). Safe to call liberally/redundantly — every caller here
- * only reaches it with `ef` still alive, and re-registering the same
- * interest twice is a harmless no-op reconfigure (platform_linux.c replaces
- * the libevent event in place). No-ops for a CONNECTING flow: that stage
- * manages its own single want_write=1 "connect signal" registration
- * directly (svr_tcp_egress_start_connect) and this helper must not
- * clobber it before the flow reaches ACTIVE. */
+ * only reaches it with `ef` still alive, and an unchanged interest is not
+ * re-registered (reg_want_read/reg_want_write cache the last one). No-ops for a
+ * CONNECTING flow: that stage manages its own single want_write=1 "connect signal"
+ * registration directly (svr_tcp_egress_start_connect) and this helper must not clobber
+ * it before the flow reaches ACTIVE. */
 static void
 svr_tcp_egress_update_fd_interest(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     if (ef->state != EGRESS_FLOW_ACTIVE) return;
     int want_write = ef->downlink_paused ? 1 : 0;
     int want_read = (!ef->uplink_withheld && !ef->egress_eof_seen) ? 1 : 0;
-    (void)svr_egress_fd_register(server, ef->fd, want_read, want_write, ef);
+    if (want_read == ef->reg_want_read && want_write == ef->reg_want_write) return;
+    if (svr_egress_fd_register(server, ef->fd, want_read, want_write, ef) == 0) {
+        ef->reg_want_read = want_read;
+        ef->reg_want_write = want_write;
+    } else {
+        ef->reg_want_read = ef->reg_want_write = -1; /* retry on the next call */
+    }
 }
 
 /* Issue the deferred TX half-close once it's actually safe to: the client's
@@ -733,6 +1007,7 @@ svr_tcp_egress_stash_downlink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
             svr_tcp_egress_on_relay_error(server, ef, ENOMEM);
             return 0;
         }
+        ef->downlink_stash_cap = TCP_EGRESS_RELAY_CHUNK;
     }
     memcpy(ef->downlink_stash, buf, len);
     ef->downlink_stash_len = len;
@@ -888,7 +1163,10 @@ static void
 svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     if (ef->uplink_fin_sent) return;
-    ssize_t r = xqc_h3_request_send_body(ef->h3_request, NULL, 0, 1);
+    ssize_t r = MQVPN_TCP_EGRESS_H3_SEND_BODY(ef->h3_request, NULL, 0, 1);
+    /* A fin-only send runs xqc_engine_conn_logic (xqc_h3_stream_send_finish)
+     * — outside an engine callback that can tear this flow down. */
+    if (ef->doomed) return;
     if (r == -XQC_EAGAIN) return; /* retried on the next H3-writable notify */
     if (r < 0) {
         svr_tcp_egress_on_relay_error(server, ef, 0);
@@ -933,6 +1211,9 @@ svr_tcp_egress_stash_uplink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
  * pending uplink FIN if the egress side has already hit EOF. `stream` is
  * the opaque svr_stream_t* the H3 callback was invoked with. No-ops on an
  * unknown/already-gone flow (stream_slot NULL or already-destroyed). */
+static void svr_tcp_egress_flush_uplink(mqvpn_server_t *server,
+                                        svr_tcp_egress_flow_t *ef);
+
 void
 svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream)
 {
@@ -940,11 +1221,21 @@ svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream)
     svr_tcp_egress_flow_t *ef = slot ? (svr_tcp_egress_flow_t *)*slot : NULL;
     if (!ef) return;
 
+    svr_tcp_egress_hold(ef);
+    svr_tcp_egress_flush_uplink(server, ef);
+    svr_tcp_egress_release(ef);
+}
+
+/* Body of svr_tcp_egress_on_h3_writable, run with `ef` held. */
+static void
+svr_tcp_egress_flush_uplink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
     if (ef->uplink_withheld) {
         size_t off = 0;
         while (off < ef->uplink_stash_len) {
-            ssize_t sent = xqc_h3_request_send_body(
+            ssize_t sent = MQVPN_TCP_EGRESS_H3_SEND_BODY(
                 ef->h3_request, ef->uplink_stash + off, ef->uplink_stash_len - off, 0);
+            if (ef->doomed) return; /* torn down by an engine run inside the send */
             if (sent == -XQC_EAGAIN) break;
             if (sent < 0) {
                 svr_tcp_egress_on_relay_error(server, ef, 0);
@@ -972,6 +1263,52 @@ svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream)
     }
 }
 
+/* Body read notify while CONNECTING: move what xquic holds into the
+ * downlink stash (grown up to TCP_EGRESS_CONNECTING_BODY_CAP), so the
+ * amount is known and bounded instead of accumulating in xquic's body_buf.
+ * svr_tcp_egress_on_connected relays it first. Over the bound the flow is
+ * reset. Returns 1 if `ef` is still alive, 0 if it was torn down. */
+static int
+svr_tcp_egress_hold_connecting_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    for (;;) {
+        if (ef->downlink_stash_len == ef->downlink_stash_cap) {
+            size_t ncap = ef->downlink_stash_cap ? ef->downlink_stash_cap * 2
+                                                 : (size_t)TCP_EGRESS_RELAY_CHUNK;
+            if (ef->downlink_stash_cap >= TCP_EGRESS_CONNECTING_BODY_CAP) {
+                TLOG_W(server,
+                       "connect-tcp: client sent %u bytes before the connection was "
+                       "established — closing stream (user=%s)",
+                       (unsigned)TCP_EGRESS_CONNECTING_BODY_CAP, ef->username);
+                svr_tcp_egress_abort(server, ef);
+                return 0;
+            }
+            if (ncap > TCP_EGRESS_CONNECTING_BODY_CAP)
+                ncap = TCP_EGRESS_CONNECTING_BODY_CAP;
+            uint8_t *nb = realloc(ef->downlink_stash, ncap);
+            if (!nb) {
+                svr_tcp_egress_on_relay_error(server, ef, ENOMEM);
+                return 0;
+            }
+            ef->downlink_stash = nb;
+            ef->downlink_stash_cap = ncap;
+        }
+        uint8_t fin = 0;
+        ssize_t n = xqc_h3_request_recv_body(
+            ef->h3_request, ef->downlink_stash + ef->downlink_stash_len,
+            ef->downlink_stash_cap - ef->downlink_stash_len, &fin);
+        if (n == -XQC_EAGAIN) return 1;
+        if (n < 0) {
+            svr_tcp_egress_on_relay_error(server, ef, 0);
+            return 0;
+        }
+        ef->downlink_stash_len += (size_t)n;
+        /* A fin seen here is re-reported by recv_body on the post-connect
+         * drain (level-triggered), which performs the deferred shutdown. */
+        if (fin || n == 0) return 1;
+    }
+}
+
 /* Flips a CONNECTING flow to ACTIVE and arms real read interest — the
  * relay stage (above) can now actually consume data, so want_read=1 is
  * correct here (an earlier task's interim registered (0,0): no relay yet,
@@ -994,6 +1331,19 @@ svr_tcp_egress_on_connected(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
     ef->last_activity_us = svr_now_us(); /* idle-sweep clock starts now */
     svr_tcp_egress_update_fd_interest(server, ef);
     svr_tcp_egress_respond(ef->h3_request, 200, 0);
+    /* send_headers can run the engine (from the fd-ready reactor or the
+     * tick), whose notifies may already have torn this flow down. */
+    if (ef->doomed) return;
+    if (ef->downlink_stash_len > 0) {
+        /* Body that arrived while CONNECTING was held in the stash
+         * (svr_tcp_egress_hold_connecting_body) — it goes out first, through
+         * the same retry path a send()-paused chunk takes; a full flush
+         * resumes the normal drain. */
+        ef->downlink_paused = 1;
+        svr_tcp_egress_update_fd_interest(server, ef); /* want_write for the retry */
+        (void)svr_tcp_egress_flush_downlink_retry(server, ef);
+        return;
+    }
     svr_tcp_egress_drain_body(server, ef);
 }
 
@@ -1004,6 +1354,11 @@ static void
 svr_tcp_egress_fail_connect(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
 {
     svr_tcp_egress_respond(ef->h3_request, svr_tcp_egress_errno_to_status(err), 1);
+    if (ef->doomed) return; /* torn down by an engine run inside the send */
+    /* No flow will read this request's body any more: discard what is
+     * buffered now (later arrivals are discarded by svr_tcp_egress_on_body's
+     * no-flow branch), or it would sit in xquic until the stream closes. */
+    svr_tcp_egress_discard_body(ef->h3_request);
     svr_tcp_egress_flow_destroy(server, ef);
 }
 
@@ -1027,20 +1382,20 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
      * caps rejection, so flows_rejected_cap (caps-only by contract) is left
      * untouched. */
     if (!svr_egress_fd_register_is_set(server)) {
-        return svr_tcp_egress_respond(h3_request, 503, 1);
+        return svr_tcp_egress_reject(h3_request, 503);
     }
 
     svr_tcp_egress_srv_ctx_t ctx;
     svr_get_tcp_egress_ctx(server, &ctx);
     if (*ctx.global_fd_count >= ctx.global_fd_budget) {
         (*ctx.flows_rejected_cap)++; /* whole-server cap 503 */
-        return svr_tcp_egress_respond(h3_request, 503, 1);
+        return svr_tcp_egress_reject(h3_request, 503);
     }
 
     int *conn_count = svr_conn_tcp_flow_count_ptr(stream);
     if (conn_count && (uint32_t)*conn_count >= ctx.tcp_max_flows) {
         (*ctx.flows_rejected_cap)++; /* per-session tcp_max_flows cap 503 */
-        return svr_tcp_egress_respond(h3_request, 503, 1);
+        return svr_tcp_egress_reject(h3_request, 503);
     }
 
     /* Same ':'-based family detection as svr_tcp_egress_acl_allowed — see
@@ -1049,7 +1404,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     int is_v6 = strchr(target_host, ':') != NULL;
     int fd = mqvpn_socket_tcp_nonblock_new(is_v6 ? AF_INET6 : AF_INET);
     if (fd < 0) {
-        return svr_tcp_egress_respond(h3_request, 500, 1);
+        return svr_tcp_egress_reject(h3_request, 500);
     }
 
     struct sockaddr_storage dst;
@@ -1064,7 +1419,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
              * ran inet_pton on this exact string. Guarded anyway rather
              * than trusting a cross-function invariant silently. */
             close(fd);
-            return svr_tcp_egress_respond(h3_request, 500, 1);
+            return svr_tcp_egress_reject(h3_request, 500);
         }
         /* v4-mapped-destination guard — two INDEPENDENT defenses, and this
          * one (IPV6_V6ONLY) is load-bearing, NOT merely defense-in-depth:
@@ -1084,7 +1439,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
         int v6only = 1;
         if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) != 0) {
             close(fd);
-            return svr_tcp_egress_respond(h3_request, 500, 1);
+            return svr_tcp_egress_reject(h3_request, 500);
         }
         dst_len = sizeof(*dst6);
     } else {
@@ -1096,7 +1451,7 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
              * ran inet_pton on this exact string. Guarded anyway rather
              * than trusting a cross-function invariant silently. */
             close(fd);
-            return svr_tcp_egress_respond(h3_request, 500, 1);
+            return svr_tcp_egress_reject(h3_request, 500);
         }
         dst_len = sizeof(*dst4);
     }
@@ -1104,12 +1459,13 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     svr_tcp_egress_flow_t *ef = calloc(1, sizeof(*ef));
     if (!ef) {
         close(fd);
-        return svr_tcp_egress_respond(h3_request, 500, 1);
+        return svr_tcp_egress_reject(h3_request, 500);
     }
     ef->fd = fd;
     ef->h3_request = h3_request;
     ef->stream = stream;
     ef->state = EGRESS_FLOW_CONNECTING;
+    ef->reg_want_read = ef->reg_want_write = -1;
     ef->connect_deadline_us =
         svr_now_us() + (uint64_t)ctx.tcp_connect_timeout_sec * 1000000ULL;
     /* Meaningless until ACTIVE (svr_tcp_egress_on_connected re-latches it to
@@ -1136,19 +1492,26 @@ svr_tcp_egress_start_connect(mqvpn_server_t *server, void *stream,
     int r = connect(fd, (struct sockaddr *)&dst, dst_len);
     if (r == 0) {
         /* Rare: loopback/already-routed targets can complete synchronously. */
+        svr_tcp_egress_hold(ef);
         svr_tcp_egress_on_connected(server, ef);
+        svr_tcp_egress_release(ef);
         return 0;
     }
     if (errno != EINPROGRESS) {
         int err = errno;
         TLOG_W(server, "connect-tcp: connect() failed synchronously (errno=%d) (user=%s)",
                err, ef->username);
+        svr_tcp_egress_hold(ef);
         svr_tcp_egress_fail_connect(server, ef, err);
+        svr_tcp_egress_release(ef);
         return 0;
     }
 
-    if (svr_egress_fd_register(server, fd, 0, 1 /* want_write = connect signal */, ef) !=
+    if (svr_egress_fd_register(server, fd, 0, 1 /* want_write = connect signal */, ef) ==
         0) {
+        ef->reg_want_read = 0;
+        ef->reg_want_write = 1;
+    } else {
         TLOG_W(server,
                "egress_fd_register callback unset — connect-tcp flow will stall "
                "until the connect timeout fires (user=%s)",
@@ -1169,7 +1532,7 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
     if (svr_auth_required(server) &&
         svr_auth_check(server, hdrs->auth_token, hdrs->auth_token_len, username,
                        sizeof(username)) != 0) {
-        return svr_tcp_egress_respond(h3_request, 403, 1);
+        return svr_tcp_egress_reject(h3_request, 403);
     }
 
     /* The egress ACL below is unconditional regardless of auth: an open
@@ -1187,11 +1550,11 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
     uint16_t target_port;
     if (svr_tcp_egress_parse_path(hdrs->path, hdrs->path_len, target_host,
                                   sizeof(target_host), &target_port) != 0) {
-        return svr_tcp_egress_respond(h3_request, 400, 1);
+        return svr_tcp_egress_reject(h3_request, 400);
     }
 
     if (!svr_tcp_egress_acl_allowed(server, target_host, target_port)) {
-        return svr_tcp_egress_respond(h3_request, 403, 1);
+        return svr_tcp_egress_reject(h3_request, 403);
     }
 
     return svr_tcp_egress_start_connect(server, stream, h3_request, target_host,
@@ -1207,23 +1570,29 @@ svr_tcp_egress_on_request(mqvpn_server_t *server, void *stream,
 int
 svr_tcp_egress_on_body(mqvpn_server_t *server, void *stream, xqc_h3_request_t *h3_request)
 {
-    (void)h3_request;
     void **slot = svr_stream_tcp_egress_flow_ptr(stream);
     svr_tcp_egress_flow_t *ef = slot ? (svr_tcp_egress_flow_t *)*slot : NULL;
-    if (!ef)
-        return 0; /* role==CONNECT_TCP but no flow: rejected at request
-                   * time, or already torn down — nothing to feed. */
-
-    if (ef->state != EGRESS_FLOW_ACTIVE) {
-        /* CONNECTING: the client is legally allowed to send body before our
-         * 200 arrives, but there is no egress socket yet to send() it to.
-         * Leave it buffered in xquic — svr_tcp_egress_on_connected drains it
-         * explicitly once the flow goes ACTIVE (see that function's comment
-         * for why relying on a later data-notify re-fire is NOT safe). */
+    if (!ef) {
+        /* role==CONNECT_TCP but no flow: rejected at request time, its
+         * connect failed, or it was already torn down. Nothing will relay
+         * this body — discard it rather than let xquic buffer it for as
+         * long as the peer keeps sending (svr_tcp_egress_discard_body). */
+        if (h3_request) svr_tcp_egress_discard_body(h3_request);
         return 0;
     }
 
-    (void)svr_tcp_egress_drain_body(server, ef);
+    svr_tcp_egress_hold(ef);
+    if (ef->state != EGRESS_FLOW_ACTIVE) {
+        /* CONNECTING: the client is legally allowed to send body before our
+         * 200 arrives, but there is no egress socket yet to send() it to.
+         * Hold it (bounded) — svr_tcp_egress_on_connected relays it once the
+         * flow goes ACTIVE. Leaving it in xquic instead is unbounded: xquic
+         * keeps accepting body regardless (see svr_tcp_egress_discard_body). */
+        (void)svr_tcp_egress_hold_connecting_body(server, ef);
+    } else {
+        (void)svr_tcp_egress_drain_body(server, ef);
+    }
+    svr_tcp_egress_release(ef);
     return 0;
 }
 
@@ -1265,7 +1634,11 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
              * or they end up stashed below (see last_activity_us's field
              * comment — the recv() itself is the "bytes moved" event). */
             ef->last_activity_us = svr_now_us();
-            ssize_t sent = xqc_h3_request_send_body(ef->h3_request, buf, (size_t)n, 0);
+            ssize_t sent =
+                MQVPN_TCP_EGRESS_H3_SEND_BODY(ef->h3_request, buf, (size_t)n, 0);
+            /* Called from the reactor, outside any engine callback: the send
+             * can run the engine, whose notifies may tear this flow down. */
+            if (ef->doomed) return;
             if (sent == -XQC_EAGAIN) sent = 0; /* normalize: nothing accepted */
             if (sent < 0) {
                 svr_tcp_egress_on_relay_error(server, ef, 0);
@@ -1332,18 +1705,20 @@ svr_tcp_egress_fd_ready(mqvpn_server_t *server, int fd, void *fd_ctx, int readab
     assert(fd == ef->fd);
     (void)fd;
 
+    svr_tcp_egress_hold(ef);
     if (ef->state == EGRESS_FLOW_CONNECTING && writable) {
         int soerr = 0;
         socklen_t len = sizeof(soerr);
         if (getsockopt(ef->fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0) soerr = errno;
         if (soerr != 0) {
             svr_tcp_egress_fail_connect(server, ef, soerr);
-            return;
+        } else {
+            svr_tcp_egress_on_connected(server, ef);
         }
-        svr_tcp_egress_on_connected(server, ef);
-        return;
+    } else {
+        svr_tcp_egress_on_relay_ready(server, ef, readable, writable);
     }
-    svr_tcp_egress_on_relay_ready(server, ef, readable, writable);
+    svr_tcp_egress_release(ef);
 }
 
 void
@@ -1359,14 +1734,21 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
     int idle_evict_enabled = ctx.tcp_idle_timeout_sec != 0;
     uint64_t idle_us = (uint64_t)ctx.tcp_idle_timeout_sec * 1000000ULL;
     svr_tcp_egress_flow_t *ef = *ctx.flow_list_head;
+    if (ef) svr_tcp_egress_hold(ef);
     while (ef) {
         /* Save next before possibly destroying ef — fail_connect() and
-         * on_idle_evict() both unlink and free it (see the
-         * destroy-ownership note above svr_tcp_egress_abort), so
-         * dereferencing ef again after would be a use-after-free on the
-         * next loop iteration. */
+         * on_idle_evict() both unlink it (see the destroy-ownership note
+         * above svr_tcp_egress_abort). Both also send on, or close, the
+         * request from outside any engine callback, which can run the engine
+         * and tear down OTHER flows too — including `next`. Holding `next`
+         * keeps it allocated until this loop moves past it; a doomed `next`
+         * was unlinked (next->next == NULL), which just ends this pass early,
+         * and the rest is swept on the next tick. */
         svr_tcp_egress_flow_t *next = ef->next;
-        if (ef->state == EGRESS_FLOW_CONNECTING) {
+        if (next) svr_tcp_egress_hold(next);
+        if (ef->doomed) {
+            /* torn down by an earlier iteration's engine run */
+        } else if (ef->state == EGRESS_FLOW_CONNECTING) {
             /* CONNECTING flows are never idle-evicted: they use
              * connect_deadline_us, not last_activity_us (which isn't even
              * meaningful yet — see that field's comment). */
@@ -1379,6 +1761,7 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
              * same form as the client's mqvpn_tcp_lane_tick sweep. */
             svr_tcp_egress_on_idle_evict(server, ef, ctx.tcp_idle_timeout_sec);
         }
+        svr_tcp_egress_release(ef);
         ef = next;
     }
 }

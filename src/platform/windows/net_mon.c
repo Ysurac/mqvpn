@@ -362,6 +362,7 @@ try_reactivate_by_ifname(platform_win_ctx_t *p, const char *ifname)
      * The lib's gate rejects bad states with MQVPN_ERR_INVALID_STATE, which
      * we silently swallow. */
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    pinfo[0].struct_size = sizeof(pinfo[0]); /* array stride */
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return;
 
@@ -452,12 +453,13 @@ readd_open_socket(platform_win_ctx_t *p, platform_path_t *s, const char *ifname)
  * ctx, or NULL on failure (already logged). The ctx is caller-owned until
  * add_path succeeds. Sibling of the POSIX netmon_platform_transport_create. */
 static void *
-recovery_transport_create(SOCKET sock, const char *ifname)
+recovery_transport_create(platform_win_ctx_t *p, SOCKET sock, const char *ifname)
 {
     mqvpn_bind_winsock_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);
     bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "%s", ifname);
+    bopts.dont_fragment = mqvpn_client_pmtud_enabled(p->client);
     void *ctx = NULL;
     if (mqvpn_bind_winsock_path_new(sock, &bopts, &ctx) != MQVPN_OK) {
         LOG_WRN("netmon: transport setup for re-add %s failed", ifname);
@@ -478,8 +480,10 @@ recovery_register_with_lib(platform_win_ctx_t *p, platform_path_t *s, void *tctx
     mqvpn_path_desc_t desc;
     platform_path_fill_desc(p, s, &desc);
 
+    p->adding_iface = s->iface;
     mqvpn_path_handle_t handle = mqvpn_client_add_path(
         p->client, &desc, mqvpn_bind_winsock_path_ops(), tctx, outcome);
+    p->adding_iface = NULL;
     if (handle < 0) {
         LOG_WRN("netmon: add_path() for re-add %s failed", ifname);
         return -1;
@@ -568,6 +572,8 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
     if (iface_has_usable_ip(ifname, p->server_addr.ss_family) != 1) return 0;
 
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+
+    pinfo[0].struct_size = sizeof(pinfo[0]); /* array stride */
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK)
         return 0;
@@ -588,7 +594,7 @@ try_readd_removed_path(platform_win_ctx_t *p, const char *ifname)
 
         if (readd_open_socket(p, s, ifname) < 0) return 0;
 
-        void *tctx = recovery_transport_create(s->sock, ifname);
+        void *tctx = recovery_transport_create(p, s->sock, ifname);
         if (!tctx) {
             platform_path_close_socket(s);
             return 0;
@@ -645,6 +651,7 @@ static void
 reconcile_all(platform_win_ctx_t *p)
 {
     mqvpn_path_info_t pinfo[MQVPN_MAX_PATHS];
+    pinfo[0].struct_size = sizeof(pinfo[0]); /* array stride */
     int n = 0;
     if (mqvpn_client_get_paths(p->client, pinfo, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return;
 

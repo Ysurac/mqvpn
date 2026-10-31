@@ -800,7 +800,7 @@ test_dscp_ipv4_basic(void)
     TEST(dscp_from_pkt IPv4 basic(EF 46));
 
     uint8_t pkt[20] = {0};
-    pkt[0] = 0x45; /* IPv4, IHL=5 */
+    pkt[0] = 0x45;    /* IPv4, IHL=5 */
     pkt[1] = 46 << 2; /* DSCP=46 (EF), ECN=0 */
 
     ASSERT_EQ(dscp_from_pkt(pkt, 20), 46);

@@ -83,18 +83,44 @@ if [ -n "$CONFIG" ]; then
         echo "Error: config file not found: $CONFIG"
         exit 1
     fi
+    # [Interface] key of an INI config, matched like src/config.c (section
+    # and key case-insensitive); a trailing "# ..." / "; ..." is dropped.
+    ini_interface_value() {
+        awk -v want="$1" '
+            { line = $0; sub(/\r$/, "", line) }
+            line ~ /^[[:space:]]*\[/ {
+                sec = line
+                sub(/^[[:space:]]*\[/, "", sec)
+                sub(/\].*$/, "", sec)
+                gsub(/[[:space:]]/, "", sec)
+                sec = tolower(sec)
+                next
+            }
+            sec == "interface" {
+                eq = index(line, "=")
+                if (eq == 0) next
+                k = substr(line, 1, eq - 1)
+                gsub(/[[:space:]]/, "", k)
+                if (tolower(k) != tolower(want)) next
+                v = substr(line, eq + 1)
+                sub(/[#;].*$/, "", v)
+                gsub(/[[:space:]]/, "", v)
+                val = v
+            }
+            END { print val }' "$CONFIG"
+    }
     # Extract Subnet from config (used for NAT setup)
-    cfg_subnet=$(sed -n 's/^[[:space:]]*Subnet[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    cfg_subnet=$(ini_interface_value Subnet)
     if [ -n "$cfg_subnet" ]; then
         SUBNET="$cfg_subnet"
     fi
     # Extract Subnet6 from config (used for IPv6 FORWARD rules)
-    cfg_subnet6=$(sed -n 's/^[[:space:]]*Subnet6[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    cfg_subnet6=$(ini_interface_value Subnet6)
     if [ -n "$cfg_subnet6" ]; then
         SUBNET6="$cfg_subnet6"
     fi
     # Extract TunName from config (used for FORWARD rules)
-    cfg_tun=$(sed -n 's/^[[:space:]]*TunName[[:space:]]*=[[:space:]]*\(.*\)/\1/p' "$CONFIG" | tail -1 | tr -d '[:space:]')
+    cfg_tun=$(ini_interface_value TunName)
     if [ -n "$cfg_tun" ]; then
         TUN_NAME="$cfg_tun"
     fi

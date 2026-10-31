@@ -16,9 +16,7 @@ SRV_PID=""; CLI_PID=""
 cleanup() {
     [ -n "$CLI_PID" ] && { kill "$CLI_PID" 2>/dev/null || true; wait "$CLI_PID" 2>/dev/null || true; }
     [ -n "$SRV_PID" ] && { kill "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true; }
-    ip netns exec "$NS_SERVER" pkill -f iperf3 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" pkill -f iperf3 2>/dev/null || true
-    sleep 1
+    ci_bench_netns_kill "$NS_SERVER" "$NS_CLIENT"
     ip netns del "$NS_SERVER" 2>/dev/null || true
     ip netns del "$NS_CLIENT" 2>/dev/null || true
     for lnk in ci-a0 ci-b0 ci-c0 ci-d0; do ip link del "$lnk" 2>/dev/null || true; done

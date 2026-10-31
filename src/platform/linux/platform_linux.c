@@ -8,7 +8,7 @@
  *   - libevent event loop driving tick()
  *   - TUN device creation and I/O
  *   - UDP path sockets, one slot each (path_table.c)
- *   - Signal handling (SIGINT/SIGTERM)
+ *   - Signal handling (SIGINT/SIGTERM/SIGHUP; SIGPIPE ignored)
  *
  * Routing and killswitch are in separate files (routing.c, killswitch.c).
  */
@@ -17,8 +17,11 @@
 #include "platform_linux.h"
 #include "control_socket.h"
 #include "log.h"
+#include "compat/socket_compat.h"
+#include "platform/path_line.h"
 #include "mqvpn_internal.h" /* mqvpn_config_apply_reorder (INI reorder bridge) */
 #include "netlink_mon.h"
+#include "tun_offload.h"
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -99,10 +102,13 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     }
 
     /* Create TUN device — use tun_name_cfg which survives destroy/recreate */
-    if (mqvpn_tun_create(&p->tun, p->tun_name_cfg) < 0) {
+    if (mqvpn_tun_create_opts(&p->tun, p->tun_name_cfg, p->tun_offload, p->tun_gro) < 0) {
         LOG_ERR("TUN create failed");
         goto fail;
     }
+    /* From here on the kernel-assigned name (a template such as tun%d gets
+     * its number now, possibly a different one on every rebuild). */
+    snprintf(p->dns.tun_name, sizeof(p->dns.tun_name), "%s", p->tun.name);
 
     /* Set IPv4 address */
     char local_ip[INET_ADDRSTRLEN];
@@ -117,9 +123,10 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     if (mqvpn_tun_set_mtu(&p->tun, info->mtu) < 0) goto fail;
     if (mqvpn_tun_up(&p->tun) < 0) goto fail;
 
-    /* Set IPv6 address if available */
+    /* Set IPv6 address if available. has_v6 follows each tunnel: a
+     * reconnect may come back without IPv6. */
+    p->has_v6 = info->has_v6 ? 1 : 0;
     if (info->has_v6) {
-        p->has_v6 = 1;
         char v6str[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, info->assigned_ip6, v6str, sizeof(v6str));
         if (mqvpn_tun_set_addr6(&p->tun, v6str, info->assigned_prefix6) < 0)
@@ -131,7 +138,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Set up routes, killswitch, DNS.
      *
-     * no_routes=true skips setup_routes() entirely. TUN is still
+     * manage_routes=false (ManageRoutes=false, or no_routes: --no-routes /
+     * NoRoutes) skips setup_routes() entirely. TUN is still
      * created + addressed + UP and the kernel auto-adds the connected
      * route for the tunnel subnet (e.g. 10.0.0.0/24 dev mqvpn0).
      *
@@ -141,16 +149,22 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
      * the existing default route — the integrator must add `ip route`
      * / `ip rule` externally (router/embedded use case). killswitch
      * and DNS overrides remain independently controllable.
+     *
+     * Cleanup is not gated on the knobs: cleanup_routes() removes exactly
+     * what a successful setup_routes() installed (routing_configured).
      */
-    if (!p->no_routes) {
+    if (p->manage_routes) {
         if (setup_routes(p) < 0) {
             LOG_ERR("route setup failed, aborting tunnel");
             goto fail;
         }
     } else {
-        LOG_INF("no_routes=true: host routing table left untouched");
+        LOG_INF("%s: host routing table left untouched",
+                p->no_routes ? "no_routes=true" : "manage_routes=off");
     }
-    if (setup_killswitch(p) < 0) {
+    /* The kill switch block itself has been up since startup; only the
+     * ACCEPT for this TUN follows the tunnel. */
+    if (killswitch_tun_up(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
         goto fail;
     }
@@ -195,8 +209,8 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     return;
 
 fail:
-    cleanup_killswitch(p);
-    if (p->manage_routes) cleanup_routes(p);
+    killswitch_tun_down(p); /* the block stays until the process exits */
+    cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
@@ -267,8 +281,10 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->paths[i].recover_failures = 0;
         if (p->ev_status) event_del(p->ev_status); /* pause — reused on reconnect */
         if (p->ev_recover) event_del(p->ev_recover);
-        cleanup_killswitch(p);
-        if (p->manage_routes) cleanup_routes(p);
+        /* Kill switch: only the TUN ACCEPT goes; the block stays through
+         * the reconnect and is removed at final shutdown. */
+        killswitch_tun_down(p);
+        cleanup_routes(p);
         mqvpn_dns_restore(&p->dns);
         if (p->tun_up) {
             if (p->ev_tun) {
@@ -281,20 +297,27 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
-        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
-            event_base_loopbreak(p->eb);
+        /* CLOSED we did not ask for: the connection ended and the library
+         * will not retry it (reconnect off, or a rejected certificate), so
+         * exit non-zero rather than idle on a dead client. */
+        if (new_state == MQVPN_STATE_CLOSED && !p->shutting_down)
+            p->fatal_error = PLATFORM_FATAL_CLOSED;
+        if (new_state == MQVPN_STATE_CLOSED) event_base_loopbreak(p->eb);
     }
 }
 
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
+    platform_ctx_t *p = (platform_ctx_t *)user_ctx;
     /* PR5: path lifecycle state is owned entirely by libmqvpn. Platform
      * no longer mirrors recoverable / removed state — netmon_try_reactivate_by_ifname
      * queries lib state directly via mqvpn_client_get_paths(). */
-    const char *sn = mqvpn_path_status_string(status);
-    LOG_INF("path %lld -> %s", (long long)path, sn);
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
+    platform_fmt_path_line(line, sizeof(line), path, iface, status);
+    LOG_INF("%s", line);
 }
 
 static void
@@ -326,9 +349,11 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
     /* Re-resolve the server hostname so a reconnect picks up a changed IP
      * (dynamic DNS, DNS failover) instead of retrying a stale address
      * forever. Literal IPs round-trip through mqvpn_resolve_host() as a
-     * no-op. Kill switch / split-tunnel routing are pinned to the address
-     * resolved at startup and are NOT updated here — if either is active
-     * and the IP actually changes, a client restart is still required. */
+     * no-op. The kill switch's server ACCEPT moves with the address; the
+     * split-tunnel routes are torn down on RECONNECTING and rebuilt from
+     * p->server_addr when the next tunnel comes up. With the kill switch on
+     * and the resolver reachable only outside the tunnel, the lookup itself
+     * is blocked and the previous address is kept. */
     struct sockaddr_storage new_addr;
     socklen_t new_addrlen;
     if (mqvpn_resolve_host(p->server_host, &new_addr, &new_addrlen) < 0) {
@@ -341,19 +366,26 @@ cb_reconnect_scheduled(int delay_sec, void *user_ctx)
     char old_ip[INET6_ADDRSTRLEN], new_ip[INET6_ADDRSTRLEN];
     mqvpn_sa_ntop(&p->server_addr, old_ip, sizeof(old_ip));
     mqvpn_sa_ntop(&new_addr, new_ip, sizeof(new_ip));
-    if (new_addr.ss_family != p->server_addr.ss_family || strcmp(old_ip, new_ip) != 0) {
+    int changed =
+        new_addr.ss_family != p->server_addr.ss_family || strcmp(old_ip, new_ip) != 0;
+    if (changed)
         LOG_INF("dns: '%s' resolved to %s (was %s)", p->server_host, new_ip, old_ip);
-        if (p->killswitch_active || p->routing_configured) {
-            LOG_WRN("kill switch / split-tunnel routing still reference %s; "
-                     "restart mqvpn to fully apply the new address",
-                     old_ip);
-        }
-    }
 
+    struct sockaddr_storage prev_addr = p->server_addr;
+    socklen_t prev_addrlen = p->server_addrlen;
     p->server_addr = new_addr;
     p->server_addrlen = new_addrlen;
+    if (changed && killswitch_update_server(p) < 0) {
+        /* The kill switch would block the new address: stay on the old one. */
+        LOG_WRN("kill switch could not allow %s; keeping previous server address %s",
+                new_ip, old_ip);
+        p->server_addr = prev_addr;
+        p->server_addrlen = prev_addrlen;
+        return;
+    }
     if (p->client) {
-        mqvpn_client_set_server_addr(p->client, (struct sockaddr *)&new_addr, new_addrlen);
+        mqvpn_client_set_server_addr(p->client, (struct sockaddr *)&new_addr,
+                                     new_addrlen);
     }
 }
 
@@ -368,10 +400,12 @@ status_log_cb(evutil_socket_t fd, short what, void *arg)
     mqvpn_client_state_t state = mqvpn_client_get_state(p->client);
     if (state != MQVPN_STATE_ESTABLISHED) return;
 
-    mqvpn_stats_t stats;
+    mqvpn_stats_t stats = {.struct_size = sizeof(stats)};
     if (mqvpn_client_get_stats(p->client, &stats) != MQVPN_OK) return;
 
     mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
+
+    paths[0].struct_size = sizeof(paths[0]); /* array stride */
     int n_paths = 0;
     mqvpn_client_get_paths(p->client, paths, MQVPN_MAX_PATHS, &n_paths);
 
@@ -407,8 +441,11 @@ static void on_tick_timer(evutil_socket_t fd, short what, void *arg);
 void
 schedule_next_tick(platform_ctx_t *p)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_client_get_interest(p->client, &interest);
+
+    /* Every handler that can deliver packets to the TUN ends here. */
+    if (p->tun_up && p->tun.fd >= 0) mqvpn_tun_flush(&p->tun);
 
     int ms = interest.next_timer_ms;
     struct timeval tv = {
@@ -423,6 +460,10 @@ schedule_next_tick(platform_ctx_t *p)
             event_add(p->ev_tun, NULL);
         else if (!interest.tun_readable && event_pending(p->ev_tun, EV_READ, NULL))
             event_del(p->ev_tun);
+        /* Segments kept from before a backpressure stop are no longer in the
+         * fd, so it may never become readable for them: run the read handler. */
+        if (interest.tun_readable && mqvpn_tun_has_pending(&p->tun))
+            event_active(p->ev_tun, EV_READ, 1);
     }
 }
 
@@ -461,8 +502,8 @@ tun_fatal_error(platform_ctx_t *p)
         event_free(p->ev_tun);
         p->ev_tun = NULL;
     }
-    cleanup_killswitch(p);
-    if (p->manage_routes) cleanup_routes(p);
+    killswitch_tun_down(p);
+    cleanup_routes(p);
     mqvpn_dns_restore(&p->dns);
     if (p->tun.fd >= 0) mqvpn_tun_destroy(&p->tun);
     p->tun.fd = -1;
@@ -476,12 +517,12 @@ tun_fatal_error(platform_ctx_t *p)
     }
     if (p->have_tunnel_info && ++p->tun_rebuilds <= 5) {
         LOG_ERR("tun read failed (%s): device %s lost, rebuilding it in place (%d/5)",
-                strerror(err), p->tun_name_cfg, p->tun_rebuilds);
+                strerror(err), p->tun.name, p->tun_rebuilds);
         cb_tunnel_config_ready(&p->last_tunnel_info, p);
         return;
     }
     LOG_ERR("tun read failed (%s): device %s keeps disappearing, disconnecting",
-            strerror(err), p->tun_name_cfg);
+            strerror(err), p->tun.name);
     mqvpn_client_disconnect(p->client);
 }
 
@@ -493,7 +534,9 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     platform_ctx_t *p = (platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    /* Finish the segments of a super-packet already split off the kernel
+     * read, even past the budget: they are not in the fd any more. */
+    for (int i = 0; i < BULK_READ_COUNT || mqvpn_tun_has_pending(&p->tun); i++) {
         int n = mqvpn_tun_read(&p->tun, buf, sizeof(buf));
         if (n == 0) break; /* EAGAIN: drained */
         if (n < 0) {
@@ -550,6 +593,28 @@ on_socket_read(evutil_socket_t fd, short what, void *arg)
     schedule_next_tick(p);
 }
 
+/* Process-wide signal setup shared by client and server.
+ *
+ * SIGPIPE is ignored: a write to a control-API client that went away, or a
+ * log write to a dead `| tee`, must fail with EPIPE instead of killing the
+ * process before its cleanup (kill switch, routes, DNS) runs. Children
+ * (ip, iptables, resolvectl) inherit the SIG_IGN across exec, as on Darwin
+ * (platform_darwin.c): a diagnostic written to a dead pipe then fails
+ * instead of killing the tool mid-cleanup.
+ *
+ * SIGHUP stops the process like SIGTERM, so the cleanup runs, unless it was
+ * already ignored on entry (`nohup`): that choice is kept. mqvpn has no
+ * reload, so there is no other meaning to preserve. Returns 1 when SIGHUP
+ * should be handled. */
+static int
+platform_signals_init(void)
+{
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa;
+    if (sigaction(SIGHUP, NULL, &sa) == 0 && sa.sa_handler == SIG_IGN) return 0;
+    return 1;
+}
+
 static void
 on_signal(evutil_socket_t sig, short what, void *arg)
 {
@@ -602,9 +667,20 @@ cli_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
  * pointers are event args, so slots are recycled, never moved); appends
  * otherwise. Returns the slot, or NULL (already logged; nothing is left
  * registered or open). */
+static platform_path_t *find_live_slot(platform_ctx_t *p, const char *iface);
+
 static platform_path_t *
 attach_extra_path(platform_ctx_t *p, const char *iface, uint32_t flags)
 {
+    /* One live slot per interface: a second socket pinned to the same
+     * device is not a second path. A slot dropped by the monitor is still
+     * live (it comes back by itself); one removed through the control API
+     * is not, and is reused below. */
+    if (find_live_slot(p, iface)) {
+        LOG_ERR("path %s: interface already in use", iface);
+        return NULL;
+    }
+
     platform_path_t *s = NULL;
     for (int i = 0; i < p->n_paths; i++) {
         platform_path_t *c = &p->paths[i];
@@ -775,6 +851,7 @@ platform_set_path_dscp_mask(platform_ctx_t *p, const char *iface, uint64_t dscp_
 int
 linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 {
+    int handle_sighup = platform_signals_init();
     int rc = 1;
     platform_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
@@ -784,12 +861,14 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.killswitch_enabled = cfg->kill_switch;
     ctx.route_via_server = cfg->route_via_server;
     ctx.no_routes = cfg->no_routes;
-    /* Either knob can suppress route management: dev's no_routes (CLI
-     * --no-routes / INI NoRoutes) and main's manage_routes (currently
-     * always 1 — no config surface of its own yet, see mqvpn_config_defaults). */
+    /* Either knob suppresses route management: no_routes (CLI --no-routes /
+     * INI NoRoutes) and manage_routes (ManageRoutes / --no-manage-routes). */
     ctx.manage_routes = cfg->manage_routes && !cfg->no_routes;
+    ctx.pmtud = cfg->pmtud;
     ctx.udp_gro = cfg->udp_gro;
     ctx.udp_gso = cfg->udp_gso;
+    ctx.tun_offload = cfg->tun_offload;
+    ctx.tun_gro = cfg->tun_gro;
 
     /* Pre-set TUN name (save to tun_name_cfg too — survives TUN destroy/recreate) */
     if (cfg->tun_name) {
@@ -803,7 +882,9 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     mqvpn_dns_init(&ctx.dns);
     snprintf(ctx.dns.tun_name, sizeof(ctx.dns.tun_name), "%s", ctx.tun_name_cfg);
     for (int i = 0; i < cfg->n_dns; i++)
-        mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]);
+        mqvpn_dns_add_server(&ctx.dns, cfg->dns_servers[i]); /* skips non-addresses */
+    /* Undo a resolv.conf a crashed run left behind (no-op otherwise). */
+    mqvpn_dns_restore_stale(&ctx.dns);
 
     /* Resolve server address. The original host string is kept around so
      * cb_reconnect_scheduled() can re-resolve it before each reconnect
@@ -917,8 +998,10 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
         mqvpn_path_desc_t desc;
         platform_path_fill_desc(&ctx, s, &desc);
+        ctx.adding_iface = s->iface;
         s->handle = mqvpn_client_add_path(ctx.client, &desc, mqvpn_bind_posix_path_ops(),
                                           tctx, NULL);
+        ctx.adding_iface = NULL;
         if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
             mqvpn_bind_posix_path_free(tctx); /* add failed: still ours */
@@ -950,6 +1033,10 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.ev_sigterm = evsignal_new(ctx.eb, SIGTERM, on_signal, &ctx);
     event_add(ctx.ev_sigint, NULL);
     event_add(ctx.ev_sigterm, NULL);
+    if (handle_sighup) {
+        ctx.ev_sighup = evsignal_new(ctx.eb, SIGHUP, on_signal, &ctx);
+        if (ctx.ev_sighup) event_add(ctx.ev_sighup, NULL);
+    }
 
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
@@ -959,6 +1046,19 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
         ctx.ctrl = ctrl_socket_create(ctx.eb, cfg->control_addr, cfg->control_port, NULL,
                                       &ctx, cli_rx_stats, &ctx);
         if (!ctx.ctrl) LOG_WRN("client control API setup failed — continuing without it");
+    }
+
+    /* Kill switch: block everything but the server before the first packet
+     * goes out, and keep it up until the process exits — reconnects and
+     * TUN rebuilds only add/remove the TUN ACCEPT. Rules a crashed instance
+     * left behind go first. Done after the signal handlers are armed, so a
+     * SIGTERM from here on still reaches the cleanup. */
+    if (ctx.killswitch_enabled) {
+        killswitch_flush_stale();
+        if (setup_killswitch(&ctx) < 0) {
+            LOG_ERR("killswitch setup failed, aborting");
+            goto cleanup;
+        }
     }
 
     /* Connect */
@@ -975,6 +1075,8 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = ctx.fatal_error ? 1 : 0;
     if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
         LOG_ERR("exiting: path release refused by the library");
+    else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
+        LOG_ERR("exiting: connection closed");
     else if (rc)
         LOG_ERR("exiting: tunnel setup failed");
 
@@ -1011,7 +1113,8 @@ cleanup:
 
     /* Clean up platform resources */
     cleanup_killswitch(&ctx);
-    if (ctx.manage_routes) cleanup_routes(&ctx);
+    if (ctx.killswitch_enabled) killswitch_flush_stale();
+    cleanup_routes(&ctx);
     mqvpn_dns_restore(&ctx.dns);
 
     if (ctx.tun_up) {
@@ -1039,6 +1142,10 @@ cleanup:
     if (ctx.ev_sigterm) {
         event_del(ctx.ev_sigterm);
         event_free(ctx.ev_sigterm);
+    }
+    if (ctx.ev_sighup) {
+        event_del(ctx.ev_sighup);
+        event_free(ctx.ev_sighup);
     }
     if (ctx.ev_status) {
         event_del(ctx.ev_status);
@@ -1096,14 +1203,27 @@ typedef struct server_platform_ctx_s {
     struct event *ev_socket;
     struct event *ev_sigint;
     struct event *ev_sigterm;
+    struct event *ev_sighup;
     mqvpn_tun_t tun;
     int tun_up;
+    int tun_offload; /* [Advanced] TunOffload */
+    int tun_gro;     /* [Advanced] TunGro */
     int udp_fd;
     /* mqvpn_bind_posix server transport over udp_fd; owned by the library
      * after set_transport (finalised inside mqvpn_server_destroy). */
     void *bind_ctx;
     int shutting_down;
+    /* The event loop was stopped because the server cannot run (TUN lost
+     * and not rebuildable): exit non-zero. */
+    int fatal_error;
+    /* Copy of the tunnel config, so a TUN that breaks under us can be
+     * rebuilt in place (svr_tun_fatal_error), and the rebuild budget. */
+    mqvpn_tunnel_info_t tunnel_info;
+    int have_tunnel_info;
+    int tun_rebuilds;
+    time_t tun_rebuild_window;
     ctrl_socket_t *ctrl;
+    char tun_name_cfg[IFNAMSIZ]; /* configured TUN name ("" = mqvpn0) */
 
     /* Receive-side offload telemetry — same meaning as platform_ctx_t's pair.
      * Accumulators only: the bind counts inside the transport ctx, so these
@@ -1128,8 +1248,10 @@ static void svr_on_tun_read(evutil_socket_t fd, short what, void *arg);
 static void
 svr_schedule_next_tick(server_platform_ctx_t *sp)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_server_get_interest(sp->server, &interest);
+
+    if (sp->tun_up && sp->tun.fd >= 0) mqvpn_tun_flush(&sp->tun);
 
     int ms = interest.next_timer_ms;
     struct timeval tv = {
@@ -1144,6 +1266,8 @@ svr_schedule_next_tick(server_platform_ctx_t *sp)
             event_add(sp->ev_tun, NULL);
         else if (!interest.tun_readable && event_pending(sp->ev_tun, EV_READ, NULL))
             event_del(sp->ev_tun);
+        if (interest.tun_readable && mqvpn_tun_has_pending(&sp->tun))
+            event_active(sp->ev_tun, EV_READ, 1);
     }
 }
 
@@ -1164,16 +1288,32 @@ svr_cb_tun_output(const uint8_t *pkt, size_t len, void *user_ctx)
     if (sp->tun_up && sp->tun.fd >= 0) mqvpn_tun_write(&sp->tun, pkt, len);
 }
 
+/* Drop the TUN and its read event (half-configured or broken). */
 static void
-svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+svr_tun_teardown(server_platform_ctx_t *sp)
 {
-    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+    if (sp->ev_tun) {
+        event_del(sp->ev_tun);
+        event_free(sp->ev_tun);
+        sp->ev_tun = NULL;
+    }
+    if (sp->tun.fd >= 0) mqvpn_tun_destroy(&sp->tun);
+    sp->tun.fd = -1;
+    sp->tun_up = 0;
+}
 
-    /* Create TUN device */
-    const char *tun_name = sp->tun.name[0] ? sp->tun.name : "mqvpn0";
-    if (mqvpn_tun_create(&sp->tun, tun_name) < 0) {
+/* Build the TUN from the tunnel config. 0, or -1 with nothing left open
+ * (already logged). A server without its TUN cannot forward anything, so
+ * every caller treats -1 as fatal. */
+static int
+svr_tun_build(server_platform_ctx_t *sp, const mqvpn_tunnel_info_t *info)
+{
+    /* Create TUN device from the configured name; sp->tun.name then holds
+     * the kernel-assigned one (differs only for a template like tun%d). */
+    const char *tun_name = sp->tun_name_cfg[0] ? sp->tun_name_cfg : "mqvpn0";
+    if (mqvpn_tun_create_opts(&sp->tun, tun_name, sp->tun_offload, sp->tun_gro) < 0) {
         LOG_ERR("TUN create failed");
-        return;
+        return -1;
     }
 
     /* Set IPv4 address — server gets assigned_ip (the .1 address) */
@@ -1183,9 +1323,12 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     snprintf(base_ip, sizeof(base_ip), "%d.%d.%d.%d", info->server_ip[0],
              info->server_ip[1], info->server_ip[2], info->server_ip[3]);
 
-    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip, info->assigned_prefix) < 0) return;
-    if (mqvpn_tun_set_mtu(&sp->tun, info->mtu) < 0) return;
-    if (mqvpn_tun_up(&sp->tun) < 0) return;
+    if (mqvpn_tun_set_addr(&sp->tun, srv_ip, base_ip, info->assigned_prefix) < 0 ||
+        mqvpn_tun_set_mtu(&sp->tun, info->mtu) < 0 || mqvpn_tun_up(&sp->tun) < 0) {
+        LOG_ERR("TUN %s setup failed", sp->tun.name);
+        svr_tun_teardown(sp);
+        return -1;
+    }
 
     /* IPv6 if available */
     if (info->has_v6) {
@@ -1199,10 +1342,55 @@ svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
     /* Register TUN read event */
     sp->ev_tun = event_new(sp->eb, sp->tun.fd, EV_READ | EV_PERSIST, svr_on_tun_read, sp);
-    if (sp->ev_tun) {
-        event_add(sp->ev_tun, NULL);
-        sp->tun_up = 1;
+    if (!sp->ev_tun || event_add(sp->ev_tun, NULL) < 0) {
+        LOG_ERR("failed to create TUN event");
+        svr_tun_teardown(sp);
+        return -1;
     }
+    sp->tun_up = 1;
+    return 0;
+}
+
+static void
+svr_cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
+{
+    server_platform_ctx_t *sp = (server_platform_ctx_t *)user_ctx;
+
+    sp->tunnel_info = *info;
+    sp->have_tunnel_info = 1;
+    /* Failure leaves tun_up == 0: linux_platform_run_server checks it right
+     * after mqvpn_server_start() (which runs this callback) and exits. */
+    (void)svr_tun_build(sp, info);
+}
+
+/* The TUN read failed with something other than EAGAIN/EINTR: the device is
+ * gone or broken. The read event is EV_PERSIST on a level-triggered fd that
+ * stays readable, so leaving it armed spins at 100 % CPU logging one line
+ * per pass (the client hit this, see tun_fatal_error). Tear it down and
+ * rebuild it in place from the saved config; past a small budget per minute
+ * stop the server non-zero and let the supervisor restart it. */
+static void
+svr_tun_fatal_error(server_platform_ctx_t *sp)
+{
+    int err = errno;
+    svr_tun_teardown(sp);
+
+    time_t now = time(NULL);
+    if (now - sp->tun_rebuild_window > 60) {
+        sp->tun_rebuild_window = now;
+        sp->tun_rebuilds = 0;
+    }
+    if (sp->have_tunnel_info && ++sp->tun_rebuilds <= 5) {
+        LOG_ERR("tun read failed (%s): device %s lost, rebuilding it in place (%d/5)",
+                strerror(err), sp->tun.name, sp->tun_rebuilds);
+        if (svr_tun_build(sp, &sp->tunnel_info) == 0) return;
+    } else {
+        LOG_ERR("tun read failed (%s): device %s keeps disappearing", strerror(err),
+                sp->tun.name);
+    }
+    LOG_ERR("server cannot run without its TUN, exiting");
+    sp->fatal_error = 1;
+    event_base_loopbreak(sp->eb);
 }
 
 static void
@@ -1225,9 +1413,13 @@ svr_on_tun_read(evutil_socket_t fd, short what, void *arg)
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     uint8_t buf[TUN_BUF_SIZE];
 
-    for (int i = 0; i < BULK_READ_COUNT; i++) {
+    for (int i = 0; i < BULK_READ_COUNT || mqvpn_tun_has_pending(&sp->tun); i++) {
         int n = mqvpn_tun_read(&sp->tun, buf, sizeof(buf));
-        if (n <= 0) break;
+        if (n == 0) break; /* EAGAIN: drained */
+        if (n < 0) {
+            svr_tun_fatal_error(sp);
+            break;
+        }
 
         int ret = mqvpn_server_on_tun_packet(sp->server, buf, (size_t)n);
         if (ret == MQVPN_ERR_AGAIN) {
@@ -1383,7 +1575,7 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
         }
     }
 
-    int fd = socket(af, SOCK_DGRAM, 0);
+    int fd = socket(af, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         LOG_ERR("socket: %s", strerror(errno));
         return -1;
@@ -1398,11 +1590,8 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
 
     int optval = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-    /* The platform sizes its own listen socket, so the transport ctx is told
-     * to leave the buffers alone (socket_buf_bytes = -1). */
-    int bufsize = 1 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+    /* Socket buffers are sized by the transport ctx (bind default), as on
+     * the client paths. */
 
     memset(out_addr, 0, sizeof(*out_addr));
     if (af == AF_INET6) {
@@ -1458,13 +1647,17 @@ svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
 int
 linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
 {
+    int handle_sighup = platform_signals_init();
     int rc = 1;
     server_platform_ctx_t sp;
     memset(&sp, 0, sizeof(sp));
     sp.tun.fd = -1;
     sp.udp_fd = -1;
+    sp.tun_offload = cfg->tun_offload;
+    sp.tun_gro = cfg->tun_gro;
 
-    if (cfg->tun_name) snprintf(sp.tun.name, sizeof(sp.tun.name), "%s", cfg->tun_name);
+    if (cfg->tun_name)
+        snprintf(sp.tun_name_cfg, sizeof(sp.tun_name_cfg), "%s", cfg->tun_name);
 
     /* Create libmqvpn config */
     mqvpn_config_t *lib_cfg = mqvpn_config_new();
@@ -1480,22 +1673,45 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         mqvpn_config_set_tls_cert(lib_cfg, cfg->cert_file, cfg->key_file);
     if (cfg->tls_ciphers && cfg->tls_ciphers[0])
         mqvpn_config_set_tls_ciphers(lib_cfg, cfg->tls_ciphers);
-    if (cfg->auth_key) mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key);
+    /* Credentials fail closed: a user the library refused (bad name, table
+     * full) used to be skipped silently, which could leave the server with
+     * fewer credentials than configured, or none at all. */
+    if (cfg->auth_key && mqvpn_config_set_auth_key(lib_cfg, cfg->auth_key) != MQVPN_OK) {
+        LOG_ERR("invalid auth key");
+        mqvpn_config_free(lib_cfg);
+        return 1;
+    }
     for (int i = 0; i < cfg->n_users; i++) {
-        if (cfg->user_names[i] && cfg->user_keys[i]) {
-            mqvpn_config_add_user(lib_cfg, cfg->user_names[i], cfg->user_keys[i]);
-            if (cfg->user_fixed_ips[i] && cfg->user_fixed_ips[i][0])
-                mqvpn_config_set_user_fixed_ip(lib_cfg, cfg->user_names[i],
-                                               cfg->user_fixed_ips[i]);
+        const char *name = cfg->user_names[i];
+        const char *key = cfg->user_keys[i];
+        if (!name && !key) continue;
+        if (!name || !key || mqvpn_config_add_user(lib_cfg, name, key) != MQVPN_OK) {
+            LOG_ERR("cannot add user '%s': a name and a key are required, the name "
+                    "must not contain quotes, backslashes or control characters, and "
+                    "the user table must not be full",
+                    name ? name : "(none)");
+            mqvpn_config_free(lib_cfg);
+            return 1;
+        }
+        if (cfg->user_fixed_ips[i] && cfg->user_fixed_ips[i][0] &&
+            mqvpn_config_set_user_fixed_ip(lib_cfg, name, cfg->user_fixed_ips[i]) !=
+                MQVPN_OK) {
+            LOG_ERR("cannot set fixed IP %s for user '%s'", cfg->user_fixed_ips[i], name);
+            mqvpn_config_free(lib_cfg);
+            return 1;
         }
     }
     for (int i = 0; i < cfg->n_path_policy; i++) {
-        mqvpn_config_add_path_policy(
-            lib_cfg, cfg->path_policy[i].user, cfg->path_policy[i].iface,
-            cfg->path_policy[i].has_weight, cfg->path_policy[i].weight,
-            cfg->path_policy[i].has_dscp_mask, cfg->path_policy[i].dscp_mask);
+        if (mqvpn_config_add_path_policy(
+                lib_cfg, cfg->path_policy[i].user, cfg->path_policy[i].iface,
+                cfg->path_policy[i].has_weight, cfg->path_policy[i].weight,
+                cfg->path_policy[i].has_dscp_mask,
+                cfg->path_policy[i].dscp_mask) != MQVPN_OK)
+            LOG_WRN("path policy for user '%s' on '%s' ignored (invalid or table full)",
+                    cfg->path_policy[i].user, cfg->path_policy[i].iface);
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
+    mqvpn_config_set_max_sessions_per_user(lib_cfg, cfg->max_sessions_per_user);
     mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
     switch (cfg->scheduler) {
     case MQVPN_SCHED_WLB: sched = MQVPN_SCHED_WLB; break;
@@ -1510,6 +1726,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     default: break;
     }
     mqvpn_config_set_scheduler(lib_cfg, sched);
+    mqvpn_config_set_allow_client_scheduler(lib_cfg, cfg->allow_client_scheduler);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
     mqvpn_config_set_reinjection_deadline_params(lib_cfg, cfg->reinj_srtt_factor_pct,
@@ -1519,6 +1736,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
     mqvpn_config_set_fec_scheme(lib_cfg, (mqvpn_fec_scheme_t)cfg->fec_scheme);
+    mqvpn_config_set_path_mtu(lib_cfg, cfg->path_mtu);
+    mqvpn_config_set_pmtud(lib_cfg, cfg->pmtud);
     mqvpn_config_apply_reorder(lib_cfg,
                                &cfg->reorder); /* INI [Reorder]/[ReorderRule] bridge */
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
@@ -1566,12 +1785,23 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.udp_fd = svr_create_udp_socket(cfg->listen_addr, cfg->listen_port, &local_addr,
                                       &local_addrlen);
     if (sp.udp_fd < 0) goto cleanup;
+    /* without DF a fragmented probe could be acknowledged and raise the size
+     * beyond what the path carries */
+    if (cfg->pmtud && mqvpn_socket_set_dontfrag(sp.udp_fd, local_addr.ss_family) < 0) {
+        LOG_ERR("cannot set DF on the UDP socket, which PMTUD needs: %s",
+                strerror(errno));
+        goto cleanup;
+    }
 
     mqvpn_bind_posix_opts_t bopts = {0};
     bopts.struct_size = sizeof(bopts);
     bopts.udp_gso = cfg->udp_gso;
     bopts.udp_gro = cfg->udp_gro;
-    bopts.socket_buf_bytes = -1; /* svr_create_udp_socket sized them (1 MiB) */
+    /* The bind's default (7 MiB, forced past rmem_max/wmem_max when
+     * privileged), as on every client path: this one socket takes every
+     * client's traffic, and each overflow of its receive queue drops a whole
+     * GRO batch of datagrams that nothing retransmits. */
+    bopts.socket_buf_bytes = 0;
     snprintf(bopts.tag, sizeof(bopts.tag), "server");
     if (mqvpn_bind_posix_server_new(sp.udp_fd, &bopts, &sp.bind_ctx) != MQVPN_OK) {
         LOG_ERR("server transport setup failed");
@@ -1606,6 +1836,12 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
         LOG_ERR("server start failed");
         goto cleanup;
     }
+    if (!sp.tun_up) {
+        /* A server without its TUN accepts clients it can never forward
+         * for: exit and let the supervisor (or the operator) see why. */
+        LOG_ERR("server start failed: TUN setup failed");
+        goto cleanup;
+    }
 
     /* Register socket read event */
     sp.ev_socket =
@@ -1617,6 +1853,10 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     sp.ev_sigterm = evsignal_new(sp.eb, SIGTERM, svr_on_signal, &sp);
     event_add(sp.ev_sigint, NULL);
     event_add(sp.ev_sigterm, NULL);
+    if (handle_sighup) {
+        sp.ev_sighup = evsignal_new(sp.eb, SIGHUP, svr_on_signal, &sp);
+        if (sp.ev_sighup) event_add(sp.ev_sighup, NULL);
+    }
 
     /* Tick timer */
     sp.ev_tick = event_new(sp.eb, -1, 0, svr_on_tick, &sp);
@@ -1640,7 +1880,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
             cfg->subnet);
 
     event_base_dispatch(sp.eb);
-    rc = 0;
+    rc = sp.fatal_error ? 1 : 0;
 
 cleanup:
     /* Teardown contract (same as the client): RX quiesced (dispatch returned),
@@ -1667,6 +1907,13 @@ cleanup:
     if (sp.server) mqvpn_server_destroy(sp.server);
     sp.server = NULL;
     sp.bind_ctx = NULL; /* finalised by destroy */
+    /* The read event goes before its fd: libevent must not hold a closed
+     * (and possibly reused) descriptor. */
+    if (sp.ev_socket) {
+        event_del(sp.ev_socket);
+        event_free(sp.ev_socket);
+        sp.ev_socket = NULL;
+    }
     if (sp.udp_fd >= 0) close(sp.udp_fd);
 
     /* Receive-side offload summary. Same harvest-before-destroy contract as
@@ -1675,17 +1922,7 @@ cleanup:
      * order can change them. */
     LOG_INF(UDP_RX_LINE_FMT, sp.gro_receives, sp.gro_datagrams, cfg->udp_gro);
 
-    if (sp.tun_up) {
-        if (sp.ev_tun) {
-            event_del(sp.ev_tun);
-            event_free(sp.ev_tun);
-        }
-        mqvpn_tun_destroy(&sp.tun);
-    }
-    if (sp.ev_socket) {
-        event_del(sp.ev_socket);
-        event_free(sp.ev_socket);
-    }
+    svr_tun_teardown(&sp);
     if (sp.ev_tick) {
         event_del(sp.ev_tick);
         event_free(sp.ev_tick);
@@ -1697,6 +1934,10 @@ cleanup:
     if (sp.ev_sigterm) {
         event_del(sp.ev_sigterm);
         event_free(sp.ev_sigterm);
+    }
+    if (sp.ev_sighup) {
+        event_del(sp.ev_sighup);
+        event_free(sp.ev_sighup);
     }
     /* After server destroy: teardown may call egress_fd_unregister for any
      * still-open egress fds, which scans this registry — free it only once

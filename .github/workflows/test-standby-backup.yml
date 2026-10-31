@@ -44,6 +44,10 @@ concurrency:
   group: test-standby-backup-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   # ── Unit tests ────────────────────────────────────────────────────────────
   unit-test:
@@ -63,19 +67,14 @@ jobs:
 
       - name: Build BoringSSL
         run: |
-          # xquic vendors its own boringssl submodule now, so the recursive
-          # checkout above already populated this path; wipe it first so we
-          # always get a full, unshallow clone pinned at the commit below.
-          rm -rf third_party/xquic/third_party/boringssl
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 \
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_C_FLAGS="-fPIC" \
                 -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Build xquic
         run: |
@@ -137,19 +136,14 @@ jobs:
 
       - name: Build BoringSSL
         run: |
-          # xquic vendors its own boringssl submodule now, so the recursive
-          # checkout above already populated this path; wipe it first so we
-          # always get a full, unshallow clone pinned at the commit below.
-          rm -rf third_party/xquic/third_party/boringssl
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
           cd third_party/xquic/third_party/boringssl
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
           mkdir -p build && cd build
-          cmake -DBUILD_SHARED_LIBS=0 \
+          cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_C_FLAGS="-fPIC" \
                 -DCMAKE_CXX_FLAGS="-fPIC" ..
           make -j$(nproc) ssl crypto
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/ci_check_bssl_optimized.sh third_party/xquic/third_party/boringssl/build
 
       - name: Build xquic
         run: |

@@ -58,9 +58,13 @@ sudo ./scripts/run_all_local_tests.sh --help
 
 ## Individual Test Execution
 
+The paths below use `./build-debug/`, the Debug tree produced by the dev
+CMake preset / `Makefile.tests`. `./build/` is the Release build from
+`build.sh`; do not claim test results from it.
+
 ### Unit Tests Only
 ```bash
-./build/tests/test_server
+./build-debug/tests/test_server
 ```
 
 Output should show:
@@ -70,7 +74,7 @@ Output should show:
 
 ### E2E Path API Tests Only
 ```bash
-sudo ./scripts/ci_e2e/run_path_api_test.sh ./build/mqvpn
+sudo ./scripts/ci_e2e/run_path_api_test.sh ./build-debug/mqvpn
 ```
 
 Output should show:

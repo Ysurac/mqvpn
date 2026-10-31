@@ -24,20 +24,20 @@ static int g_passed = 0;
     }                              \
     static void test_##name(void)
 
-#define ASSERT_TRUE(v)                                                                     \
-    do {                                                                                   \
-        if (!(v)) {                                                                        \
-            printf("FAIL\n    %s:%d  expected true: %s\n", __FILE__, __LINE__, #v);      \
-            exit(1);                                                                       \
-        }                                                                                  \
+#define ASSERT_TRUE(v)                                                              \
+    do {                                                                            \
+        if (!(v)) {                                                                 \
+            printf("FAIL\n    %s:%d  expected true: %s\n", __FILE__, __LINE__, #v); \
+            exit(1);                                                                \
+        }                                                                           \
     } while (0)
 
-#define ASSERT_FALSE(v)                                                                    \
-    do {                                                                                   \
-        if ((v)) {                                                                         \
-            printf("FAIL\n    %s:%d  expected false: %s\n", __FILE__, __LINE__, #v);     \
-            exit(1);                                                                       \
-        }                                                                                  \
+#define ASSERT_FALSE(v)                                                              \
+    do {                                                                             \
+        if ((v)) {                                                                   \
+            printf("FAIL\n    %s:%d  expected false: %s\n", __FILE__, __LINE__, #v); \
+            exit(1);                                                                 \
+        }                                                                            \
     } while (0)
 
 TEST(create_path_error_triggers_budget_exhausted_policy)

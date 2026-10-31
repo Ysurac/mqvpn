@@ -22,37 +22,42 @@
  * mqvpn_file_config_t.path_policy[] into this array. iface[16] mirrors
  * MQVPN_PATH_LABEL_IFACE_MAX(15)+1 from mqvpn_path_label.h. */
 typedef struct {
-    char     user[64];
-    char     iface[16];
-    int      has_weight;
+    char user[64];
+    char iface[16];
+    int has_weight;
     uint32_t weight;
-    int      has_dscp_mask;
+    int has_dscp_mask;
     uint64_t dscp_mask;
 } mqvpn_path_policy_entry_t;
 
 typedef struct mqvpn_server_cfg_s {
-    const char *listen_addr;        /* bind address (e.g. "0.0.0.0") */
-    int listen_port;                /* bind port (e.g. 443) */
-    const char *subnet;             /* client IP pool CIDR (e.g. "10.0.0.0/24") */
-    const char *subnet6;            /* IPv6 client pool CIDR (NULL = disabled) */
-    const char *tun_name;           /* TUN device name */
-    const char *cert_file;          /* TLS certificate path */
-    const char *key_file;           /* TLS private key path */
-    const char *tls_ciphers;        /* TLS cipher suites list */
-    int log_level;                  /* mqvpn_log_level_t */
-    int scheduler;                  /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin, 6=wrtt, 7=wrr, 8=redundant, 9=dscp */
-    int fec_enable;                 /* 1=enable FEC */
-    int fec_scheme;                 /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
-    const char *auth_key;           /* PSK for client authentication (NULL = no auth) */
+    const char *listen_addr;    /* bind address (e.g. "0.0.0.0") */
+    int listen_port;            /* bind port (e.g. 443) */
+    const char *subnet;         /* client IP pool CIDR (e.g. "10.0.0.0/24") */
+    const char *subnet6;        /* IPv6 client pool CIDR (NULL = disabled) */
+    const char *tun_name;       /* TUN device name */
+    const char *cert_file;      /* TLS certificate path */
+    const char *key_file;       /* TLS private key path */
+    const char *tls_ciphers;    /* TLS cipher suites list */
+    int log_level;              /* mqvpn_log_level_t */
+    int allow_client_scheduler; /* 1=honour a client scheduler request (default 0) */
+    int scheduler;  /* 0=minrtt, 1=wlb, 2=backup, 3=backup_fec, 4=rap, 5=wlb_udp_pin,
+                       6=wrtt, 7=wrr, 8=redundant, 9=dscp */
+    int fec_enable; /* 1=enable FEC */
+    int fec_scheme; /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
+    const char *auth_key; /* PSK for client authentication (NULL = no auth) */
     const char *user_names[64];
     const char *user_keys[64];
     const char *user_fixed_ips[64]; /* NULL or "" = dynamic, "x.x.x.x" = pinned */
     int n_users;
     int max_clients;           /* max concurrent clients (default 64) */
+    int max_sessions_per_user; /* per-credential session cap (0 = unlimited) */
     const char *control_addr;  /* bind address for JSON control API (default 127.0.0.1) */
     int control_port;          /* TCP port for JSON control API (0 = disabled) */
     uint64_t init_max_path_id; /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int tun_mtu;               /* 0=auto (1382 at startup), >0=override (floor 1280) */
+    int path_mtu;              /* 0=default packet size, >0=underlay MTU */
+    int pmtud;                 /* 1=discover the path MTU, path_mtu is the cap */
     int cc;                    /* mqvpn_cc_t: congestion control algorithm */
     int reinjection;           /* mqvpn_reinjection_t; 0=off (default) */
     int reinj_srtt_factor_pct; /* deadline mode; percent, e.g. 110 = 1.10x srtt */
@@ -64,13 +69,13 @@ typedef struct mqvpn_server_cfg_s {
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
     int sync_path_labels;         /* [Multipath] SyncPathLabels; default 1 — auto-adopt
-                                    * client-announced weight/dscp_mask (mqvpn_path_label.h);
-                                    * 0 = client/server weight/dscp_mask configured
-                                    * independently */
+                                   * client-announced weight/dscp_mask (mqvpn_path_label.h);
+                                   * 0 = client/server weight/dscp_mask configured
+                                   * independently */
     int push_path_labels;         /* [Multipath] PushPathLabels; default 0 — push an
-                                    * operator-pinned per-(user,iface) weight/dscp_mask down
-                                    * to that user's client (MQVPN_CAPSULE_PATH_LABEL_PUSH);
-                                    * 0 = never push (pre-existing behavior) */
+                                   * operator-pinned per-(user,iface) weight/dscp_mask down
+                                   * to that user's client (MQVPN_CAPSULE_PATH_LABEL_PUSH);
+                                   * 0 = never push (pre-existing behavior) */
     /* [Multipath] persisted per-(user,iface) weight/dscp_mask overrides;
      * JSON "path_policy" array only (config.h), no CLI/INI equivalent.
      * Matches MQVPN_CONFIG_MAX_PATH_POLICY (config.h), hardcoded here the
@@ -78,6 +83,8 @@ typedef struct mqvpn_server_cfg_s {
      * without including that header. */
     mqvpn_path_policy_entry_t path_policy[128];
     int n_path_policy;
+    int tun_offload; /* [Advanced] TunOffload; default 1 */
+    int tun_gro;     /* [Advanced] TunGro; default 1 */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

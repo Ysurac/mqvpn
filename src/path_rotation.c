@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 /*
  * path_rotation.c — Primary path rotation logic (no xquic dependency)
  */

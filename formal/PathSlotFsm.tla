@@ -86,11 +86,10 @@ Legal(s) ==
          ~s.attached /\ s.released /\ ~s.live /\ s.xqcId = NULL
          /\ ~s.retryArmed /\ ~s.stableArmed
 
-\* g_p15_xqc_app_status_for: 1 = STANDBY, 2 = AVAILABLE, 3 = FROZEN
+\* g_p15_xqc_app_status_for: 1 = STANDBY, 2 = AVAILABLE
 G15(from, to) ==
   CASE from = "Active" /\ to = "Standby" -> 1
     [] from = "Standby" /\ to = "Active" -> 2
-    [] from \in {"Active", "Standby"} /\ to = "Degraded" -> 3
     [] OTHER -> 0
 
 --------------------------------------------------------------------------------

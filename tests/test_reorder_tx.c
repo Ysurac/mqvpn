@@ -409,6 +409,82 @@ test_tx_no_rules_disabled_raw(void)
     mqvpn_reorder_tx_free(tx);
 }
 
+/* Ineligible flows go RAW without taking a table slot, so they can neither
+ * fill the table nor push eligible flows to RAW. */
+static void
+test_tx_ineligible_not_stored(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    c.max_flows = 2;
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    mqvpn_reorder_tx_peek_t p;
+    for (uint16_t i = 0; i < 100; i++) { /* udp/53: no matching rule → RAW */
+        size_t n = build_v4_udp(pkt, (uint16_t)(20000 + i), 53, 50);
+        ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 1, 1400, &p),
+                      MQVPN_REORDER_TX_RAW, "ineligible -> RAW");
+    }
+    ASSERT_EQ_INT(mqvpn_reorder_tx_stats(tx)->flows_created, 0,
+                  "no ineligible flow stored");
+    ASSERT_EQ_INT(mqvpn_reorder_tx_stats(tx)->table_full_raw, 0, "table never full");
+    size_t n = build_v4_udp(pkt, 1001, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 2, 1400, &p), MQVPN_REORDER_TX_STAMP,
+                  "eligible flow still gets a slot");
+    mqvpn_reorder_tx_free(tx);
+}
+
+/* Table full: the victim is the least recently committed flow, and a flow
+ * refreshed by a commit is not evicted while another is idle. */
+static void
+test_tx_evict_least_recent_idle(void)
+{
+    mqvpn_reorder_config_t c = base_cfg();
+    c.max_flows = 3;
+    c.egress_idle_timeout_sec = 10;
+    mqvpn_reorder_tx_t *tx = mqvpn_reorder_tx_new(&c, 0x1);
+    uint8_t pkt[256];
+    mqvpn_reorder_tx_peek_t p;
+    const uint64_t s = 1000000ULL;
+    size_t n;
+
+    /* A @1s, B @2s, C @3s; A committed again @4s → order B, C, A. */
+    for (uint16_t i = 0; i < 3; i++) {
+        n = build_v4_udp(pkt, (uint16_t)(1001 + i), 443, 100);
+        mqvpn_reorder_tx_peek(tx, pkt, n, (i + 1) * s, 1400, &p);
+        mqvpn_reorder_tx_commit(tx, &p, (i + 1) * s);
+    }
+    n = build_v4_udp(pkt, 1001, 443, 100);
+    mqvpn_reorder_tx_peek(tx, pkt, n, 4 * s, 1400, &p);
+    mqvpn_reorder_tx_commit(tx, &p, 4 * s);
+
+    /* @13s only B (idle 11s) is past the 10s threshold: D evicts B. */
+    n = build_v4_udp(pkt, 1004, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 13 * s, 1400, &p),
+                  MQVPN_REORDER_TX_STAMP, "D created by evicting the idle flow");
+    mqvpn_reorder_tx_commit(tx, &p, 13 * s);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_stats(tx)->idle_evict_count, 1, "one idle eviction");
+
+    /* A keeps its sequence (not evicted): its next peek stamps seq 2. */
+    n = build_v4_udp(pkt, 1001, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 13 * s, 1400, &p),
+                  MQVPN_REORDER_TX_STAMP, "A still stamped");
+    ASSERT_EQ_INT(p.hdr[7], 2, "A kept its state");
+    /* B was evicted: it comes back as a new flow (seq 0) once C is idle. */
+    n = build_v4_udp(pkt, 1002, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 13 * s + 1, 1400, &p),
+                  MQVPN_REORDER_TX_STAMP, "B recreated by evicting C");
+    ASSERT_EQ_INT(p.hdr[7], 0, "B restarts at seq 0");
+    ASSERT_EQ_INT(mqvpn_reorder_tx_stats(tx)->idle_evict_count, 2, "C evicted");
+
+    /* The least recent flow is now A (last commit @4s, idle 9s): still live,
+     * so a new flow goes RAW. */
+    n = build_v4_udp(pkt, 1005, 443, 100);
+    ASSERT_EQ_INT(mqvpn_reorder_tx_peek(tx, pkt, n, 13 * s + 2, 1400, &p),
+                  MQVPN_REORDER_TX_RAW, "no idle victim -> RAW");
+    ASSERT_EQ_INT(mqvpn_reorder_tx_stats(tx)->table_full_raw, 1, "counted as table full");
+    mqvpn_reorder_tx_free(tx);
+}
+
 int
 main(void)
 {
@@ -427,6 +503,8 @@ main(void)
     test_tx_mtu_guard_boundary();
     test_tx_no_rules_enabled_eligible();
     test_tx_no_rules_disabled_raw();
+    test_tx_ineligible_not_stored();
+    test_tx_evict_least_recent_idle();
 
     fprintf(stderr, "test_reorder_tx: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

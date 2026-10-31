@@ -22,6 +22,15 @@
 #include <signal.h>
 #include <sys/wait.h>
 
+/* This runs as root: exec route(8) by absolute path, never through the
+ * caller's PATH. The PATH-stub unit tests (tests/fake_cmd.h) build with
+ * MQVPN_DARWIN_EXEC_VIA_PATH so their fakes are found through PATH. */
+#ifdef MQVPN_DARWIN_EXEC_VIA_PATH
+#  define MQVPN_ROUTE_BIN "route"
+#else
+#  define MQVPN_ROUTE_BIN "/sbin/route"
+#endif
+
 static int
 run_route_cmd(const char *const argv[])
 {
@@ -35,7 +44,7 @@ run_route_cmd(const char *const argv[])
          * die mid-cleanup — hardware-reproduced: a SIG_DFL reset here made
          * cleanup's pfctl die on its ALTQ banner, leaving the kill switch
          * loaded after exit. */
-        execvp("route", (char *const *)argv);
+        execvp(MQVPN_ROUTE_BIN, (char *const *)argv);
         _exit(127);
     }
     int status = 0;
@@ -159,7 +168,7 @@ route_get_and_parse(const char *const argv[], char *gateway, size_t gw_len, char
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
         /* SIGPIPE stays SIG_IGN (inherited) — see run_route_cmd. */
-        execvp("route", (char *const *)argv);
+        execvp(MQVPN_ROUTE_BIN, (char *const *)argv);
         _exit(127);
     }
 
@@ -348,6 +357,7 @@ setup_routes(platform_ctx_t *p)
     sa_family_t af = p->server_addr.ss_family;
     int prefix = mqvpn_sa_host_prefix(&p->server_addr);
     mqvpn_sa_ntop(&p->server_addr, p->server_ip_str, sizeof(p->server_ip_str));
+    p->server_pin_owned = 0;
 
     if (discover_route(p->server_ip_str, af, p->orig_gateway, sizeof(p->orig_gateway),
                        p->orig_iface, sizeof(p->orig_iface)) < 0) {
@@ -363,31 +373,37 @@ setup_routes(platform_ctx_t *p)
                 p->orig_gateway, p->orig_iface);
 
         /* macOS route(8) has no `replace` verb (unlike Linux `ip route
-         * replace`); the twin behavior is add, and on failure retry with
-         * `change`. UNVERIFIED on real macOS. run_route_cmd only observes
-         * the child's exit status, so this fallback fires on ANY add
-         * failure (route already exists, bad gateway, permission, ...),
-         * not only the "route already exists" case — a genuinely bad
-         * gateway/iface fails both add and change and falls through to
-         * the LOG_WRN below, same as canon. */
-        int pin_ok;
+         * replace`): add, and on failure try `change`. UNVERIFIED on real
+         * macOS. run_route_cmd only observes the child's exit status, so
+         * the `change` serves as the existence probe: it succeeds only if a
+         * host route to the server is already there — and then it is a
+         * no-op, because `route get` above resolved through that very
+         * route, so orig_gateway is its own gateway. Such a route is not
+         * ours: it is used as is and never deleted (server_pin_owned = 0).
+         * A genuinely bad gateway/iface fails both and falls through to the
+         * LOG_WRN below. */
+        int added, pin_ok;
         if (af == AF_INET6) {
             const char *const add6[] = {"route",         "-n", "add", "-inet6", host_cidr,
                                         p->orig_gateway, NULL};
             const char *const chg6[] = {
                 "route", "-n", "change", "-inet6", host_cidr, p->orig_gateway, NULL};
-            pin_ok = (run_route_cmd(add6) == 0) || (run_route_cmd(chg6) == 0);
+            added = (run_route_cmd(add6) == 0);
+            pin_ok = added || (run_route_cmd(chg6) == 0);
         } else {
             const char *const add4[] = {"route",         "-n", "add", host_cidr,
                                         p->orig_gateway, NULL};
             const char *const chg4[] = {"route",         "-n", "change", host_cidr,
                                         p->orig_gateway, NULL};
-            pin_ok = (run_route_cmd(add4) == 0) || (run_route_cmd(chg4) == 0);
+            added = (run_route_cmd(add4) == 0);
+            pin_ok = added || (run_route_cmd(chg4) == 0);
         }
         if (!pin_ok) {
             LOG_WRN("failed to pin server route");
             return -1;
         }
+        p->server_pin_owned = added;
+        if (!added) LOG_INF("server route %s already exists, left unmanaged", host_cidr);
     } else {
         LOG_INF("split tunnel: server %s on-link dev %s", p->server_ip_str,
                 p->orig_iface);
@@ -407,7 +423,7 @@ setup_routes(platform_ctx_t *p)
                             "128.0.0.0/1", "-interface", p->tun.name, NULL};
         (void)run_route_cmd(u1);
         (void)run_route_cmd(u2);
-        if (p->orig_gateway[0]) {
+        if (p->orig_gateway[0] && p->server_pin_owned) {
             if (af == AF_INET6) {
                 const char *u3[] = {"route",         "-n", "delete", "-inet6", host_cidr,
                                     p->orig_gateway, NULL};
@@ -486,7 +502,7 @@ cleanup_routes(platform_ctx_t *p)
     (void)run_route_cmd(d3);
     (void)run_route_cmd(d4);
 
-    if (p->orig_gateway[0]) {
+    if (p->orig_gateway[0] && p->server_pin_owned) {
         int pfx = mqvpn_sa_host_prefix(&p->server_addr);
         char hc[INET6_ADDRSTRLEN + 5];
         snprintf(hc, sizeof(hc), "%s/%d", p->server_ip_str, pfx);
@@ -499,6 +515,7 @@ cleanup_routes(platform_ctx_t *p)
             (void)run_route_cmd(d5);
         }
     }
+    p->server_pin_owned = 0;
     p->routing_configured = 0;
     LOG_INF("split tunnel routes cleaned up");
 }

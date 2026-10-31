@@ -17,34 +17,34 @@
 
 static int g_pass = 0, g_fail = 0;
 
-#define ASSERT_EQ_INT(a, b, msg)                                                \
-    do {                                                                        \
-        if ((a) == (b)) {                                                       \
-            g_pass++;                                                           \
-        } else {                                                                \
-            g_fail++;                                                           \
+#define ASSERT_EQ_INT(a, b, msg)                                               \
+    do {                                                                       \
+        if ((a) == (b)) {                                                      \
+            g_pass++;                                                          \
+        } else {                                                               \
+            g_fail++;                                                          \
             fprintf(stderr, "FAIL [%s]: %d != %d\n", msg, (int)(a), (int)(b)); \
-        }                                                                       \
+        }                                                                      \
     } while (0)
 
-#define ASSERT_EQ_STR(a, b, msg)                                           \
-    do {                                                                    \
-        if (strcmp((a), (b)) == 0) {                                        \
-            g_pass++;                                                       \
-        } else {                                                            \
-            g_fail++;                                                       \
-            fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b));  \
-        }                                                                   \
+#define ASSERT_EQ_STR(a, b, msg)                                         \
+    do {                                                                 \
+        if (strcmp((a), (b)) == 0) {                                     \
+            g_pass++;                                                    \
+        } else {                                                         \
+            g_fail++;                                                    \
+            fprintf(stderr, "FAIL [%s]: '%s' != '%s'\n", msg, (a), (b)); \
+        }                                                                \
     } while (0)
 
-#define ASSERT_TRUE(cond, msg)                    \
-    do {                                          \
-        if (cond) {                               \
-            g_pass++;                             \
-        } else {                                  \
-            g_fail++;                             \
-            fprintf(stderr, "FAIL [%s]\n", msg);  \
-        }                                         \
+#define ASSERT_TRUE(cond, msg)                   \
+    do {                                         \
+        if (cond) {                              \
+            g_pass++;                            \
+        } else {                                 \
+            g_fail++;                            \
+            fprintf(stderr, "FAIL [%s]\n", msg); \
+        }                                        \
     } while (0)
 
 /* Write a string to a temp file and return the path. */
@@ -140,8 +140,7 @@ test_cipher_ini_two_ciphers(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_STR(cfg.tls_ciphers,
-                  "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
+    ASSERT_EQ_STR(cfg.tls_ciphers, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
                   "ini Ciphers: two ciphers colon-separated");
 }
 
@@ -227,8 +226,7 @@ test_cipher_ini_last_value_wins(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_STR(cfg.tls_ciphers, "TLS_AES_256_GCM_SHA384",
-                  "ini: last cipher key wins");
+    ASSERT_EQ_STR(cfg.tls_ciphers, "TLS_AES_256_GCM_SHA384", "ini: last cipher key wins");
 }
 
 static void
@@ -246,8 +244,7 @@ test_cipher_not_affected_by_other_ini_sections(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_STR(cfg.tls_ciphers, "",
-                  "no [TLS] section: tls_ciphers stays empty");
+    ASSERT_EQ_STR(cfg.tls_ciphers, "", "no [TLS] section: tls_ciphers stays empty");
 }
 
 static void
@@ -263,8 +260,7 @@ test_cipher_ini_does_not_affect_fec(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_INT(cfg.fec_enable, 0,
-                  "cipher ini: fec_enable stays 0");
+    ASSERT_EQ_INT(cfg.fec_enable, 0, "cipher ini: fec_enable stays 0");
     ASSERT_EQ_STR(cfg.fec_scheme, "reed_solomon",
                   "cipher ini: fec_scheme stays reed_solomon");
 }
@@ -330,8 +326,7 @@ test_cipher_json_two_ciphers(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_STR(cfg.tls_ciphers,
-                  "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
+    ASSERT_EQ_STR(cfg.tls_ciphers, "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256",
                   "json tls_ciphers: two ciphers colon-separated");
 }
 
@@ -401,8 +396,7 @@ test_cipher_json_not_set_stays_empty(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_STR(cfg.tls_ciphers, "",
-                  "json: no cipher key — tls_ciphers stays empty");
+    ASSERT_EQ_STR(cfg.tls_ciphers, "", "json: no cipher key — tls_ciphers stays empty");
 }
 
 static void
@@ -432,8 +426,7 @@ test_cipher_json_does_not_affect_fec(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_INT(cfg.fec_enable, 0,
-                  "json cipher: fec_enable stays 0");
+    ASSERT_EQ_INT(cfg.fec_enable, 0, "json cipher: fec_enable stays 0");
     ASSERT_EQ_STR(cfg.fec_scheme, "reed_solomon",
                   "json cipher: fec_scheme stays reed_solomon");
 }

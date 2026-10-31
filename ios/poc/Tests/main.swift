@@ -95,6 +95,13 @@ runAsync {
     check(threw && boolOf(store, "reorderEnabled") == false, "commit fail -> rethrow + rollback")
 }
 runAsync {
+    // remove drops keys from the committed config (auth key migration)
+    let store = FakeStore(); store.providerConfiguration = ["authKey": "k", "serverHost": "h"]
+    try? await performAtomicSave(store, merge: [:], remove: ["authKey"])
+    check(store.providerConfiguration?["authKey"] == nil &&
+          store.providerConfiguration?["serverHost"] as? String == "h", "remove drops only the named key")
+}
+runAsync {
     // commit ok but refresh fails -> committed value stays (refresh non-fatal)
     let store = FakeStore(); store.providerConfiguration = [:]
     store.refreshThrows = true
@@ -123,7 +130,16 @@ check(!IngestGate.accept(capturedEpoch: 1, currentEpoch: 1, isUp: true, snapSeq:
 
 // ── ServerSettings ──
 let ss = ServerSettings(host: "1.2.3.4", port: 443, serverName: "vpn.example.com", authKey: "k", insecure: true)
-check(ServerSettings(providerConfiguration: ss.toProviderConfiguration()) == ss, "server round-trip")
+check(ServerSettings(providerConfiguration: ss.toProviderConfiguration(), keychainAuthKey: "k") == ss, "server round-trip (key from keychain)")
+check(ss.toProviderConfiguration()["authKey"] == nil, "auth key never written to providerConfiguration")
+check(ServerSettings(providerConfiguration: ss.toProviderConfiguration())?.authKey == "", "no keychain key, no legacy key → \"\"")
+// legacy providerConfiguration auth key (pre-keychain builds): read for migration, keychain wins
+let legacyDict: [String: Any] = ["serverHost": "h", "serverPort": NSNumber(value: 443), "authKey": "old", "tlsInsecure": NSNumber(value: false)]
+check(ServerSettings.hasLegacyAuthKey(in: legacyDict), "legacy auth key detected")
+check(!ServerSettings.hasLegacyAuthKey(in: ss.toProviderConfiguration()), "no legacy auth key after save")
+check(ServerSettings(providerConfiguration: legacyDict)?.authKey == "old", "legacy auth key read")
+check(ServerSettings(providerConfiguration: legacyDict, keychainAuthKey: "new")?.authKey == "new", "keychain key wins over legacy")
+check(ServerSettings(providerConfiguration: ["serverHost": "h", "serverPort": NSNumber(value: 443), "authKey": NSNumber(value: 1), "tlsInsecure": NSNumber(value: false)]) == nil, "non-string legacy authKey → nil")
 check(ServerSettings(host: " 1.2.3.4 ", port: 443, serverName: "", authKey: " k ", insecure: false).host == "1.2.3.4", "host trimmed")
 check(ServerSettings(host: " 1.2.3.4 ", port: 443, serverName: "", authKey: " k ", insecure: false).authKey == "k", "authKey trimmed")
 check(ServerSettings(host: "h", port: 443, serverName: " vpn.example.com ", authKey: "", insecure: false).serverName == "vpn.example.com", "serverName trimmed")

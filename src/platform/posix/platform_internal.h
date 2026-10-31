@@ -75,12 +75,14 @@ struct platform_ctx {
     struct event *ev_tun;
     struct event *ev_sigint;
     struct event *ev_sigterm;
+    struct event *ev_sighup;  /* Linux: SIGHUP stops like SIGTERM */
     struct event *ev_status;  /* periodic status log timer */
     struct event *ev_recover; /* periodic dropped-path re-add timer (3s) */
 
     /* Path slots (UDP sockets + their transports), append-only */
     platform_path_t paths[MQVPN_MAX_PATHS];
     int n_paths;
+    const char *adding_iface; /* iface of the add_path in flight, else NULL */
 
     /* TUN device */
     mqvpn_tun_t tun;
@@ -91,8 +93,8 @@ struct platform_ctx {
      * connection (see tun_fatal_error). Plain data, safe to copy. */
     mqvpn_tunnel_info_t last_tunnel_info;
     int have_tunnel_info;
-    int tun_rebuilds;              /* in-place rebuilds inside the current window */
-    time_t tun_rebuild_window;     /* start of that window (seconds) */
+    int tun_rebuilds;          /* in-place rebuilds inside the current window */
+    time_t tun_rebuild_window; /* start of that window (seconds) */
     /* External MTU change guard (netlink_mon.c handle_tun_newlink): counts
      * restores inside the current window so a fight with another MTU
      * manager cannot turn into a busy loop. */
@@ -105,16 +107,21 @@ struct platform_ctx {
     char server_host[256]; /* original hostname/IP string, re-resolved on reconnect */
 
     /* Split tunneling state */
-    int routing_configured;
+    int routing_configured; /* setup_routes() installed routes; cleanup_routes()
+                             * removes them (the only gate it needs) */
     int routing6_configured;
-    int manage_routes; /* 1=run setup_routes/cleanup_routes (default 1) */
+    int routing_set_up_once; /* Linux: setup_routes() succeeded at least once */
+    int manage_routes;       /* 1=run setup_routes/cleanup_routes (default 1) */
+    int pmtud;               /* 1=PMTUD: path sockets send with DF set */
 #if defined(__linux__)
     /* [Advanced] UdpGro — effective RX GRO mode. Config-derived state kept
      * here (pattern: manage_routes above) so the netlink re-add path can
      * reproduce startup behavior on the fresh fd it creates. Linux-only:
      * GRO is a Linux sockopt and Darwin would carry a dead field. */
     int udp_gro;
-    int udp_gso; /* [Advanced] UdpGso policy, reproduced on re-add */
+    int udp_gso;     /* [Advanced] UdpGso policy, reproduced on re-add */
+    int tun_offload; /* [Advanced] TunOffload, applied on every TUN create */
+    int tun_gro;     /* [Advanced] TunGro, likewise */
 #endif
     /* Receive-side telemetry: cumulative PLATFORM totals. The bind counts per
      * transport ctx on every POSIX platform and those counters die with the
@@ -131,10 +138,13 @@ struct platform_ctx {
     uint64_t gro_datagrams; /* datagrams delivered to the library */
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
+    int server_pin_owned; /* Darwin: setup_routes created the unscoped server
+                           * pin (vs. found one already there); only an owned
+                           * pin is deleted. Unused on Linux. */
     char server_ip_str[INET6_ADDRSTRLEN];
     char server_tunnel_ip[INET_ADDRSTRLEN]; /* server-side tunnel IP (peer on TUN) */
-    int route_via_server;   /* 1=use default via server_tunnel_ip instead of /1 trick */
-    int no_routes;          /* 1=skip automatic route setup entirely */
+    int route_via_server; /* 1=use default via server_tunnel_ip instead of /1 trick */
+    int no_routes;        /* 1=skip automatic route setup entirely */
     int server_port;
     int has_v6;
 
@@ -145,6 +155,15 @@ struct platform_ctx {
     int killswitch_active;
     int killswitch_enabled;
     char ks_comment[64];
+    /* Linux (killswitch.c): the per-process chain, the server rule and TUN
+     * the installed ACCEPTs name ("" = none), and which ip6tables parts are
+     * installed. Unused on Darwin. */
+    char ks_chain[32];
+    char ks_server_rule[INET6_ADDRSTRLEN + 5];
+    int ks_server_v6;
+    int ks_v6_active;
+    char ks_tun_name[IFNAMSIZ];
+    int ks_tun_v6;
     char ks_pf_token[24]; /* Darwin pf enable token (pfctl -E); unused on Linux.
                            * Length vs. real token format: verify on macOS. */
 
@@ -174,9 +193,11 @@ struct platform_ctx {
  * the tunnel the server handed over (TUN, addressing, MTU, routes, kill
  * switch). PATH_RELEASE: the library refused a transport release the
  * platform reported right after its own drop/remove of that path — an
- * invariant violation (netmon_common.c). */
+ * invariant violation (netmon_common.c). CLOSED: the client reached CLOSED
+ * without a shutdown of ours — the connection ended and will not be retried. */
 #define PLATFORM_FATAL_TUNNEL_SETUP 1
 #define PLATFORM_FATAL_PATH_RELEASE 2
+#define PLATFORM_FATAL_CLOSED       3
 
 /* platform_{linux,darwin}.c (netmon_common.c, and netlink_mon.c on Linux or
  * route_mon.c on Darwin, call schedule_next_tick; on_socket_read is the read
@@ -213,6 +234,7 @@ enum {
     PLATFORM_PATH_STEP_SOCKET = 1,
     PLATFORM_PATH_STEP_NONBLOCK,
     PLATFORM_PATH_STEP_BIND,
+    PLATFORM_PATH_STEP_DONTFRAG, /* PMTUD on, and DF could not be set */
 };
 
 /* A non-blocking UDP socket bound to the af wildcard (ephemeral port), or -1
@@ -279,6 +301,22 @@ int darwin_pin_socket_to_iface(int fd, const char *ifname, sa_family_t af);
 /* killswitch.c */
 int setup_killswitch(platform_ctx_t *p);
 void cleanup_killswitch(platform_ctx_t *p);
+
+/* linux/killswitch.c — the Linux kill switch is installed once by
+ * setup_killswitch() before the first connect and stays up across
+ * reconnects; these follow the parts that change underneath it. All are
+ * no-ops while the kill switch is not active. Declarations are inert on
+ * Darwin (darwin/killswitch.c does not define them).
+ *   killswitch_tun_up / _tun_down: the ACCEPT for the current TUN.
+ *   killswitch_update_server: move the server ACCEPT to p->server_addr
+ *     (re-resolution). 0, or -1 with the previous rule kept.
+ *   killswitch_flush_stale: remove the rules and chains of mqvpn processes
+ *     that are no longer running (crash leftovers); call only while this
+ *     process has none installed. */
+int killswitch_tun_up(platform_ctx_t *p);
+void killswitch_tun_down(platform_ctx_t *p);
+int killswitch_update_server(platform_ctx_t *p);
+void killswitch_flush_stale(void);
 
 /* linux/platform_linux.c — runtime path management (called from the control
  * API). Declarations are inert on Darwin (control_socket.c is Linux-only). */

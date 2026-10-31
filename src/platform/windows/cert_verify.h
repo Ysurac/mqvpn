@@ -17,7 +17,9 @@
 #include "cert_identity.h"
 
 /* mqvpn_cert_verify_fn-compatible. ctx: an HCERTCHAINENGINE, or NULL for the
- * default engine (the user's and machine's Root/CA stores). Tests pass an
+ * machine engine (HCCE_LOCAL_MACHINE: the local machine's Root/CA stores,
+ * not the user's). Revocation is checked from the local cache only: revoked
+ * rejects, unknown/offline does not. Tests pass an
  * engine whose hExclusiveRoot holds only a test root. Returns 0 only when
  * every step succeeded; every other outcome is -1. */
 int mqvpn_win_cert_verify(const uint8_t *const certs[], const size_t cert_len[],

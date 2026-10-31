@@ -7,6 +7,7 @@ import android.util.Log
 import com.mqvpn.sdk.core.internal.ReorderPlan
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
 import com.mqvpn.sdk.core.internal.planReorder
+import com.mqvpn.sdk.core.internal.planRedundant
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
@@ -74,8 +75,11 @@ class MqvpnTunnel internal constructor(
 
     // --- I/O feed (TUN; path receive happens inside the reactor's wait) ---
 
-    fun onTunPacket(data: ByteArray, offset: Int, length: Int): Int =
-        live(ERR_INVALID_STATE) { NativeBridge.onTunPacket(it, data, offset, length) }
+    /** [offset, offset + length) must lie inside [data]; otherwise [ERR_INVALID_ARG]. */
+    fun onTunPacket(data: ByteArray, offset: Int, length: Int): Int {
+        if (offset < 0 || length <= 0 || offset > data.size - length) return ERR_INVALID_ARG
+        return live(ERR_INVALID_STATE) { NativeBridge.onTunPacket(it, data, offset, length) }
+    }
 
     // --- Engine tick ---
 
@@ -156,6 +160,8 @@ class MqvpnTunnel internal constructor(
     companion object {
         private const val TAG = "MqvpnTunnel"
         private const val REORDER_STATS_FIELDS = 7
+        /** MQVPN_ERR_INVALID_ARG */
+        const val ERR_INVALID_ARG = -1
         const val ERR_AGAIN = -9
         /** MQVPN_ERR_INVALID_STATE: also what every call returns after [destroy]. */
         const val ERR_INVALID_STATE = -13
@@ -171,27 +177,49 @@ class MqvpnTunnel internal constructor(
             }
         }
 
+        /** Null when disabled. A failure is logged and the tunnel continues with redundant off. */
+        internal fun applyRedundant(
+            cfg: Long,
+            config: MqvpnConfig,
+            set: (Long, Boolean, IntArray) -> Int = NativeBridge::configSetRedundant,
+        ): Int? {
+            val plan = planRedundant(config) ?: return null
+            val rc = set(cfg, true, plan.ports)
+            if (rc != 0) Log.w(TAG, "configSetRedundant failed (rc=$rc)")
+            return rc
+        }
+
         /** [reactorHandle]: the executor's NativeReactorWaiter.reactorHandle. */
         internal fun create(config: MqvpnConfig, callbacks: TunnelCallbacks, reactorHandle: Long): MqvpnTunnel {
             // Also guards startTunnel callers that bypass MqvpnManager.connect() (restored-config
             // path); note the service executor only logs a throw here.
             config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
             require(reactorHandle != 0L) { "reactor handle required" }
+            // the native setter refuses anything else, and a tunnel with the
+            // default size instead would not be what was asked for
+            require(config.pathMtu == 0 || config.pathMtu in 1280..9000) {
+                "pathMtu must be 0 or 1280-9000, not ${config.pathMtu}"
+            }
             val cfg = NativeBridge.configNew()
             NativeBridge.configSetServer(cfg, config.serverAddress, config.serverPort)
             config.tlsServerName?.let { NativeBridge.configSetTlsServerName(cfg, it) }
             NativeBridge.configSetAuthKey(cfg, config.authKey)
             NativeBridge.configSetInsecure(cfg, config.insecure)
             NativeBridge.configSetScheduler(cfg, config.scheduler.native)
+            NativeBridge.configSetRequestServerScheduler(cfg, config.requestServerScheduler)
+            NativeBridge.configSetCc(cfg, config.cc.native)
             NativeBridge.configSetLogLevel(cfg, config.logLevel.native)
             NativeBridge.configSetMultipath(cfg, config.multipathEnabled)
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
             NativeBridge.configSetKillswitchHint(cfg, config.killSwitch)
+            NativeBridge.configSetPathMtu(cfg, config.pathMtu)
+            NativeBridge.configSetPmtud(cfg, config.pmtud)
             NativeBridge.configSetHybridEnabled(cfg, config.hybridEnabled)
             NativeBridge.configSetHybridTcpMode(cfg, config.hybridTcpMode.native)
             NativeBridge.configSetAndroidClock(cfg)
             val plan = planReorder(config)
             applyReorder(cfg, plan)
+            applyRedundant(cfg, config)
             val handle = NativeBridge.clientNew(cfg, callbacks)
             if (handle == 0L) {
                 NativeBridge.configFree(cfg) // the config is ours until a client owns a copy

@@ -120,7 +120,7 @@ Last verified (TLC 2.19, CBMC 5.95.1):
   illegal and rejected by `path_invariant_check()`; canary OK (the
   policy-constant check passes silently)
 - CBMC `harness` and `harness_null_ctx`: `VERIFICATION SUCCESSFUL`,
-  0 of 1989 properties failed in each, 42 of them `path_invariant_check()`
+  0 of 2031 properties failed in each, 42 of them `path_invariant_check()`
   assertions (about one minute, nearly all of it `harness`;
   `harness_null_ctx` takes about a second)
 
@@ -287,10 +287,11 @@ checks:
 - the state-entry stamp and the residence-warn debounce;
 - the transport ops and ctx;
 - the frame: every field the FSM must not write is unchanged. A size pin on
-  `path_entry_t` catches a new field that grows the struct. On LP64,
-  though, the struct has three 4-byte padding holes, after
-  `local_addr_len`, `flags` and `recreate_retries`, and a field placed in
-  one of them must be classified by hand in `oracle_abs.h`;
+  `path_entry_t` catches a new field that grows the struct (64-bit builds
+  only; 32-bit targets lay the struct out differently). On LP64, though,
+  the struct has three 4-byte padding holes, after `local_addr_len`,
+  `flags` and `recreate_retries`, and a field placed in one of them must
+  be classified by hand in `oracle_abs.h`;
 - `path_invariant_check()`, which pins the status to the C projection, on
   every post-state, the stable tick's too (that entry point does not check
   the invariant itself).
@@ -685,17 +686,16 @@ connection in one step (`EnvConnClose`); no checked property is affected
    This is the model's only route to DEGRADED (see
    [Abstractions](#abstractions)). Not fixed here: a check of
    `xqc_path_id == 0` in that condition would close it.
-7. **The FSM's FROZEN mark never reaches xquic.** The FSM notifies xquic
-   from one place, `set_path_state_with_log` (`path_state_machine.c:347`).
-   In the table, only 40 rows notify, all with app_status 3 (FROZEN): an
-   ACTIVE or STANDBY slot moved to DEGRADED by XQUIC_REMOVED, and all with
-   `live = 0` in the post-state. That move happens inside
-   `apply_failure_with_retry_check`, after it clears `xquic_path_live`
-   (`path_state_machine.c:391`), and `client_notify_xqc_path_state` returns
-   early on a slot that is not live (`:460`). So the FROZEN mark is dead in
-   practice. No FSM transition produces app_status 1 or 2; the model's
-   `G15` keeps them only as the structure of `g_p15_xqc_app_status_for`.
-   Not fixed here.
+7. **The FSM no longer notifies xquic at all.** The FSM notifies xquic
+   from one place, `set_path_state_with_log`. It used to hand app_status 3
+   (FROZEN) for an ACTIVE or STANDBY slot moved to DEGRADED by
+   XQUIC_REMOVED, always on a slot `apply_failure_with_retry_check` had
+   already cleared (`live = 0`), which `client_notify_xqc_path_state`
+   ignored. That dead mapping was removed from `g_p15_xqc_app_status_for`
+   and from the model's `G15`, so every row of the table now has
+   `notify = 0`. No FSM transition produces app_status 1 or 2 either; `G15`
+   keeps them as the structure of `g_p15_xqc_app_status_for`, and the
+   table's all-zero column pins that no event notifies.
 
 ## Sensitivity checks
 

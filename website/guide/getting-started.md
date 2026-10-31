@@ -116,12 +116,16 @@ mqvpn --mode client|server [options]
   --subnet6 CIDR         Client IPv6 pool (server)
   --cert PATH            TLS certificate (server)
   --key PATH             TLS private key (server)
-  --scheduler SCHED      Multipath scheduler: minrtt|wlb|wlb_udp_pin|backup_fec
+  --scheduler SCHED      Multipath scheduler: minrtt|wlb|backup|wlb_udp_pin|backup_fec|
+                         rap|wrtt|wrr|redundant|dscp
                          (default: wlb)
-  --cc ALGO              Congestion control: bbr2|bbr|cubic|none (default: bbr2)
+  --cc ALGO              Congestion control: bbr2|bbr|cubic|new_reno|copa|unlimited|none
+                         (default: bbr2)
   --mtu N                TUN MTU (1280-9000, default: auto)
+  --path-mtu N           Underlay MTU to size QUIC packets for (1280-9000, default: 0)
+  --pmtud                Discover the path MTU (both ends); --path-mtu is the upper limit
   --max-clients N        Max concurrent clients (server, default: 64)
-  --control-port PORT    TCP port for control API (server)
+  --control-port PORT    TCP port for control API (client or server; 0 disables)
   --control-addr ADDR    Bind address for control API (default: 127.0.0.1)
   --status               Query server status via control API and exit
   --log-level LVL        Log level (debug|info|warn|error)

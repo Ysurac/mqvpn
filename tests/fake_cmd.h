@@ -7,8 +7,10 @@
  * test_killswitch_rules_darwin.c).
  *
  * The twins under test (darwin/dns.c, darwin/routing.c, darwin/killswitch.c)
- * drive external commands (networksetup / route / pfctl) via fork+execvp,
- * which resolves the command name through $PATH. This harness creates a
+ * drive external commands (networksetup / route / pfctl) via fork+execvp;
+ * built with MQVPN_DARWIN_EXEC_VIA_PATH (CMakeLists.txt), they pass the bare
+ * command name, which execvp resolves through $PATH (production passes an
+ * absolute path). This harness creates a
  * temp dir, writes an executable "#!/bin/sh" script there named after the
  * real command, and prepends the dir to PATH so execvp() finds the fake
  * instead. Each installed script:

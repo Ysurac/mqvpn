@@ -499,6 +499,32 @@ test_ipv6_pool_init_bad_prefix(void)
 }
 
 static void
+test_ipv6_pool_must_hold_v4_pool(void)
+{
+    /* Offsets 1..254 of a /24 are reused for IPv6: a /120 holds them, a
+     * /121 (128 addresses) does not. */
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/120"), 0, "/120 holds a /24 pool");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/121") < 0,
+                "/121 rejected for a /24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/126") < 0,
+                "/126 rejected for a /24");
+
+    /* A small IPv4 pool fits a small IPv6 prefix: a /29 hands out 1..6. */
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/29");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::/125"), 0, "/125 holds a /29 pool");
+
+    /* A base whose low 32 bits are near the top would wrap: offset 32 of
+     * fd00::ffff:fff0 came out as fd00::10. */
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::ffff:fff0/96") < 0,
+                "base that wraps the low 32 bits rejected");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00::ffff:ff00/96"), 0,
+                  "base with room for the pool accepted");
+}
+
+static void
 test_ipv6_shared_offset(void)
 {
     /* Verify IPv4 and IPv6 share the same offset */
@@ -595,9 +621,12 @@ test_ipv6_pool_init_prefix_boundaries(void)
     /* Reset has_v6 for next test */
     pool.has_v6 = 0;
 
-    /* /126 → accepted (upper bound) */
-    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/126"), 0,
-                  "/126 prefix accepted");
+    /* /126 → accepted (upper bound) when it holds every pool offset: a /30
+     * IPv4 pool hands out offsets up to 2, which fit in its 2 host bits. */
+    mqvpn_addr_pool_t small;
+    mqvpn_addr_pool_init(&small, "10.0.0.0/30");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&small, "fd00:abcd::/126"), 0,
+                  "/126 prefix accepted for a /30 pool");
 
     pool.has_v6 = 0;
 
@@ -605,6 +634,45 @@ test_ipv6_pool_init_prefix_boundaries(void)
     ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/127") < 0, "/127 prefix rejected");
     /* /128 → rejected */
     ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00::/128") < 0, "/128 prefix rejected");
+}
+
+/* The IPv6 prefix must hold base6 + every offset of the shared pool: a /24
+ * IPv4 pool (offsets up to 254) needs at least 8 host bits, and a non-aligned
+ * base must not run past the prefix either. get6 refuses an offset that
+ * would leave the prefix instead of wrapping into the network bits. */
+static void
+test_ipv6_pool_prefix_holds_pool(void)
+{
+    mqvpn_addr_pool_t pool;
+    mqvpn_addr_pool_init(&pool, "10.0.0.0/24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/126") < 0,
+                "/126 cannot hold a /24 pool");
+    ASSERT_EQ_INT(pool.has_v6, 0, "failed init6 leaves has_v6 clear");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/121") < 0,
+                "/121 (127 hosts) cannot hold a /24 pool");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&pool, "fd00:abcd::/120"), 0,
+                  "/120 (255 hosts) holds a /24 pool");
+
+    /* Non-aligned base whose host part + 254 runs past the /120. */
+    mqvpn_addr_pool_t na;
+    mqvpn_addr_pool_init(&na, "10.0.0.0/24");
+    ASSERT_TRUE(mqvpn_addr_pool_init6(&na, "fd00:abcd::10/120") < 0,
+                "non-aligned base running past the prefix rejected");
+    ASSERT_EQ_INT(mqvpn_addr_pool_init6(&na, "fd00:abcd::10/112"), 0,
+                  "non-aligned base inside a /112 accepted");
+
+    /* get6 does not wrap: on a /120, offset 255 is the last host, 256 is out. */
+    struct in6_addr a;
+    ASSERT_EQ_INT(mqvpn_addr_pool_get6(&pool, 255, &a), 0, "offset 255 in /120");
+    ASSERT_EQ_INT(a.s6_addr[15], 0xff, "offset 255 -> ::ff");
+    ASSERT_TRUE(mqvpn_addr_pool_get6(&pool, 256, &a) < 0, "offset 256 outside /120");
+    ASSERT_EQ_INT(a.s6_addr[14], 0, "failed get6 does not carry into the prefix");
+
+    /* offset6 rejects an address whose low-word network bits differ. */
+    struct in6_addr other;
+    inet_pton(AF_INET6, "fd00:abcd::105", &other);
+    ASSERT_EQ_INT(mqvpn_addr_pool_offset6(&pool, &other), 0,
+                  "address outside the /120 -> offset 0");
 }
 
 static void
@@ -734,6 +802,20 @@ test_cidr_non_aligned(void)
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc(&pool, &ip), 0, "alloc from non-aligned");
     uint32_t off = ntohl(ip.s_addr) - ntohl(pool.base.s_addr);
     ASSERT_EQ_INT(off, 2, "first alloc offset is 2");
+
+    /* The shifted pool ends at the prefix's last host (10.0.0.254): base +
+     * pool_size never leaves 10.0.0.0/24, so every client stays routable. */
+    ASSERT_EQ_INT(pool.pool_size, 249, "non-aligned pool clamped to the prefix");
+    uint32_t last = 0;
+    while (mqvpn_addr_pool_alloc(&pool, &ip) == 0)
+        last = ntohl(ip.s_addr);
+    char last_str[INET_ADDRSTRLEN];
+    struct in_addr last_ip = {.s_addr = htonl(last)};
+    inet_ntop(AF_INET, &last_ip, last_str, sizeof(last_str));
+    ASSERT_EQ_STR(last_str, "10.0.0.254", "last non-aligned address inside the prefix");
+
+    /* A base at the prefix's last host leaves no client address. */
+    ASSERT_TRUE(mqvpn_addr_pool_init(&pool, "10.0.0.254/24") != 0, "no room rejected");
 }
 
 /* ── mqvpn_addr_pool_alloc_at tests ──────────────────────────────────────── */
@@ -790,7 +872,8 @@ test_alloc_at_already_used_rejected(void)
     struct in_addr out;
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 10, &out), 0, "first alloc_at 10");
     /* Second call for the same offset must fail */
-    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 10, &out) < 0, "duplicate alloc_at rejected");
+    ASSERT_TRUE(mqvpn_addr_pool_alloc_at(&pool, 10, &out) < 0,
+                "duplicate alloc_at rejected");
 }
 
 static void
@@ -805,7 +888,7 @@ test_alloc_at_beyond_pool_size_rejected(void)
                 "offset 15 (> pool_size) rejected");
     /* Offset 14 == pool_size is the last valid slot */
     ASSERT_EQ_INT(mqvpn_addr_pool_alloc_at(&pool, 14, &out), 0,
-                "offset 14 (== pool_size) is the last valid slot");
+                  "offset 14 (== pool_size) is the last valid slot");
     char str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &out, str, sizeof(str));
     ASSERT_EQ_STR(str, "10.0.0.14", "offset 14 gives 10.0.0.14");
@@ -888,10 +971,12 @@ main(void)
     test_ipv6_pool_get6();
     test_ipv6_pool_offset6();
     test_ipv6_pool_init_bad_prefix();
+    test_ipv6_pool_must_hold_v4_pool();
     test_ipv6_shared_offset();
     test_ipv6_pool_exhaustion_shared();
     test_ipv6_release_realloc_shared();
     test_ipv6_pool_init_prefix_boundaries();
+    test_ipv6_pool_prefix_holds_pool();
     test_ipv6_pool_init_bad_addr();
     test_ipv6_offset6_below_base();
     test_ipv6_get6_offset_zero();

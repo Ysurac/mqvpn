@@ -20,14 +20,26 @@
  * mqvpn_conn_settings.c explains the number. */
 #define MQVPN_STREAM_UNSENT_PACKETS 1024
 
+/* The same cap for DATAGRAM writes, lowered to what the paths send in
+ * MQVPN_DGRAM_UNSENT_DELAY_MS (xqc_conn_settings_t.max_dgram_unsent_packets
+ * and max_dgram_unsent_delay_ms); mqvpn_conn_settings.c explains the
+ * numbers. */
+#define MQVPN_DGRAM_UNSENT_PACKETS  4096
+#define MQVPN_DGRAM_UNSENT_DELAY_MS 50
+
 /* Caller-driven inputs. The bools are parameterised (not a single
  * `is_server` flag) so each call site documents its intent. */
 typedef struct {
     bool is_server;
     bool enable_multipath; /* server callers pass true */
     mqvpn_scheduler_t scheduler;
-    mqvpn_cc_t cc;                    /* congestion control algorithm */
-    uint64_t init_max_path_id;        /* 0 = leave xquic default */
+    mqvpn_cc_t cc;             /* congestion control algorithm */
+    uint64_t init_max_path_id; /* 0 = leave xquic default */
+    int path_mtu;              /* 0 = MQVPN_MAX_PKT_OUT_SIZE, see mqvpn_pkt_out_size() */
+    bool pmtud;                /* discover the path MTU, path_mtu sizes the cap */
+    /* local reorder on: the PMTUD start size leaves room for its header
+     * (MQVPN_REORDER_HDR_LEN), so IPv6 still gets 1280 */
+    bool reorder;
     uint64_t recv_rate_bytes_per_sec; /* 0 = no cap. Client-only: the
         builder hard-zeroes it for servers (a server-side conn-level cap
         would throttle client uplink). */

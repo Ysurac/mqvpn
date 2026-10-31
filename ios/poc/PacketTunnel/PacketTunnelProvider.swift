@@ -18,10 +18,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // Session objects. Created as locals in startTunnel (D6 rule 4) and
     // published under `lock` only after engine.start()/binder.start()
     // returned with the coordinator still non-terminal. Published once and
-    // never nil-ed again: handleAppMessage reads `snapshot` from an
-    // arbitrary NE thread without the lock, so a nil-out on stop would be
-    // a use-after-free race, and a reader overlapping the publish just
-    // sees nil ("no data").
+    // never nil-ed again: handleAppMessage reads `snapshot` (under the lock)
+    // from an arbitrary NE thread, and a reader before the publish just sees
+    // nil ("no data").
     private var engine: MqvpnEngine?
     private var binder: PathBinder?
     private var metrics: GateMetrics?
@@ -33,9 +32,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var resolvedIP = ""
 
     override func startTunnel(options: [String: NSObject]?) async throws {
-        let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
-            .providerConfiguration
-        guard let server = ServerSettings(providerConfiguration: providerConfig) else {
+        let proto = self.protocolConfiguration as? NETunnelProviderProtocol
+        let providerConfig = proto?.providerConfiguration
+        // The auth key is in the shared keychain item the app references
+        // (AuthKeyStore); a config the app has not migrated yet still carries
+        // it in providerConfiguration, which ServerSettings falls back to.
+        let keychainKey: String?
+        do {
+            keychainKey = try AuthKeyStore.load(persistentRef: proto?.passwordReference)
+        } catch {
+            throw NSError(domain: "mqvpn.poc", code: 13,
+                          userInfo: [NSLocalizedDescriptionKey: "auth key unavailable: \(error)"])
+        }
+        guard let server = ServerSettings(providerConfiguration: providerConfig,
+                                          keychainAuthKey: keychainKey) else {
             throw NSError(domain: "mqvpn.poc", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
         }
@@ -167,7 +177,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .applySettings(let info):
             // tunnelRemoteAddress must be an IP literal (NE rejects
             // hostnames); the engine/TLS side still gets server.host/SNI.
-            let settings = Self.makeSettings(from: info, server: resolvedIP)
+            guard let settings = Self.makeSettings(from: info, server: resolvedIP) else {
+                // Server-supplied prefix out of range: fail like a rejected
+                // apply (start fails / tunnel cancels), on the same hop.
+                let err = NSError(domain: "mqvpn.poc", code: 12,
+                                  userInfo: [NSLocalizedDescriptionKey:
+                                             "invalid tunnel address prefix"])
+                engine?.perform { [weak self] in
+                    self?.feed(.settingsApplied(err), engine: engine,
+                               metrics: metrics, snapshot: snapshot)
+                }
+                return
+            }
             setTunnelNetworkSettings(settings) { [weak self] err in
                 engine?.perform {
                     self?.feed(.settingsApplied(err), engine: engine,
@@ -233,15 +254,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// nil when the server-supplied IPv4 prefix is out of range (> 32).
     static func makeSettings(from info: mqvpn_tunnel_info_t,
-                             server: String) -> NEPacketTunnelNetworkSettings {
+                             server: String) -> NEPacketTunnelNetworkSettings? {
         func ip4(_ b: (UInt8, UInt8, UInt8, UInt8)) -> String {
             "\(b.0).\(b.1).\(b.2).\(b.3)"
         }
+        guard let mask = Self.prefixToMask(info.assigned_prefix) else { return nil }
         let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: server)
         let v4 = NEIPv4Settings(
             addresses: [ip4(info.assigned_ip)],
-            subnetMasks: [Self.prefixToMask(info.assigned_prefix)])
+            subnetMasks: [mask])
         v4.includedRoutes = [NEIPv4Route.default()]
         s.ipv4Settings = v4
         s.mtu = NSNumber(value: info.mtu)
@@ -257,7 +280,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return s
     }
 
-    static func prefixToMask(_ prefix: UInt8) -> String {
+    /// nil for prefix > 32: the value comes from the server, and
+    /// `32 - prefix` would trap on UInt32 underflow.
+    static func prefixToMask(_ prefix: UInt8) -> String? {
+        guard prefix <= 32 else { return nil }
         let m: UInt32 = prefix == 0 ? 0 : ~UInt32(0) << (32 - UInt32(prefix))
         return "\((m >> 24) & 255).\((m >> 16) & 255).\((m >> 8) & 255).\(m & 255)"
     }
@@ -270,7 +296,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     /// app renders as "no data".
     override func handleAppMessage(_ messageData: Data,
                                    completionHandler: ((Data?) -> Void)?) {
-        guard let snap = snapshot?.read(),
+        // `snapshot` is published under `lock` (startTunnel step 3): read the
+        // reference under the same lock — an unsynchronized read racing that
+        // write is a Swift data race. The cache's own read() locks itself.
+        lock.lock()
+        let cache = snapshot
+        lock.unlock()
+        guard let snap = cache?.read(),
               let data = try? ProviderMessage.encode(snap) else {
             completionHandler?(nil)
             return

@@ -300,6 +300,24 @@ test_ct_compare_one_side_empty(void)
 }
 
 static void
+test_ct_compare_prefix(void)
+{
+    /* A proper prefix of the secret, and the secret plus a suffix, must both
+     * fail: the comparison runs over the secret's length and folds the length
+     * mismatch in instead of returning early. */
+    const char *secret = "abcdef";
+    ASSERT_TRUE(mqvpn_auth_ct_compare("abc", 3, secret, 6) != 0,
+                "ct_compare prefix of secret");
+    ASSERT_TRUE(mqvpn_auth_ct_compare("abcdefgh", 8, secret, 6) != 0,
+                "ct_compare secret plus suffix");
+    /* The missing tail of a short input reads as zero bytes; a secret whose
+     * tail is NUL must still not match it. */
+    const char secret_nul[4] = {'a', 'b', 0, 0};
+    ASSERT_TRUE(mqvpn_auth_ct_compare("ab", 2, secret_nul, 4) != 0,
+                "ct_compare short input vs NUL-padded secret");
+}
+
+static void
 test_genkey_format_and_uniqueness(void)
 {
     /* Primary: both outputs have correct format (44-char valid base64).
@@ -341,6 +359,7 @@ main(void)
     test_ct_compare_single_byte_diff();
     test_ct_compare_long_strings();
     test_ct_compare_one_side_empty();
+    test_ct_compare_prefix();
     test_b64_encode_known_vectors();
     test_b64_encode_padding();
     test_b64_encode_buffer_limit();

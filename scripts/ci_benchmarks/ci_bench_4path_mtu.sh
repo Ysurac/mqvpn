@@ -72,9 +72,7 @@ _4p_cleanup() {
     _CB_CLIENT_PID=""
     _CB_SERVER_PID=""
 
-    ip netns exec "$NS_SERVER" pkill -f "iperf3" 2>/dev/null || true
-    ip netns exec "$NS_CLIENT" pkill -f "iperf3" 2>/dev/null || true
-    sleep 1
+    ci_bench_netns_kill "$NS_SERVER" "$NS_CLIENT"
 
     for dev in "$VETH_A0" "$VETH_B0" "$VETH_C0" "$VETH_D0"; do
         ip netns exec "$NS_CLIENT" tc qdisc del dev "$dev" root 2>/dev/null || true

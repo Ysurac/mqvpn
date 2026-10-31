@@ -2,7 +2,7 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /* libFuzzer target: control-API request bytes -> dispatch() -> JSON command
- * parsing (json_mini.h) + per-command argument extraction + error-response
+ * parsing (yyjson) + per-command argument extraction + error-response
  * building.
  *
  * Scope: the control socket accepts TCP connections (127.0.0.1 by default,
@@ -21,9 +21,11 @@
  * anyway). Session-loop response bodies are likewise out of scope: they
  * are built from server state, not from request bytes.
  *
- * NOT covered: ctrl_on_read's brace-counting request-completeness scanner
- * (needs a real fd + event loop). A future target if the framing logic
- * grows beyond brace/newline detection.
+ * Also covered: the request framing (ctrl_frame_request: '{'-only rule and
+ * brace-counting completeness scan), which is pure over the connection's
+ * buffer. Each input is dispatched twice: raw (dispatch() must survive any
+ * bytes) and as the framed object ctrl_on_read would hand over. The fd /
+ * event-loop side of ctrl_on_read is not covered.
  *
  * Input contract: dispatch() takes a NUL-terminated request; ctrl_on_read
  * caps a request at CTRL_MAX_REQ (4096) bytes, so longer fuzz inputs are
@@ -32,6 +34,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "platform/linux/control_socket.c"
@@ -41,7 +44,11 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size > CTRL_MAX_REQ) return 0;
 
-    char req[CTRL_MAX_REQ + 1];
+    /* Exact-size heap copies (size + NUL): a parser read past the
+     * terminator lands outside the allocation, where ASan reports it; a
+     * fixed 4097-byte buffer would hide such over-reads. */
+    char *req = malloc(size + 1);
+    if (!req) return 0;
     memcpy(req, data, size);
     req[size] = '\0';
 
@@ -54,5 +61,22 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * stack. libFuzzer runs inputs sequentially, so no aliasing. */
     static char resp[CTRL_MAX_RESP_BYTES];
     (void)dispatch(req, resp, sizeof(resp), &cs);
+
+    /* Framed path, as ctrl_on_read runs it on a complete object; the cut
+     * object is again dispatched from an exact-size copy. */
+    static ctrl_conn_t conn;
+    memcpy(conn.req, data, size);
+    conn.req[size] = '\0';
+    conn.req_len = size;
+    if (ctrl_frame_request(&conn) == 1) {
+        size_t n = strlen(conn.req);
+        char *framed = malloc(n + 1);
+        if (framed) {
+            memcpy(framed, conn.req, n + 1);
+            (void)dispatch(framed, resp, sizeof(resp), &cs);
+            free(framed);
+        }
+    }
+    free(req);
     return 0;
 }

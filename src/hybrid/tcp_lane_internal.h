@@ -130,8 +130,14 @@ typedef enum {
  * bytes xquic already accepted (partial-accept resume point): re-delivering
  * from 0 after a partial send would DUPLICATE bytes on the stream. */
 typedef struct mqvpn_tcp_uplink_node {
-    struct pbuf *p;  /* owned; freed when fully sent (or on queue teardown) */
-    uint16_t offset; /* bytes of p already handed to H3; < p->tot_len */
+    struct pbuf *p;    /* owned; freed when fully sent (or on queue teardown) */
+    uint16_t offset;   /* bytes of p already handed to H3; < p->tot_len */
+    uint16_t cap;      /* nonzero: p is a lane-allocated coalescing buffer
+                        * of this capacity that small deliveries are
+                        * appended to (tcp_lane_uplink_stash) */
+    uint16_t overhead; /* bookkeeping bytes this node costs beyond its
+                        * payload (node + pbuf headers), counted in
+                        * uplink_queued_overhead */
     struct mqvpn_tcp_uplink_node *next;
 } mqvpn_tcp_uplink_node_t;
 
@@ -167,8 +173,9 @@ typedef struct mqvpn_tcp_flow {
      * (PENDING_STREAM: nothing may be sent before the gate opens) and
      * EAGAIN/partial-accept retry (ACTIVE: xquic backpressure). FIFO; flushed
      * by the writable notify and by the 2xx transition. uplink_queued_bytes
-     * counts UNSENT bytes only (sum of tot_len - offset), which is the
-     * watermark metric: what xquic has not yet taken from us.
+     * counts UNSENT bytes only (sum of tot_len - offset): what xquic has
+     * not yet taken from us. The watermark metric is that plus
+     * uplink_queued_overhead (tcp_lane_uplink_backlog).
      * (An earlier uplink_inflight_bytes field was reserved here; it was never
      * decremented anywhere and its "accepted by xquic" meaning
      * has no completion signal to drive it, so it is replaced by
@@ -176,6 +183,13 @@ typedef struct mqvpn_tcp_flow {
     mqvpn_tcp_uplink_node_t *uplink_q_head;
     mqvpn_tcp_uplink_node_t *uplink_q_tail;
     uint32_t uplink_queued_bytes;    /* unsent bytes across the queue */
+    uint32_t uplink_queued_overhead; /* per-node bookkeeping memory across the
+                                      * queue (sum of node->overhead) — the
+                                      * watermarks compare payload PLUS this,
+                                      * so a flood of tiny segments, which
+                                      * costs far more memory than payload,
+                                      * withholds the window just as early
+                                      * (tcp_lane_uplink_backlog) */
     uint32_t uplink_withheld_recved; /* delivered bytes whose tcp_recved is
                                       * deferred until the low-water resume */
     int uplink_withheld;
@@ -212,8 +226,42 @@ typedef struct mqvpn_tcp_flow {
      * is only ever reachable for a to_tcp=1 flow. */
     mqvpn_tcp_lane_t *lane;
 
+    /* Re-entrancy guard. cli_tcp_lane_h3_send / _h3_close /
+     * cli_tcp_lane_open_stream can run xqc_engine_conn_logic when called
+     * outside an engine callback — i.e. from the lwIP callbacks and the tick
+     * — and that engine run delivers notifies that can tear down this very
+     * flow while an outer frame is still using it. Entry points hold the
+     * flow (tcp_lane_flow_hold); tcp_lane_remove_flow on a held flow unlinks
+     * it and fixes the counters at once but only marks it `doomed`, and the
+     * outermost tcp_lane_flow_release frees it. Code that made one of those
+     * calls checks tcp_lane_flow_gone() before touching the flow again.
+     * pcb_aborted records that the flow's pcb was tcp_abort()ed (by any
+     * frame), which is what decides ERR_ABRT for the lwIP frame on top. */
+    uint8_t depth;
+    uint8_t doomed;
+    uint8_t pcb_aborted;
+
     struct mqvpn_tcp_flow *next; /* hash chain */
+    /* The lane's list of flows bound to an H3 stream (f->stream != NULL),
+     * which find_flow_by_stream walks instead of the whole table. */
+    struct mqvpn_tcp_flow *bound_prev, *bound_next;
 } mqvpn_tcp_flow_t;
+
+/* True once the flow left the relay — torn down (doomed, still held) or
+ * turned into a CLOSING routing marker — inside a call that can run the
+ * engine. */
+static inline int
+tcp_lane_flow_gone(const mqvpn_tcp_flow_t *f)
+{
+    return f->doomed || f->state == TCP_FLOW_CLOSING;
+}
+
+/* The tcp_lane_flow_status_t a caller reports for a gone flow. */
+static inline tcp_lane_flow_status_t
+tcp_lane_gone_status(const mqvpn_tcp_flow_t *f)
+{
+    return f->pcb_aborted ? TCP_LANE_FLOW_ABORTED : TCP_LANE_FLOW_GONE;
+}
 
 /* ─── Compile-time test-double hooks ───
  *
@@ -267,11 +315,29 @@ typedef struct mqvpn_tcp_flow {
 #ifndef MQVPN_TCP_LANE_TCP_CLOSE
 #  define MQVPN_TCP_LANE_TCP_CLOSE(pcb) tcp_close(pcb)
 #endif
+/* tcp_abandon(pcb, 0): silently drop a stale pcb of a reused 4-tuple
+ * (tcp_lane_retire_stale_pcb) — frees it like tcp_abort, without the RST. */
+#ifndef MQVPN_TCP_LANE_TCP_ABANDON
+#  define MQVPN_TCP_LANE_TCP_ABANDON(pcb) tcp_abandon((pcb), 0)
+#endif
 
 /* ─── Cross-TU declarations (tcp_lane.c <-> tcp_lane_uplink.c) ───
  *
  * The two .c files are one logical module; these are the seam. Everything
  * else each file needs stays static/private to it. */
+
+/* Defined in tcp_lane.c — the re-entrancy guard (see the depth/doomed
+ * field comment). release frees a flow torn down while held. */
+void tcp_lane_flow_hold(mqvpn_tcp_flow_t *f);
+void tcp_lane_flow_release(mqvpn_tcp_flow_t *f);
+
+/* Defined in tcp_lane_uplink.c. tcp_recved() for a 32-bit length (in
+ * u16_t steps). */
+void tcp_lane_recved(struct tcp_pcb *pcb, uint32_t len);
+
+/* Defined in tcp_lane_uplink.c. The uplink queue's memory-weighted backlog
+ * (unsent payload + per-node overhead) that the BP watermarks compare. */
+uint32_t tcp_lane_uplink_backlog(const mqvpn_tcp_flow_t *f);
 
 /* Defined in tcp_lane_uplink.c. Frees every queued node + its owned pbuf;
  * idempotent on an already-empty queue. Called from tcp_lane.c's

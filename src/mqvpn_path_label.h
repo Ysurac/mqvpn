@@ -150,12 +150,13 @@ int mqvpn_path_label_encode(uint8_t *buf, size_t buf_len, uint64_t path_id,
  * MQVPN_PATH_LABEL_IFACE_MAX+1 bytes; always NUL-terminated on success.
  * weight_out/dscp_mask_out receive 0 when the client has no dedicated
  * value for that field (see mqvpn_path_label_encode()'s doc comment).
+ * An interface name containing a control byte (< 0x20 or DEL), '"' or '\\'
+ * counts as malformed (the name is logged and echoed into JSON).
  * Returns 0 on success, -1 on a malformed/truncated payload (caller should
  * treat this the same as an unrecognized capsule: skip and continue —
  * never tear down the connection over it). */
 int mqvpn_path_label_decode(const uint8_t *payload, size_t payload_len,
-                            uint64_t *path_id_out, char *iface_out,
-                            size_t iface_out_cap, uint32_t *weight_out,
-                            uint64_t *dscp_mask_out);
+                            uint64_t *path_id_out, char *iface_out, size_t iface_out_cap,
+                            uint32_t *weight_out, uint64_t *dscp_mask_out);
 
 #endif /* MQVPN_PATH_LABEL_H */

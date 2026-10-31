@@ -253,7 +253,9 @@ path_should_warn_residence(const path_entry_t *p, uint64_t now_us)
 
     uint64_t anchor = p->last_residence_warn_at_us != 0 ? p->last_residence_warn_at_us
                                                         : p->state_entered_at_us;
-    uint64_t since_anchor = now_us - anchor;
+    /* Saturating: an injected clock that steps back reads as "just entered",
+     * never as a huge residence. */
+    uint64_t since_anchor = now_us > anchor ? now_us - anchor : 0;
 
     switch (p->status) {
     case MQVPN_PATH_PENDING: return since_anchor > PATH_RESIDENCE_PENDING_WARN_US;
@@ -312,21 +314,23 @@ path_log_state_change(mqvpn_client_t *c, const path_entry_t *p,
  * after retry exhausted) would be silently suppressed as self-loops:
  * the state field would update but no transition log fires and
  * path_mark_state_entry never re-anchors the residence timer. */
-/* G-P15 (draft-21 §3.3 ¶6): when local lifecycle demotes ACTIVE↔STANDBY
- * or ACTIVE/STANDBY→DEGRADED, mirror the new path class onto the xquic
- * conn so the peer is informed via PATH_STATUS frames. Closing
- * transitions (→ CLOSED_*) use xquic's path-abandon path, not mark; we
- * only fire on operational class changes.
+/* G-P15 (draft-21 §3.3 ¶6): when local lifecycle moves a path between
+ * ACTIVE and STANDBY, hand the new path class to the client
+ * (client_notify_xqc_path_state), which mirrors it onto the xquic conn for
+ * a live path.
  *   1 = XQC_APP_PATH_STATUS_STANDBY
  *   2 = XQC_APP_PATH_STATUS_AVAILABLE
- *   3 = XQC_APP_PATH_STATUS_FROZEN */
+ * No other transition notifies: closing transitions (→ CLOSED_*) go through
+ * xquic's path abandon, and →DEGRADED only happens for a path xquic already
+ * removed (XQUIC_REMOVED, with the slot cleared), so there is nothing to
+ * mark and draft-21 has no frame for it. No FSM event moves ACTIVE <->
+ * STANDBY today (a standby path is created standby), so the formal oracle
+ * pins that no event notifies at all. */
 static int
 g_p15_xqc_app_status_for(path_lifecycle_t from, path_lifecycle_t to)
 {
     if (from == PATH_LC_ACTIVE && to == PATH_LC_STANDBY) return 1;
     if (from == PATH_LC_STANDBY && to == PATH_LC_ACTIVE) return 2;
-    if ((from == PATH_LC_ACTIVE || from == PATH_LC_STANDBY) && to == PATH_LC_DEGRADED)
-        return 3;
     return 0; /* no xquic call for other transitions */
 }
 
@@ -718,7 +722,10 @@ void
 path_fsm_tick_confirm_stable(mqvpn_client_t *c, path_entry_t *p, uint64_t now)
 {
     if (p->state != PATH_LC_ACTIVE && p->state != PATH_LC_STANDBY) return;
+    /* now < path_stable_since_us (a clock stepping back) is "not yet stable",
+     * not an unsigned wrap that would reset the budget at once. */
     if (p->path_stable_since_us == 0 || !p->xquic_path_live ||
+        now < p->path_stable_since_us ||
         now - p->path_stable_since_us < PATH_STABLE_THRESHOLD_US)
         return;
 

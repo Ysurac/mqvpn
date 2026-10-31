@@ -26,6 +26,7 @@
 
 #include <jni.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -319,27 +320,44 @@ jni_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     JNIEnv *env = get_env(ctx, &did_attach);
     if (!env) return;
 
-    /* Create byte arrays for IPs */
+    /* Create byte arrays for IPs. A failed allocation leaves a pending
+     * OutOfMemoryError: no further JNI call but cleanup may run with it, so
+     * clear it, drop what was made and skip the upcall. */
     jbyteArray assigned_ip = (*env)->NewByteArray(env, 4);
-    (*env)->SetByteArrayRegion(env, assigned_ip, 0, 4, (const jbyte *)info->assigned_ip);
-
-    jbyteArray server_ip = (*env)->NewByteArray(env, 4);
-    (*env)->SetByteArrayRegion(env, server_ip, 0, 4, (const jbyte *)info->server_ip);
-
+    jbyteArray server_ip = assigned_ip ? (*env)->NewByteArray(env, 4) : NULL;
     jbyteArray assigned_ip6 = NULL;
-    if (info->has_v6) {
-        assigned_ip6 = (*env)->NewByteArray(env, 16);
+    if (server_ip && info->has_v6) assigned_ip6 = (*env)->NewByteArray(env, 16);
+    if (!assigned_ip || !server_ip || (info->has_v6 && !assigned_ip6)) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        LOGW("tunnel_config_ready: byte array allocation failed");
+        if (assigned_ip) (*env)->DeleteLocalRef(env, assigned_ip);
+        if (server_ip) (*env)->DeleteLocalRef(env, server_ip);
+        if (assigned_ip6) (*env)->DeleteLocalRef(env, assigned_ip6);
+        detach_if_needed(ctx, did_attach);
+        return;
+    }
+    (*env)->SetByteArrayRegion(env, assigned_ip, 0, 4, (const jbyte *)info->assigned_ip);
+    (*env)->SetByteArrayRegion(env, server_ip, 0, 4, (const jbyte *)info->server_ip);
+    if (assigned_ip6)
         (*env)->SetByteArrayRegion(env, assigned_ip6, 0, 16,
                                    (const jbyte *)info->assigned_ip6);
+
+    /* Fields appended under ABI 3: read only when the caller's struct covers them. */
+    int has_sched = 0, sched = 0;
+    if (info->struct_size >= offsetof(mqvpn_tunnel_info_t, server_scheduler) +
+                                 sizeof(info->server_scheduler)) {
+        has_sched = info->has_server_scheduler;
+        sched = info->server_scheduler;
     }
 
     /* void onNativeTunnelConfigReady(byte[] assignedIp, int prefix,
      *     byte[] assignedIp6, int prefix6, byte[] serverIp, int serverPrefix,
-     *     int mtu, boolean hasV6) */
+     *     int mtu, boolean hasV6, boolean hasServerScheduler, int serverScheduler) */
     (*env)->CallVoidMethod(
         env, ctx->callback_obj, ctx->mid_tunnel_config_ready, assigned_ip,
         (jint)info->assigned_prefix, assigned_ip6, (jint)info->assigned_prefix6,
-        server_ip, (jint)info->server_prefix, (jint)info->mtu, (jboolean)info->has_v6);
+        server_ip, (jint)info->server_prefix, (jint)info->mtu, (jboolean)info->has_v6,
+        (jboolean)(has_sched ? 1 : 0), (jint)sched);
 
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
@@ -675,6 +693,26 @@ JNI_FN(configSetScheduler)(JNIEnv *env, jobject thiz, jlong cfg, jint scheduler)
                                       (mqvpn_scheduler_t)scheduler);
 }
 
+/* configSetRequestServerScheduler(cfg, enable) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetRequestServerScheduler)(JNIEnv *env, jobject thiz, jlong cfg,
+                                        jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_request_server_scheduler((mqvpn_config_t *)(intptr_t)cfg,
+                                                     enable ? 1 : 0);
+}
+
+/* configSetCc(cfg, cc) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetCc)(JNIEnv *env, jobject thiz, jlong cfg, jint cc)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_cc((mqvpn_config_t *)(intptr_t)cfg, (mqvpn_cc_t)cc);
+}
+
 /* configSetLogLevel(cfg, level) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
@@ -753,6 +791,25 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
                                             enable ? 1 : 0);
 }
 
+/* configSetPathMtu(cfg, mtu) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_path_mtu((mqvpn_config_t *)(intptr_t)cfg, (int)mtu);
+}
+
+/* configSetPmtud(cfg, enable) → int. The reactor then sets DF on the path
+ * sockets (mqvpn_client_pmtud_enabled). */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPmtud)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_pmtud((mqvpn_config_t *)(intptr_t)cfg, enable ? 1 : 0);
+}
+
 /* configSetReorderEnabled(cfg, mode) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetReorderEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
@@ -775,6 +832,29 @@ JNI_FN(configAddReorderRule)(JNIEnv *env, jobject thiz, jlong cfg, jint proto, j
     return mqvpn_config_add_reorder_rule((mqvpn_config_t *)(intptr_t)cfg, (uint8_t)proto,
                                          (uint16_t)port,
                                          (mqvpn_reorder_profile_t)profile);
+}
+
+/* configSetRedundant(cfg, enabled, ports) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetRedundant)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enabled,
+                           jintArray ports)
+{
+    (void)thiz;
+    jsize n = ports ? (*env)->GetArrayLength(env, ports) : 0;
+    if (n > MQVPN_REDUNDANT_MAX_PORTS) return MQVPN_ERR_INVALID_ARG;
+    uint16_t narrowed[MQVPN_REDUNDANT_MAX_PORTS];
+    if (n > 0) {
+        jint raw[MQVPN_REDUNDANT_MAX_PORTS];
+        (*env)->GetIntArrayRegion(env, ports, 0, n, raw);
+        if ((*env)->ExceptionCheck(env)) return MQVPN_ERR_INVALID_ARG;
+        for (jsize i = 0; i < n; i++) {
+            /* validate before narrowing: 65537 must not become port 1 */
+            if (raw[i] < 1 || raw[i] > 65535) return MQVPN_ERR_INVALID_ARG;
+            narrowed[i] = (uint16_t)raw[i];
+        }
+    }
+    return mqvpn_config_set_redundant((mqvpn_config_t *)(intptr_t)cfg, enabled ? 1 : 0,
+                                      n > 0 ? narrowed : NULL, (size_t)n);
 }
 
 /* configSetHybridEnabled(cfg, enable) → int */
@@ -852,7 +932,7 @@ JNI_FN(clientNew)(JNIEnv *env, jobject thiz, jlong cfg, jobject callbackObj)
         const char *name;
         const char *sig;
     } methods[] = {
-        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZ)V"},
+        {&ctx->mid_tunnel_config_ready, "onNativeTunnelConfigReady", "([BI[BI[BIIZZI)V"},
         {&ctx->mid_tunnel_closed, "onNativeTunnelClosed", "(I)V"},
         {&ctx->mid_state_changed, "onNativeStateChanged", "(II)V"},
         {&ctx->mid_path_event, "onNativePathEvent", "(JI)V"},
@@ -1153,7 +1233,15 @@ JNI_FN(closeFd)(JNIEnv *env, jobject thiz, jint fd)
  *  I/O feed (TUN only — path receive happens inside reactorWait)
  * ════════════════════════════════════════════════════════════════════════════ */
 
-/* onTunPacket(client, pkt, offset, len) → int */
+/* Largest IP packet the TUN can hand over. */
+#define JNI_TUN_PKT_MAX 65535
+
+/* onTunPacket(client, pkt, offset, len) → int. [offset, offset+len) must lie
+ * inside pkt (MQVPN_ERR_INVALID_ARG otherwise — the old code read past the
+ * array). Only that slice is copied, into a stack buffer: the frames are
+ * pooled buffers far larger than the packet, and GetByteArrayElements could
+ * copy the whole array per packet. No critical section: the engine may call
+ * back into Java (log) while it handles the packet. */
 JNIEXPORT jint JNICALL
 JNI_FN(onTunPacket)(JNIEnv *env, jobject thiz, jlong client, jbyteArray pkt, jint offset,
                     jint len)
@@ -1161,13 +1249,18 @@ JNI_FN(onTunPacket)(JNIEnv *env, jobject thiz, jlong client, jbyteArray pkt, jin
     (void)thiz;
     mqvpn_client_t *c = (mqvpn_client_t *)(intptr_t)client;
 
-    jbyte *data = (*env)->GetByteArrayElements(env, pkt, NULL);
-    if (!data) return MQVPN_ERR_NO_MEMORY;
+    if (!pkt) return MQVPN_ERR_INVALID_ARG;
+    jsize alen = (*env)->GetArrayLength(env, pkt);
+    if (offset < 0 || len <= 0 || len > JNI_TUN_PKT_MAX || offset > alen - len)
+        return MQVPN_ERR_INVALID_ARG;
 
-    int rc = mqvpn_client_on_tun_packet(c, (const uint8_t *)(data + offset), (size_t)len);
-
-    (*env)->ReleaseByteArrayElements(env, pkt, data, JNI_ABORT);
-    return rc;
+    uint8_t buf[JNI_TUN_PKT_MAX];
+    (*env)->GetByteArrayRegion(env, pkt, offset, len, (jbyte *)buf);
+    if ((*env)->ExceptionCheck(env)) { /* unreachable after the bounds check */
+        (*env)->ExceptionClear(env);
+        return MQVPN_ERR_INVALID_ARG;
+    }
+    return mqvpn_client_on_tun_packet(c, buf, (size_t)len);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -1236,6 +1329,7 @@ JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
     (void)thiz;
     enum { MAX_PATHS = 8 };
     mqvpn_path_info_t paths[MAX_PATHS];
+    paths[0].struct_size = sizeof(paths[0]); /* array stride */
     int n_paths = 0;
 
     int rc = mqvpn_client_get_paths((const mqvpn_client_t *)(intptr_t)client, paths,
@@ -1474,5 +1568,42 @@ JNI_TEST_FN(nativeConfigHasPlatformVerifier)(JNIEnv *env, jobject thiz, jlong cf
     (void)thiz;
     const mqvpn_config_t *c = (const mqvpn_config_t *)(intptr_t)cfg;
     return (c && c->cert_verify_fn == jni_cert_verify) ? JNI_TRUE : JNI_FALSE;
+}
+
+/* nativeFireUpcallsForTest(client): runs each upcall trampoline once, with
+ * the fixed values below, on the callback object clientNew registered for
+ * client; tunnel_config_ready runs twice, the second time with a pre-ABI-3
+ * struct_size. Same-typed arguments of one upcall differ in at least one of
+ * the calls, so a swap shows. False when client is not registered. */
+JNIEXPORT jboolean JNICALL
+JNI_TEST_FN(nativeFireUpcallsForTest)(JNIEnv *env, jobject thiz, jlong client)
+{
+    (void)env;
+    (void)thiz;
+    jni_ctx_t *ctx = ctx_lookup((mqvpn_client_t *)(intptr_t)client, 0);
+    if (!ctx) return JNI_FALSE;
+    mqvpn_tunnel_info_t info = {
+        .struct_size = sizeof(info),
+        .assigned_ip = {10, 0, 0, 2},
+        .assigned_prefix = 24,
+        .server_ip = {10, 0, 0, 1},
+        .server_prefix = 30,
+        .mtu = 1280,
+        .assigned_ip6 = {0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
+        .assigned_prefix6 = 112,
+        .has_v6 = 1,
+        .has_server_scheduler = 1,
+        .server_scheduler = MQVPN_SCHED_WLB_UDP_PIN,
+    };
+    jni_tunnel_config_ready(&info, ctx);
+    /* A caller built before ABI 3: the scheduler fields must read as absent. */
+    info.struct_size = offsetof(mqvpn_tunnel_info_t, has_server_scheduler);
+    jni_tunnel_config_ready(&info, ctx);
+    jni_state_changed(MQVPN_STATE_CONNECTING, MQVPN_STATE_AUTHENTICATING, ctx);
+    jni_path_event((mqvpn_path_handle_t)7, MQVPN_PATH_DEGRADED, ctx);
+    jni_log(MQVPN_LOG_WARN, "upcall seam", ctx);
+    jni_reconnect_scheduled(9, ctx);
+    jni_tunnel_closed(MQVPN_ERR_AUTH, ctx);
+    return JNI_TRUE;
 }
 #endif /* MQVPN_JNI_TEST_SEAMS */

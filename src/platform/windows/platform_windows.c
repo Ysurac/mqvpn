@@ -21,6 +21,7 @@
 #  include "net_mon.h"
 #  include "cert_verify.h"
 #  include "log.h"
+#  include "platform/path_line.h"
 #  include "mqvpn_internal.h" /* mqvpn_config_apply_hybrid (INI [Hybrid] bridge) */
 #  include "compat/socket_compat.h"
 
@@ -33,8 +34,14 @@
 /* UDP receive budget per readable event */
 #  define BULK_READ_COUNT 64
 
-/* ── Global for Ctrl+C handler (single-instance) ── */
-static platform_win_ctx_t *g_signal_ctx = NULL;
+/* ── Globals for the Ctrl+C handler (single-instance) ──
+ * The handler runs on an OS thread at any time, cleanup included: it reads
+ * g_signal_ctx with an interlocked op and counts itself in g_ctrl_inflight
+ * BEFORE that read, and cleanup clears g_signal_ctx and then waits for
+ * g_ctrl_inflight to drain. A handler either saw NULL or finishes its send
+ * before cleanup goes on to close the wake socket (or frees ctx). */
+static PVOID volatile g_signal_ctx = NULL; /* platform_win_ctx_t * */
+static volatile LONG g_ctrl_inflight = 0;
 
 /*
  * Pin a UDP socket's egress to a specific NIC by FriendlyName.
@@ -315,7 +322,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     } else {
         LOG_INF("manage_routes=off: host routing table left untouched");
     }
-    if (win_setup_killswitch(p) < 0) {
+    /* The kill switch's base set has been blocking since before the first
+     * connect (win_platform_run_client); only the TUN permit is per tunnel. */
+    if (win_killswitch_permit_tun(p) < 0) {
         LOG_ERR("killswitch setup failed, aborting tunnel");
         goto fail;
     }
@@ -354,7 +363,9 @@ cb_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
     return;
 
 fail:
-    win_cleanup_killswitch(p);
+    /* The kill switch base set stays: this failure ends the process, and the
+     * final cleanup closes the WFP session after the loop exits. */
+    win_killswitch_revoke_tun(p);
     if (p->manage_routes) win_cleanup_routes(p);
     win_cleanup_dns(p);
     if (p->tun.adapter) mqvpn_tun_win_destroy(&p->tun);
@@ -401,7 +412,11 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
         if (p->ev_recover) event_del(p->ev_recover);
         for (int i = 0; i < p->n_paths; i++)
             p->paths[i].recover_failures = 0;
-        win_cleanup_killswitch(p);
+        /* Only the TUN permit follows the tunnel: the kill switch's block
+         * (and its server permit) stays through RECONNECTING, so nothing
+         * leaks while the tunnel is down. The session closes on final
+         * shutdown only (win_platform_run_client cleanup). */
+        win_killswitch_revoke_tun(p);
         if (p->manage_routes) win_cleanup_routes(p);
         win_cleanup_dns(p);
         if (p->tun_up) {
@@ -414,29 +429,25 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
             p->tun_up = 0;
             mqvpn_client_set_tun_active(p->client, 0, -1);
         }
-        /* A kill switch we could not tear down keeps blocking everything,
-         * and only process exit clears it (BFE runs down the dynamic session
-         * with its owner). Head for the exit instead of reconnecting into
-         * it — win_setup_killswitch() would refuse the new session anyway. */
-        if (p->wfp_close_failed && !p->shutting_down) {
-            LOG_ERR("kill switch teardown failed, aborting");
-            p->fatal_error = PLATFORM_FATAL_TUNNEL_SETUP;
-            p->shutting_down = 1;
-            if (new_state != MQVPN_STATE_CLOSED) mqvpn_client_disconnect(p->client);
-        }
 
-        if (new_state == MQVPN_STATE_CLOSED && p->shutting_down)
-            event_base_loopbreak(p->eb);
+        /* CLOSED we did not ask for: the connection ended and the library
+         * will not retry it (reconnect off, or a rejected certificate), so
+         * exit non-zero rather than idle on a dead client. */
+        if (new_state == MQVPN_STATE_CLOSED && !p->shutting_down)
+            p->fatal_error = PLATFORM_FATAL_CLOSED;
+        if (new_state == MQVPN_STATE_CLOSED) event_base_loopbreak(p->eb);
     }
 }
 
 static void
 cb_path_event(mqvpn_path_handle_t path, mqvpn_path_status_t status, void *user_ctx)
 {
-    (void)user_ctx;
-    static const char *snames[] = {"PENDING", "ACTIVE", "DEGRADED", "STANDBY", "CLOSED"};
-    const char *sn = (status < 5) ? snames[status] : "?";
-    LOG_INF("path %lld -> %s", (long long)path, sn);
+    platform_win_ctx_t *p = (platform_win_ctx_t *)user_ctx;
+    const char *iface;
+    PLATFORM_PATH_IFACE(iface, p, path);
+    char line[PLATFORM_PATH_LINE_MAX];
+    platform_fmt_path_line(line, sizeof(line), path, iface, status);
+    LOG_INF("%s", line);
 }
 
 static void
@@ -475,7 +486,7 @@ static void on_tick_timer(evutil_socket_t fd, short what, void *arg);
 void
 schedule_next_tick(platform_win_ctx_t *p)
 {
-    mqvpn_interest_t interest;
+    mqvpn_interest_t interest = {.struct_size = sizeof(interest)};
     mqvpn_client_get_interest(p->client, &interest);
 
     int ms = interest.next_timer_ms;
@@ -507,7 +518,8 @@ on_tick_timer(evutil_socket_t fd, short what, void *arg)
 
 /*
  * Read framed packets from the TUN reader thread socketpair.
- * Frame format: [2-byte big-endian length][IP packet payload]
+ * Frame format: [2-byte big-endian length][IP packet payload]; partial
+ * frames are reassembled by mqvpn_tun_win_read across calls.
  */
 static void
 on_tun_read(evutil_socket_t fd, short what, void *arg)
@@ -515,25 +527,13 @@ on_tun_read(evutil_socket_t fd, short what, void *arg)
     (void)fd;
     (void)what;
     platform_win_ctx_t *p = (platform_win_ctx_t *)arg;
-    uint8_t frame[2 + 65536];
 
     for (int i = 0; i < 64; i++) {
-        /* Read length header */
-        int n = recv(p->tun.pipe_rd, (char *)frame, 2, MSG_PEEK);
-        if (n < 2) break;
+        const uint8_t *pkt = NULL;
+        int n = mqvpn_tun_win_read(&p->tun, &pkt);
+        if (n <= 0) break;
 
-        uint16_t pkt_len = ((uint16_t)frame[0] << 8) | frame[1];
-        if (pkt_len == 0 || pkt_len > 65535) {
-            /* Drain bad frame header */
-            recv(p->tun.pipe_rd, (char *)frame, 2, 0);
-            continue;
-        }
-
-        int total = 2 + pkt_len;
-        n = recv(p->tun.pipe_rd, (char *)frame, total, 0);
-        if (n < total) break;
-
-        int ret = mqvpn_client_on_tun_packet(p->client, frame + 2, pkt_len);
+        int ret = mqvpn_client_on_tun_packet(p->client, pkt, (size_t)n);
         if (ret == MQVPN_ERR_AGAIN) {
             event_del(p->ev_tun);
             break;
@@ -615,8 +615,11 @@ console_ctrl_handler(DWORD ctrl_type)
          * from another thread, and on_shutdown_wake does the real work
          * in-loop. All mutable shutdown state (shutting_down, the log line)
          * is written on the loop thread only. */
-        platform_win_ctx_t *p = g_signal_ctx;
+        InterlockedIncrement(&g_ctrl_inflight);
+        platform_win_ctx_t *p = (platform_win_ctx_t *)InterlockedCompareExchangePointer(
+            &g_signal_ctx, NULL, NULL);
         if (p) (void)send((SOCKET)p->wake_pair[1], "q", 1, 0);
+        InterlockedDecrement(&g_ctrl_inflight);
         return TRUE;
     }
     return FALSE;
@@ -852,6 +855,7 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
         bopts.struct_size = sizeof(bopts);
         bopts.socket_buf_bytes = 0;
         snprintf(bopts.tag, sizeof(bopts.tag), "%s", s->iface[0] ? s->iface : "path");
+        bopts.dont_fragment = mqvpn_client_pmtud_enabled(ctx.client);
         void *tctx = NULL;
         if (mqvpn_bind_winsock_path_new(s->sock, &bopts, &tctx) != MQVPN_OK) {
             LOG_ERR("path[%d] transport setup failed", i);
@@ -860,8 +864,10 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
 
         mqvpn_path_desc_t desc;
         platform_path_fill_desc(&ctx, s, &desc);
+        ctx.adding_iface = s->iface;
         s->handle = mqvpn_client_add_path(ctx.client, &desc,
                                           mqvpn_bind_winsock_path_ops(), tctx, NULL);
+        ctx.adding_iface = NULL;
         if (s->handle < 0) {
             LOG_ERR("failed to register path %d with library", i);
             mqvpn_bind_winsock_path_free(tctx); /* add failed: still ours */
@@ -887,11 +893,25 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     ctx.ev_wake =
         event_new(ctx.eb, ctx.wake_pair[0], EV_READ | EV_PERSIST, on_shutdown_wake, &ctx);
     event_add(ctx.ev_wake, NULL);
-    g_signal_ctx = &ctx;
+    InterlockedExchangePointer(&g_signal_ctx, &ctx);
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
     /* Tick timer */
     ctx.ev_tick = event_new(ctx.eb, -1, 0, on_tick_timer, &ctx);
+
+    /* NRPT rules a crashed mqvpn left behind would send every DNS query to
+     * servers that are no longer reachable: remove them before anything
+     * else touches DNS. */
+    win_dns_flush_stale_nrpt();
+
+    /* Kill switch base set BEFORE the first connect, now that the server
+     * address is known: blocking only from tunnel-up left every byte sent
+     * during the handshake (and any later reconnect) unprotected. The TUN
+     * permit is added when the adapter comes up. */
+    if (win_setup_killswitch(&ctx) < 0) {
+        LOG_ERR("killswitch setup failed, aborting");
+        goto cleanup;
+    }
 
     /* Connect */
     if (mqvpn_client_connect(ctx.client) != MQVPN_OK) {
@@ -907,10 +927,16 @@ win_platform_run_client(const mqvpn_client_cfg_t *cfg)
     rc = ctx.fatal_error ? 1 : 0;
     if (ctx.fatal_error == PLATFORM_FATAL_PATH_RELEASE)
         LOG_ERR("exiting: path release refused by the library");
+    else if (ctx.fatal_error == PLATFORM_FATAL_CLOSED)
+        LOG_ERR("exiting: connection closed");
 
 cleanup:
     SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
-    g_signal_ctx = NULL;
+    InterlockedExchangePointer(&g_signal_ctx, NULL);
+    /* A handler that read the pointer before it was cleared may still be in
+     * its send(): wait it out before the wake socket closes below. */
+    while (InterlockedCompareExchange(&g_ctrl_inflight, 0, 0) != 0)
+        Sleep(1);
 
     /* Library teardown FIRST, while every callback-owned platform object is
      * still alive — mirror of the Linux cleanup (platform_linux.c): the

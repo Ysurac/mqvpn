@@ -14,13 +14,15 @@
 #   --tests-only      Skip build, run tests only  
 #   --help            Show this help
 #
-# Requires: root, cmake, ninja-build, gcc, openssl, libevent-dev, iproute2, netcat
+# Requires: root, cmake, gcc, openssl, libevent-dev, iproute2, netcat
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-BUILD_DIR="${REPO_ROOT}/build"
+# Debug build, separate from build.sh's Release build/ (test results are only
+# claimed from Debug or sanitizer builds); same dir as the CMake preset.
+BUILD_DIR="${REPO_ROOT}/build-debug"
 WORK_DIR="${REPO_ROOT}/.test-work"
 
 # Colors for output
@@ -100,19 +102,17 @@ if [ "$TESTS_ONLY" -ne 1 ]; then
         log_info "Using existing build directory at $BUILD_DIR"
     else
         log_info "Creating build directory..."
-        mkdir -p "$BUILD_DIR"
-        cd "$BUILD_DIR"
-
         log_info "Running cmake..."
-        cmake -DCMAKE_BUILD_TYPE=Release .. || die "cmake failed"
+        # XQUIC_BUILD_DIR must be absolute (a relative one links the wrong
+        # libxquic.so); without it CMake tries to build xquic from source.
+        cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug \
+            -DXQUIC_BUILD_DIR="$REPO_ROOT/third_party/xquic/build" || die "cmake failed"
 
         log_info "Building mqvpn and test binaries..."
-        make -j"$(nproc)" \
+        cmake --build "$BUILD_DIR" -j"$(nproc)" --target \
             test_server test_pending_path test_path_readd_reconnect test_cc_config \
             mqvpn \
             || die "build failed"
-
-        cd "$REPO_ROOT"
     fi
 
     if [ ! -f "$BUILD_DIR/tests/test_server" ]; then

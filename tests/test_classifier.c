@@ -212,6 +212,44 @@ test_classify_v4_tcp_gates(void)
                   "v4 tcp disabled+stream -> raw");
 }
 
+/* v4 address classes lwIP drops before any pcb (multicast/broadcast on
+ * either side) stay RAW, so they never park a PENDING_ACCEPT slot. */
+static void
+test_classify_v4_address_class_ineligible(void)
+{
+    uint8_t buf[64];
+    mqvpn_flow_key_t k;
+    mqvpn_hybrid_config_t pol = make_pol(1, MQVPN_HYBRID_TCP_STREAM);
+    static const uint8_t cases[][4] = {
+        {224, 0, 0, 1}, {239, 255, 255, 250}, {255, 255, 255, 255}};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t n = build_v4_tcp(buf, 2222, 80, 0);
+        memcpy(buf + 16, cases[i], 4); /* dst */
+        ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                      "v4 tcp mcast/bcast dst -> raw");
+        n = build_v4_tcp(buf, 2222, 80, 0);
+        memcpy(buf + 12, cases[i], 4); /* src */
+        ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_RAW,
+                      "v4 tcp mcast/bcast src -> raw");
+    }
+    /* Just outside: 223.255.255.255 dst, 240.0.0.1 dst stay eligible (the
+     * class-E range is not a lwIP drop site). */
+    size_t n = build_v4_tcp(buf, 2222, 80, 0);
+    buf[16] = 223;
+    buf[17] = 255;
+    buf[18] = 255;
+    buf[19] = 255;
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v4 tcp 223.255.255.255 dst -> tcp");
+    n = build_v4_tcp(buf, 2222, 80, 0);
+    buf[16] = 240;
+    buf[17] = 0;
+    buf[18] = 0;
+    buf[19] = 1;
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(buf, n, &pol, &k), MQVPN_LANE_TCP,
+                  "v4 tcp 240.0.0.1 dst -> tcp");
+}
+
 static void
 test_classify_tunnel_subnet_tcp_raw(void)
 {
@@ -783,6 +821,7 @@ main(void)
 {
     test_classify_udp_always_dgram();
     test_classify_v4_tcp_gates();
+    test_classify_v4_address_class_ineligible();
     test_classify_tunnel_subnet_tcp_raw();
     test_tunnel_subnet_learn();
     test_tunnel_prefix6_effective();

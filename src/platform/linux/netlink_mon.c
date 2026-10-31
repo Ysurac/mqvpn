@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/if.h>
@@ -92,7 +93,7 @@ int
 netmon_platform_pre_scan(platform_ctx_t *p)
 {
     (void)p;
-    return 0; /* netlink signals overflow (ENOBUFS); no timer-driven resync */
+    return 0; /* netlink signals overflow (ENOBUFS, netlink_resync); no timer resync */
 }
 
 /* ================================================================
@@ -326,15 +327,81 @@ handle_rtm_newlink(platform_ctx_t *p, struct nlmsghdr *nh)
     netmon_try_reactivate_by_ifname(p, ifname);
 }
 
+/* Admin state of `ifname`: 1 up, 0 down, -1 unknown (gone or ioctl failed). */
+static int
+iface_admin_up(const char *ifname)
+{
+    int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+    int ret = -1;
+    if (ioctl(s, SIOCGIFFLAGS, &ifr) == 0) ret = (ifr.ifr_flags & IFF_UP) ? 1 : 0;
+    close(s);
+    return ret;
+}
+
+/* 1 when the interface's RFC 2863 operational state is a definite down
+ * (the same IF_OPER_DOWN / IF_OPER_LOWERLAYERDOWN gate as is_carrier_loss),
+ * 0 otherwise or when unknown. */
+static int
+iface_oper_down(const char *ifname)
+{
+    char path[64 + IFNAMSIZ], state[32] = "";
+    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", ifname);
+    FILE *fp = fopen(path, "re");
+    if (!fp) return 0;
+    if (!fgets(state, sizeof(state), fp)) state[0] = '\0';
+    fclose(fp);
+    state[strcspn(state, "\n")] = '\0';
+    return strcmp(state, "down") == 0 || strcmp(state, "lowerlayerdown") == 0;
+}
+
+/* The kernel dropped netlink events (ENOBUFS: socket buffer overrun under an
+ * event storm). Any link or address change in between is lost, and a
+ * missed down would leave a path sending into a dead link. Reconcile every
+ * tracked interface with its current state, the way the lost events would
+ * have: gone, admin down, carrier lost, address gone. Paths that should
+ * come back are re-added by the recovery timer (recover_dropped_paths_cb). */
+static void
+netlink_resync(platform_ctx_t *p)
+{
+    LOG_WRN("netlink: event overflow (ENOBUFS), resyncing path state");
+    for (int i = 0; i < p->n_paths; i++) {
+        const char *ifname = p->paths[i].iface;
+        if (ifname[0] == '\0' || p->paths[i].removed || p->paths[i].fd < 0) continue;
+        if (if_nametoindex(ifname) == 0) {
+            netmon_drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_RTM_DELLINK);
+            continue;
+        }
+        int up = iface_admin_up(ifname);
+        if (up == 0) {
+            netmon_drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_ADMIN_DOWN);
+            continue;
+        }
+        if (up == 1 && iface_oper_down(ifname)) {
+            netmon_drop_paths_by_ifname(p, ifname, MQVPN_PLATFORM_REASON_CARRIER_LOST);
+            continue;
+        }
+        netmon_on_addr_removed(p, ifname, p->server_addr.ss_family);
+    }
+}
+
 static void
 on_netlink_event(evutil_socket_t fd, short what, void *arg)
 {
     (void)what;
     platform_ctx_t *p = (platform_ctx_t *)arg;
     char buf[NETLINK_BUF_SIZE];
+    int overflow = 0;
 
     for (;;) {
         ssize_t len = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (len < 0 && errno == ENOBUFS && !overflow) {
+            overflow = 1; /* events were lost; keep draining what is queued */
+            continue;
+        }
         if (len <= 0) break;
 
         /* NLMSG_NEXT subtracts the *aligned* length, so the cursor can go
@@ -352,6 +419,7 @@ on_netlink_event(evutil_socket_t fd, short what, void *arg)
             }
         }
     }
+    if (overflow) netlink_resync(p);
 
     /* Netlink handlers may have created/dropped paths (queuing frames such
      * as PATH_CHALLENGE inside xquic) — drive the engine and re-arm the

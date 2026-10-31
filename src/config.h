@@ -17,7 +17,7 @@
 #include "libmqvpn.h"          /* for MQVPN_MAX_PATHS, MQVPN_MAX_USERS */
 #include "reorder.h"           /* for embedded mqvpn_reorder_config_t (§16.1 INI) */
 #include "hybrid/classifier.h" /* for embedded mqvpn_hybrid_config_t ([Hybrid]) */
-#include "mqvpn_path_label.h"  /* for MQVPN_PATH_LABEL_IFACE_MAX (path_policy.iface cap) */
+#include "mqvpn_path_label.h" /* for MQVPN_PATH_LABEL_IFACE_MAX (path_policy.iface cap) */
 
 #define MQVPN_CONFIG_MAX_PATHS 8
 #define MQVPN_CONFIG_MAX_DNS   4
@@ -35,11 +35,11 @@ _Static_assert(MQVPN_CONFIG_MAX_PATH_POLICY == MQVPN_MAX_PATH_POLICY,
                "Config path_policy cap must equal library cap (libmqvpn.h)");
 
 typedef struct {
-    char     user[64];                              /* matches user_names[][64] */
-    char     iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
-    int      has_weight;
+    char user[64]; /* matches user_names[][64] */
+    char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1];
+    int has_weight;
     uint32_t weight;
-    int      has_dscp_mask;
+    int has_dscp_mask;
     uint64_t dscp_mask;
 } mqvpn_path_policy_t;
 
@@ -76,11 +76,13 @@ typedef struct mqvpn_file_config_s {
     char server_auth_key[256];
     char user_names[MQVPN_CONFIG_MAX_USERS][64];
     char user_keys[MQVPN_CONFIG_MAX_USERS][256];
-    char user_fixed_ips[MQVPN_CONFIG_MAX_USERS][20]; /* "" = dynamic, "x.x.x.x" = pinned */
+    char user_fixed_ips[MQVPN_CONFIG_MAX_USERS]
+                       [20]; /* "" = dynamic, "x.x.x.x" = pinned */
     int n_users;
     int max_clients;
+    int max_sessions_per_user; /* [Auth] MaxSessionsPerUser; 0 = unlimited */
 
-    /* [Control] — server */
+    /* [Control] — client and server */
     char control_listen[280]; /* "addr:port" — empty string when control API disabled */
 
     /* [Multipath] */
@@ -89,10 +91,12 @@ typedef struct mqvpn_file_config_s {
     char backup_paths[MQVPN_CONFIG_MAX_PATHS][32]; /* failover-only interfaces */
     int n_backup_paths;
     char scheduler[16];
-    int reinjection_control; /* 1=enable reinjection, 0=off */
-    char reinjection_mode[16]; /* default|deadline|dgram */
-    int fec_enable; /* 1=enable FEC, 0=off */
-    char fec_scheme[32]; /* galois_calculation|packet_mask|reed_solomon|xor */
+    int reinjection_control;      /* 1=enable reinjection, 0=off */
+    char reinjection_mode[16];    /* default|deadline|dgram */
+    int fec_enable;               /* 1=enable FEC, 0=off */
+    char fec_scheme[32];          /* galois_calculation|packet_mask|reed_solomon|xor */
+    int allow_client_scheduler;   /* server */
+    int request_server_scheduler; /* client */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
     /* Server-only: auto-adopt the client's self-announced PATH_LABEL
@@ -115,10 +119,13 @@ typedef struct mqvpn_file_config_s {
     mqvpn_path_policy_t path_policy[MQVPN_CONFIG_MAX_PATH_POLICY];
     int n_path_policy;
 
-    char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
+    char reinjection[16];                    /* "off" | "deadline" | "idle" */
     int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */
     int reinjection_hard_deadline_ms;        /* deadline mode only; [1,60000] */
     int reinjection_deadline_lower_bound_ms; /* deadline mode only; [1,60000] */
+    int redundant;                           /* client: send UDP on every path */
+    char redundant_ports[256];               /* "4200,9000"; empty = all UDP */
+    int redundant_ports_err;                 /* 1 = RedundantPorts invalid */
 
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;
@@ -130,15 +137,19 @@ typedef struct mqvpn_file_config_s {
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
     int reconnect_interval; /* base interval in seconds (default 5) */
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
-    int route_via_server;   /* 1=default via server tunnel IP, 0=0/1+128/1 trick (default) */
+    int route_via_server;   /* 1=default via server tunnel IP, 0=0/1+128/1 trick (default)
+                             */
     int no_routes;          /* 1=skip automatic route setup entirely, 0=auto (default) */
-    int manage_routes;      /* 1=manage host routes (default), 0=skip routing table setup */
+    int manage_routes;      /* 1=manage host routes (default), 0=same as no_routes=1 */
 
-    /* [Control] — server */
-    int control_port;           /* TCP port for JSON control API (0 = disabled) */
-    char control_addr[64];      /* bind address for control API (default "127.0.0.1") */
+    /* [Control] Port / Addr — client and server (see
+     * mqvpn_resolve_control_endpoint_ex for the merge with Listen) */
+    int control_port;      /* TCP port for JSON control API (0 = disabled) */
+    char control_addr[64]; /* bind address for control API (default "127.0.0.1") */
 
-    int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+    int tun_mtu;  /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+    int path_mtu; /* [Interface] PathMTU — 0=default packet size */
+    int pmtud;    /* [Interface] PMTUD — discover the path MTU, PathMTU is the cap */
 
     /* [Reorder] / repeated [ReorderRule] — flow-aware reorder shim (§16.1).
      * Seeded with mqvpn_reorder_config_default() in mqvpn_config_defaults(). */
@@ -165,6 +176,14 @@ typedef struct mqvpn_file_config_s {
      * the library ABI. */
     int udp_gro;
 
+    /* [Advanced] TunOffload — Linux TUN with the virtio header and TSO/USO
+     * reads; 1 (default) = use it when the kernel accepts it, 0 = plain TUN.
+     * TunGro — coalesce TCP and UDP written to that TUN; no effect when
+     * tun_offload is 0. Both apply to client and server and stay
+     * platform-side. */
+    int tun_offload;
+    int tun_gro;
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_file_config_t;
@@ -177,6 +196,9 @@ int mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
 
 /* Parse JSON text into CLI cfg. Returns 0 on success, -1 on error. */
 int mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
+
+/* Parse HOST:PORT / [HOST]:PORT without truncation; port must be 1..65535. */
+int mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *port);
 
 /*
  * Resolve the effective control-API endpoint by merging INI/JSON config
@@ -199,5 +221,18 @@ int mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr
                                    int cli_port, int cli_port_set, char *addr_buf,
                                    size_t addr_buf_len, const char **out_addr,
                                    int *out_port);
+
+/*
+ * Same, with the separate [Control] Addr / Port keys (control_addr /
+ * control_port in JSON) as well. Precedence per field, lowest first:
+ * [Control] Listen, then [Control] Addr / Port (when set: non-empty /
+ * > 0), then --control-addr / --control-port. Used for both client and
+ * server mode.
+ */
+int mqvpn_resolve_control_endpoint_ex(const char *file_listen, const char *file_addr,
+                                      int file_port, const char *cli_addr, int cli_port,
+                                      int cli_port_set, char *addr_buf,
+                                      size_t addr_buf_len, const char **out_addr,
+                                      int *out_port);
 
 #endif /* MQVPN_CONFIG_H */

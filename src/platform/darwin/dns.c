@@ -43,6 +43,15 @@
 #include <errno.h>
 #include <arpa/inet.h>
 
+/* This runs as root: exec networksetup(8) by absolute path, never through the
+ * caller's PATH. The PATH-stub unit tests (tests/fake_cmd.h) build with
+ * MQVPN_DARWIN_EXEC_VIA_PATH so their fakes are found through PATH. */
+#ifdef MQVPN_DARWIN_EXEC_VIA_PATH
+#  define MQVPN_NETWORKSETUP_BIN "networksetup"
+#else
+#  define MQVPN_NETWORKSETUP_BIN "/usr/sbin/networksetup"
+#endif
+
 /* Service names as reported by `networksetup -listallnetworkservices`. */
 #define MQVPN_DNS_SVC_MAX 128
 /* `-listallnetworkservices` output capture (one name per line). */
@@ -85,7 +94,7 @@ run_networksetup(const char *const argv[])
          * can be a dead pipe, and networksetup(8) writing diagnostics
          * there must get EPIPE, not die before restoring DNS — same
          * rationale as routing.c's run_route_cmd. */
-        execvp("networksetup", (char *const *)argv);
+        execvp(MQVPN_NETWORKSETUP_BIN, (char *const *)argv);
         _exit(127);
     }
     int status = 0;
@@ -112,7 +121,7 @@ run_networksetup_capture(const char *const argv[], char *out, size_t outlen)
         if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
         close(fds[1]);
         /* SIGPIPE stays SIG_IGN (inherited) — see run_networksetup. */
-        execvp("networksetup", (char *const *)argv);
+        execvp(MQVPN_NETWORKSETUP_BIN, (char *const *)argv);
         _exit(127);
     }
 
@@ -795,6 +804,18 @@ int
 mqvpn_dns_apply(mqvpn_dns_t *dns)
 {
     if (dns->n_servers == 0) return 0; /* nothing to do */
+
+    /* Only IP literals become networksetup arguments: a configured value
+     * like "Empty" or "-foo" would be read as a keyword or an option. */
+    for (int i = 0; i < dns->n_servers; i++) {
+        unsigned char scratch[sizeof(struct in6_addr)];
+        if (inet_pton(AF_INET, dns->servers[i], scratch) != 1 &&
+            inet_pton(AF_INET6, dns->servers[i], scratch) != 1) {
+            LOG_ERR("dns: '%s' is not an IP address; not applying the DNS override",
+                    dns->servers[i]);
+            return -1;
+        }
+    }
 
     /* Step 1: exclusive lock, protecting against a second mqvpn instance
      * destroying our backup (or us destroying its backup). Reuses an

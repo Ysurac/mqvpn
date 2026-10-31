@@ -45,6 +45,84 @@ icmpv6_checksum(const uint8_t *src6, const uint8_t *dst6, const uint8_t *icmp,
     return ~(uint16_t)cksum;
 }
 
+/* ─── Error eligibility (RFC 1122 §3.2.2, RFC 4443 §2.4(e)) ─── */
+
+int
+mqvpn_icmp_error_allowed_v4(const uint8_t *orig, size_t orig_len)
+{
+    if (!orig || orig_len < IPV4_MIN_HDR) return 0;
+    size_t ihl = (size_t)(orig[0] & 0x0F) * 4;
+    if (ihl < IPV4_MIN_HDR || ihl > orig_len) return 0;
+
+    /* Not about a non-first fragment: it carries no transport header. */
+    if ((((uint16_t)orig[6] << 8 | orig[7]) & 0x1FFF) != 0) return 0;
+
+    /* Not to a multicast or limited-broadcast destination. */
+    const uint8_t *dst = orig + 16;
+    if ((dst[0] & 0xF0) == 0xE0) return 0;
+    if (dst[0] == 255 && dst[1] == 255 && dst[2] == 255 && dst[3] == 255) return 0;
+
+    /* Not when the source does not name a single host: zero, loopback,
+     * multicast or class E (which includes 255.255.255.255). */
+    const uint8_t *src = orig + 12;
+    if (src[0] == 0 && src[1] == 0 && src[2] == 0 && src[3] == 0) return 0;
+    if (src[0] == 127 || (src[0] & 0xE0) == 0xE0) return 0;
+
+    /* Not about an ICMP error message (an informational one is fine). A
+     * datagram too short to show its ICMP type is treated as an error. */
+    if (orig[9] == 1) {
+        if (orig_len <= ihl) return 0;
+        uint8_t t = orig[ihl];
+        if (t == 3 || t == 4 || t == 5 || t == 11 || t == 12) return 0;
+    }
+    return 1;
+}
+
+int
+mqvpn_icmp_error_allowed_v6(const uint8_t *orig, size_t orig_len, uint8_t type,
+                            uint8_t code)
+{
+    if (!orig || orig_len < IPV6_MIN_HDR) return 0;
+
+    /* Not when the source does not name a single node: unspecified (::) or
+     * multicast. */
+    const uint8_t *src = orig + 8;
+    static const uint8_t zero16[16] = {0};
+    if (memcmp(src, zero16, 16) == 0 || src[0] == 0xFF) return 0;
+
+    /* Not to a multicast destination, except Packet Too Big and Parameter
+     * Problem code 2 (RFC 4443 §2.4(e.3)). */
+    if (orig[24] == 0xFF && !(type == 2 || (type == 4 && code == 2))) return 0;
+
+    /* Walk the extension headers we can see: no error about a non-first
+     * fragment, nor about an ICMPv6 error message (types below 128). A walk
+     * that runs off the captured bytes cannot tell, and allows the error. */
+    uint8_t nh = orig[6];
+    size_t off = IPV6_MIN_HDR;
+    for (int i = 0; i < 8; i++) {
+        if (nh == 58) {
+            if (off < orig_len && orig[off] < 128) return 0;
+            return 1;
+        }
+        if (nh == 44) { /* Fragment */
+            if (off + 8 > orig_len) return 1;
+            if ((((uint16_t)orig[off + 2] << 8 | orig[off + 3]) & 0xFFF8) != 0) return 0;
+            nh = orig[off];
+            off += 8;
+            continue;
+        }
+        if (nh == 0 || nh == 43 || nh == 60) { /* Hop-by-Hop, Routing, Dest Opts */
+            if (off + 2 > orig_len) return 1;
+            size_t hlen = ((size_t)orig[off + 1] + 1) * 8;
+            nh = orig[off];
+            off += hlen;
+            continue;
+        }
+        return 1;
+    }
+    return 1;
+}
+
 /* ─── Public API ─── */
 
 void
@@ -56,6 +134,7 @@ mqvpn_icmp_send_v4(mqvpn_tun_output_fn cb, void *ctx, const uint8_t *src_ip, uin
 
     size_t ihl = (size_t)(orig[0] & 0x0F) * 4;
     if (ihl < IPV4_MIN_HDR || ihl > orig_len) return;
+    if (!mqvpn_icmp_error_allowed_v4(orig, orig_len)) return;
 
     size_t icmp_data_len = ihl + 8;
     if (icmp_data_len > orig_len) icmp_data_len = orig_len;
@@ -111,6 +190,7 @@ mqvpn_icmp_send_v6(mqvpn_tun_output_fn cb, void *ctx, const uint8_t *src_ip6,
 {
     if (!cb || !src_ip6 || !orig) return;
     if (orig_len < IPV6_MIN_HDR) return;
+    if (!mqvpn_icmp_error_allowed_v6(orig, orig_len, type, code)) return;
 
     size_t icmpv6_data_len = orig_len;
     if (IPV6_MIN_HDR + 8 + icmpv6_data_len > IPV6_MIN_MTU)

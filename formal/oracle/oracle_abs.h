@@ -149,8 +149,8 @@ typedef enum {
     OCTX_PERMANENT,
     OCTX_ACTIVE,  /* VALIDATION_OK target */
     OCTX_STANDBY, /* VALIDATION_OK target */
-    OCTX_REACHED, /* STABLE_TICK: (now - since) >= PATH_STABLE_THRESHOLD_US */
-    OCTX_BELOW,   /* STABLE_TICK: below the threshold */
+    OCTX_REACHED, /* STABLE_TICK: now >= since, now - since >= the threshold */
+    OCTX_BELOW,   /* STABLE_TICK: below the threshold, or now < since */
 } oracle_ctx_t;
 
 /* How a timer or the retry counter was updated. KEEP = unchanged,

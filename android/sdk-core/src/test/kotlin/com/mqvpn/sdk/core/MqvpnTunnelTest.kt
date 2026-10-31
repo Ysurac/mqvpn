@@ -3,6 +3,7 @@
 
 package com.mqvpn.sdk.core
 
+import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.ReorderStats
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -37,6 +38,42 @@ class MqvpnTunnelTest {
         // and reaches the handle-0 check: an empty ReorderStats, no JNI.
         val reorder = TestReflection.createDummyTunnel(reorderEnabled = true)
         assertEquals(ReorderStats(), reorder.getReorderStats())
+    }
+
+    private fun applyRedundant(c: MqvpnConfig): Pair<Int?, List<Triple<Long, Boolean, List<Int>>>> {
+        val calls = mutableListOf<Triple<Long, Boolean, List<Int>>>()
+        val rc = MqvpnTunnel.applyRedundant(7L, c) { cfg, en, ports -> calls += Triple(cfg, en, ports.toList()); 0 }
+        return rc to calls
+    }
+
+    @Test
+    fun `applyRedundant sets the ports once when enabled`() {
+        val (rc, calls) = applyRedundant(MqvpnConfig(serverAddress = "h", authKey = "k",
+            redundantEnabled = true, redundantPorts = listOf(4200)))
+        assertEquals(0, rc)
+        assertEquals(listOf(Triple(7L, true, listOf(4200))), calls)
+    }
+
+    @Test
+    fun `applyRedundant with no ports passes an empty array`() {
+        val (_, calls) = applyRedundant(MqvpnConfig(serverAddress = "h", authKey = "k", redundantEnabled = true))
+        assertEquals(listOf(Triple(7L, true, emptyList<Int>())), calls)
+    }
+
+    @Test
+    fun `applyRedundant makes no call when disabled`() {
+        val (rc, calls) = applyRedundant(MqvpnConfig(serverAddress = "h", authKey = "k", redundantPorts = listOf(4200)))
+        assertEquals(null, rc)
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
+    fun `onTunPacket rejects a slice outside the array without JNI`() {
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), -1, 2))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), 0, 0))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), 0, 5))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), 3, 2))
+        assertEquals(MqvpnTunnel.ERR_INVALID_ARG, t.onTunPacket(ByteArray(4), Int.MAX_VALUE, 1))
     }
 
     @Test

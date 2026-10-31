@@ -7,7 +7,11 @@
  * Listens on a TCP port (default: 127.0.0.1 only) and accepts JSON commands.
  * All I/O is driven by the same libevent loop as the VPN — no locking needed.
  *
- * Protocol: one JSON object per connection (newline-terminated or EOF).
+ * Protocol: one JSON object per connection. The first non-whitespace byte
+ * must be '{' (anything else, e.g. an HTTP request, gets
+ * {"ok":false,"error":"invalid request"}); the request ends at the object's
+ * matching '}' (or EOF), and only that object is parsed. The whole exchange
+ * must finish within 5 s of accept.
  * Response: one JSON object followed by a newline, then connection closes.
  *
  * Example:
@@ -21,14 +25,14 @@
 #include "libmqvpn.h"
 
 /* Forward-decl so consumers that only want CTRL_MAX_RESP_BYTES (e.g.
- * tests/test_control_response_bound.c) don't transitively pull libevent
+ * a standalone test or tool) don't transitively pull libevent
  * headers. The control_socket.c implementation itself includes
  * <event2/event.h> directly. */
 struct event_base;
 
 /* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
  * MQVPN_MAX_PATHS=8 produces ~210 KB; round up to 256 KB. The exact bound is
- * verified by tests/test_control_response_bound.c — bump it if either limit
+ * verified by tests/test_control_socket.c — bump it if either limit
  * grows. */
 #define CTRL_MAX_RESP_BYTES (256 * 1024)
 

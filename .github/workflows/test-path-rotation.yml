@@ -23,6 +23,10 @@ on:
       - '.github/workflows/test-path-rotation.yml'
   workflow_dispatch:
 
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   test-path-rotation:
     name: Build and run test_path_rotation

@@ -21,9 +21,31 @@
 
 #include "libmqvpn.h"
 #include "mqvpn_bind_posix.h"
-#include "hybrid/tcp_egress.h"
 #include "mqvpn_conn_settings.h"
 #include "mqvpn_internal.h"
+
+#include <stddef.h>
+#include <sys/types.h>
+#include <xquic/xqc_http3.h>
+#include <xquic/xquic.h>
+
+/* Re-entrancy injection. This TU #include's src/hybrid/tcp_egress.c (below)
+ * with the file's two xquic-send hooks redirected here, so a test can make
+ * a send behave like one that ran the engine and delivered a teardown for
+ * the flow being served. Every non-static symbol of tcp_egress.c is then
+ * defined in this TU, so the linker never pulls mqvpn_lib's own
+ * tcp_egress.o (archive members are only pulled to resolve undefined
+ * symbols) — one definition, no duplicates. The probe client calls xquic
+ * directly and is unaffected by the hooks. */
+static ssize_t test_hook_send_headers(xqc_h3_request_t *req, xqc_http_headers_t *hdrs,
+                                      uint8_t fin);
+static ssize_t test_hook_send_body(xqc_h3_request_t *req, unsigned char *data, size_t len,
+                                   uint8_t fin);
+#define MQVPN_TCP_EGRESS_H3_SEND_HEADERS(req, hdrs, fin) \
+    test_hook_send_headers((req), (hdrs), (fin))
+#define MQVPN_TCP_EGRESS_H3_SEND_BODY(req, data, len, fin) \
+    test_hook_send_body((req), (data), (len), (fin))
+#include "hybrid/tcp_egress.c"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -41,6 +63,90 @@
 
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic.h>
+
+/* ── Re-entrant teardown injection (see the #include above) ──
+ *
+ * When armed, the next server-side send of the armed kind first runs
+ * svr_tcp_egress_flow_destroy on the server's (single) live flow — exactly
+ * what a closing/close notify delivered by an engine run inside the send
+ * does — and then performs the real send. The flow being served by the
+ * outer frame is therefore torn down underneath it, as in production. */
+static mqvpn_server_t *g_reenter_server;
+static int g_reenter_on_headers; /* fire on the next send_headers */
+static int g_reenter_on_body;    /* fire on the next non-fin send_body */
+static int g_reenter_fired;
+
+static void
+test_reenter_teardown(void)
+{
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(g_reenter_server, &ctx);
+    svr_tcp_egress_flow_t *ef = *ctx.flow_list_head;
+    if (ef) {
+        svr_tcp_egress_flow_destroy(g_reenter_server, ef);
+        g_reenter_fired++;
+    }
+}
+
+static ssize_t
+test_hook_send_headers(xqc_h3_request_t *req, xqc_http_headers_t *hdrs, uint8_t fin)
+{
+    if (g_reenter_on_headers && g_reenter_server) {
+        g_reenter_on_headers = 0;
+        test_reenter_teardown();
+    }
+    return xqc_h3_request_send_headers(req, hdrs, fin);
+}
+
+static ssize_t
+test_hook_send_body(xqc_h3_request_t *req, unsigned char *data, size_t len, uint8_t fin)
+{
+    if (g_reenter_on_body && g_reenter_server && len > 0) {
+        g_reenter_on_body = 0;
+        test_reenter_teardown();
+    }
+    return xqc_h3_request_send_body(req, data, len, fin);
+}
+
+/* Heap bytes currently allocated by this process, or -1 when the allocator
+ * offers no counter (the memory assertions below are then skipped). */
+#if defined(__SANITIZE_ADDRESS__)
+#  define TEST_HEAP_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define TEST_HEAP_ASAN 1
+#  endif
+#endif
+#ifdef TEST_HEAP_ASAN
+#  include <sanitizer/allocator_interface.h>
+static long long
+test_heap_in_use(void)
+{
+    return (long long)__sanitizer_get_current_allocated_bytes();
+}
+#elif defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#  if __GLIBC_PREREQ(2, 33)
+#    include <malloc.h>
+static long long
+test_heap_in_use(void)
+{
+    struct mallinfo2 mi = mallinfo2();
+    return (long long)mi.uordblks;
+}
+#  else
+static long long
+test_heap_in_use(void)
+{
+    return -1;
+}
+#  endif
+#else
+static long long
+test_heap_in_use(void)
+{
+    return -1;
+}
+#endif
 
 /* ── Test infrastructure (mirrors test_server.c) ── */
 
@@ -76,6 +182,11 @@ static int g_tests_passed = 0;
             exit(1);                                                                 \
         }                                                                            \
     } while (0)
+
+/* xquic's process-wide clock, which the mqvpn server engine sets: the probe
+ * engine's timers run on it, so its receive times must too (exported by the
+ * static lib, not part of the public xquic.h). */
+extern xqc_timestamp_pt xqc_monotonic_timestamp;
 
 static uint64_t
 test_now_us(void)
@@ -631,6 +742,10 @@ typedef struct {
                             * probe engine, so nothing the server sends is
                             * ever answered (keeps an H3 stream from ever
                             * finishing its close). */
+    int egress_registers;  /* egress_fd_register callback invocations */
+    int freeze_egress;     /* 1: harness_pump dispatches no egress fd events,
+                            * so a connect-tcp flow stays CONNECTING even
+                            * once its loopback connect() has completed. */
 } harness_t;
 
 /* mqvpn_server_callbacks_t.egress_fd_register implementation: records/
@@ -644,6 +759,7 @@ harness_egress_fd_register(int fd, int want_read, int want_write, void *fd_ctx,
                            void *user_ctx)
 {
     harness_t *h = (harness_t *)user_ctx;
+    h->egress_registers++;
     for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
         if (h->egress_fds[i].active && h->egress_fds[i].fd == fd) {
             h->egress_fds[i].fd_ctx = fd_ctx;
@@ -839,7 +955,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
             xqc_engine_packet_process(h->probe.engine, buf, (size_t)n,
                                       (struct sockaddr *)&h->cli_addr,
                                       sizeof(h->cli_addr), (struct sockaddr *)&from,
-                                      from_len, (xqc_usec_t)test_now_us(), NULL);
+                                      from_len, xqc_monotonic_timestamp(), NULL);
         }
 
         /* Egress fd events (connect-tcp connect()/relay I/O the server
@@ -847,7 +963,7 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
          * the reactor's "check what's ready right now" pass, matched by
          * the harness-wide sleep-and-retry loop below for the case where
          * nothing is ready yet. */
-        for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        for (int i = 0; i < HARNESS_MAX_EGRESS_FDS && !h->freeze_egress; i++) {
             if (!h->egress_fds[i].active) continue;
             /* No-interest registration (want_read=0, want_write=0): the
              * server parked the fd (e.g. ACTIVE flow awaiting the relay
@@ -2164,6 +2280,155 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     free(h.probe.raw_recv_buf);
 }
 
+/* Test 4b: a paused flow pushes back on the client instead of buffering.
+ * The sink never reads, so the egress socket fills and the flow pauses
+ * (stops calling recv_body). The server sets xquic's h3
+ * recv_body_buf_high_water (MQVPN_H3_RECV_BODY_HIGH_WATER), so the paused
+ * request stops being read past it: the rest stays in the QUIC stream receive
+ * buffer, no flow-control credit goes back, and the probe's own sends stall.
+ * Without the mark, xquic kept reading into the request's body buffer and
+ * returning credit, so the probe could push all 48 MiB (and server memory
+ * grew with it). Once the sink drains, the flow resumes, the server reads
+ * again, and the whole payload arrives byte-identical, then the SHUT_WR. */
+TEST(mqvpn_tcp_paused_flow_backpressures_client)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    /* Far more than the kernel socket buffers, the stash, the mark and the
+     * QUIC stream window together can absorb. */
+    const size_t payload_len = 48u * 1024u * 1024u;
+    uint8_t *payload = malloc(payload_len);
+    ASSERT_EQ(payload != NULL, 1);
+    for (size_t i = 0; i < payload_len; i++)
+        payload[i] = (uint8_t)((i * 31u + (i >> 16)) & 0xFF);
+
+    /* Phase 1: send until the probe has made no progress for 50 consecutive
+     * pump slices and 1 s of real time, with the sink still not reading. The
+     * heap is sampled once the stall has lasted 10 slices and 200 ms of real
+     * time, so bytes already in flight have landed: on a loaded runner
+     * harness_pump's budget can run ahead of real time (see
+     * idle-timeout-evicts). */
+    size_t off = 0;
+    int idle_slices = 0;
+    uint64_t stall_start_us = 0;
+    long long heap_at_stall = -1;
+    int heap_sampled = 0;
+    for (int i = 0; i < 3000 && off < payload_len &&
+                    (idle_slices < 50 || test_now_us() - stall_start_us < 1000000ull);
+         i++) {
+        size_t before = off;
+        while (off < payload_len) {
+            ssize_t sent = xqc_h3_request_send_body(
+                h.probe.req, (unsigned char *)(payload + off), payload_len - off, 0);
+            if (sent == -XQC_EAGAIN) break;
+            ASSERT_EQ(sent > 0, 1);
+            off += (size_t)sent;
+        }
+        if (off != before) {
+            idle_slices = 0;
+            heap_sampled = 0;
+        } else if (idle_slices++ == 0) {
+            stall_start_us = test_now_us();
+        }
+        if (!heap_sampled && idle_slices >= 10 &&
+            test_now_us() - stall_start_us >= 200000ull) {
+            heap_at_stall = test_heap_in_use();
+            heap_sampled = 1;
+        }
+        tcp_sink_pump(&sink);
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    /* THE ASSERTION: the client was flow-controlled well short of the
+     * payload, and stayed stalled while the target was not reading. */
+    if (off >= payload_len || idle_slices < 50) {
+        printf("FAIL\n    %s:%d: probe pushed %zu of %zu bytes into a paused flow "
+               "(stalled slices: %d) — no backpressure\n",
+               __FILE__, __LINE__, off, payload_len, idle_slices);
+        exit(1);
+    }
+    /* Nothing kept piling up on the server while stalled. */
+    long long heap_end = test_heap_in_use();
+    if (heap_at_stall >= 0 && heap_end - heap_at_stall > (1 << 20)) {
+        printf("FAIL\n    %s:%d: heap grew by %lld bytes while the flow was paused\n",
+               __FILE__, __LINE__, heap_end - heap_at_stall);
+        exit(1);
+    }
+    printf("[stalled after %zu bytes] ", off);
+
+    /* Phase 2: drain the sink while sending the rest and the fin. */
+    uint8_t *received = malloc(payload_len);
+    ASSERT_EQ(received != NULL, 1);
+    size_t received_len = 0;
+    int fin_sent = 0;
+    for (int i = 0; i < 20000 && received_len < payload_len; i++) {
+        while (off < payload_len) {
+            ssize_t sent = xqc_h3_request_send_body(
+                h.probe.req, (unsigned char *)(payload + off), payload_len - off, 0);
+            if (sent == -XQC_EAGAIN) break;
+            ASSERT_EQ(sent > 0, 1);
+            off += (size_t)sent;
+        }
+        if (off == payload_len && !fin_sent) {
+            ssize_t sent = xqc_h3_request_send_body(h.probe.req, NULL, 0, 1);
+            if (sent >= 0)
+                fin_sent = 1;
+            else
+                ASSERT_EQ(sent, -XQC_EAGAIN);
+        }
+        tcp_sink_pump(&sink);
+        if (sink.conn_fd >= 0) {
+            uint8_t buf[65536];
+            ssize_t n;
+            while ((n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+                if (received_len + (size_t)n <= payload_len)
+                    memcpy(received + received_len, buf, (size_t)n);
+                received_len += (size_t)n;
+            }
+        }
+        int never = 0;
+        harness_pump(&h, &never, 2);
+    }
+    ASSERT_EQ(fin_sent, 1);
+    ASSERT_EQ(received_len, payload_len);
+    ASSERT_EQ(memcmp(received, payload, payload_len), 0);
+
+    int shutdown_seen = 0;
+    for (int i = 0; i < 500 && !shutdown_seen; i++) {
+        uint8_t buf[4096];
+        ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n == 0) shutdown_seen = 1;
+        if (!shutdown_seen) {
+            int never = 0;
+            harness_pump(&h, &never, 20);
+        }
+    }
+    ASSERT_EQ(shutdown_seen, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(payload);
+    free(received);
+    free(h.probe.raw_recv_buf);
+}
+
 /* 1 if any egress fd the server registered currently asks for writable
  * events — tcp_egress.c only does that for a downlink-paused ACTIVE flow
  * (svr_tcp_egress_update_fd_interest), so this is the harness-visible
@@ -2408,7 +2673,7 @@ TEST(mqvpn_tcp_active_idle_timeout_evicts)
      * in intended poll-timeout ms (elapsed += wait_ms), which decouples from
      * real time whenever poll returns early — exactly what QUIC-timer churn
      * on a loaded sanitizer-CI runner produces. The idle sweep is gated on
-     * real gettimeofday time (svr_now_us), so this wait must be too, or the
+     * real time (svr_now_us), so this wait must be too, or the
      * iteration budget can expire in <1s of real time and the sweep never
      * fires. 4s real ceiling: a working sweep fires ~1s in; a broken one is
      * still bounded so the suite can't hang. */
@@ -2631,7 +2896,7 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
      * subject to the very stream-data flow control that's stuck full here,
      * so it isn't blocked by the probe's own non-draining). */
     /* Real-wall-clock bound, not iteration count — the idle sweep fires on
-     * real gettimeofday time, while harness_pump's budget accounting can run
+     * real time (svr_now_us), while harness_pump's budget accounting can run
      * ahead of real time under CI poll churn (see idle-timeout-evicts). */
     int sink_eof = 0;
     uint64_t wait_start_us = test_now_us();
@@ -2654,6 +2919,301 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
 }
 
 /* ── svr_tcp_egress_errno_to_status — pure function ── */
+
+/* Live-flow helpers for the tests below (this TU includes tcp_egress.c). */
+static svr_tcp_egress_flow_t *
+harness_first_flow(harness_t *h)
+{
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(h->svr, &ctx);
+    return *ctx.flow_list_head;
+}
+
+static int
+harness_global_flow_count(harness_t *h)
+{
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(h->svr, &ctx);
+    return *ctx.global_fd_count;
+}
+
+/* Pump until the server has a flow for the probe's request (CONNECTING with
+ * egress frozen). Returns it, or NULL on timeout. */
+static svr_tcp_egress_flow_t *
+harness_wait_flow(harness_t *h)
+{
+    for (int i = 0; i < 500; i++) {
+        svr_tcp_egress_flow_t *ef = harness_first_flow(h);
+        if (ef) return ef;
+        int never = 0;
+        harness_pump(h, &never, 20);
+    }
+    return NULL;
+}
+
+/* A request rejected at header time (here 400, malformed :path) gets no
+ * flow, and its body used to be left unread: xquic's h3 layer moves every
+ * DATA byte into the request's body_buf and returns the flow-control credit
+ * at once, so a peer streaming into the rejected request grew server memory
+ * without bound for as long as it kept the stream open. The server now
+ * discards it. Observable: heap growth while 4 MiB more is streamed (after
+ * a 4 MiB warm-up that settles both engines' packet pools) stays far below
+ * 4 MiB. */
+TEST(mqvpn_tcp_rejected_request_body_is_discarded)
+{
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, NULL), 0);
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0); /* "/probe" -> 400 */
+    harness_pump(&h, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "400");
+
+    static uint8_t junk[1 << 20];
+    memset(junk, 0xa5, sizeof(junk));
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(probe_send_body_retry(&h, &h.probe, junk, sizeof(junk), 2000), 0);
+    int never = 0;
+    harness_pump(&h, &never, 300);
+
+    long long before = test_heap_in_use();
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(probe_send_body_retry(&h, &h.probe, junk, sizeof(junk), 2000), 0);
+    /* The heap counts both engines: until the server has read and ACKed the
+     * last bytes, the probe still holds them. Pump until it is back near the
+     * baseline, on real time (harness_pump's budget can run ahead of it on a
+     * loaded runner); a server that keeps the body never gets there. */
+    long long after = test_heap_in_use();
+    uint64_t settle_start_us = test_now_us();
+    while (before >= 0 && after - before > (1 << 20) &&
+           test_now_us() - settle_start_us < 5000000ull) {
+        harness_pump(&h, &never, 20);
+        after = test_heap_in_use();
+    }
+    if (before >= 0 && after - before > (1 << 20)) {
+        printf("FAIL\n    %s:%d: heap grew by %lld bytes while streaming 4 MiB into "
+               "a rejected request\n",
+               __FILE__, __LINE__, after - before);
+        exit(1);
+    }
+    ASSERT_EQ(harness_global_flow_count(&h), 0);
+    harness_stop(&h);
+}
+
+/* Body received while the flow is still CONNECTING is held by the server
+ * (bounded) instead of being left in xquic, and is relayed to the target
+ * first once the connect completes — byte-exact, in order. */
+TEST(mqvpn_tcp_connecting_body_relayed_after_connect)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    h.freeze_egress = 1;
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    svr_tcp_egress_flow_t *ef = harness_wait_flow(&h);
+    ASSERT_EQ(ef != NULL, 1);
+    if (ef->state != EGRESS_FLOW_CONNECTING) {
+        /* loopback connect() completed synchronously — no CONNECTING
+         * window to test on this host */
+        h.freeze_egress = 0;
+        harness_stop(&h);
+        tcp_sink_close(&sink);
+        free(h.probe.raw_recv_buf);
+        return;
+    }
+
+    static uint8_t early[48 * 1024];
+    for (size_t i = 0; i < sizeof(early); i++)
+        early[i] = (uint8_t)(i * 7 + 3);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, early, sizeof(early), 500), 0);
+    int never = 0;
+    harness_pump_with_sink(&h, &sink, &never, 200);
+    ef = harness_first_flow(&h);
+    ASSERT_EQ(ef != NULL, 1);
+    ASSERT_EQ(ef->state, EGRESS_FLOW_CONNECTING);
+    ASSERT_EQ(ef->downlink_stash_len, sizeof(early));
+
+    h.freeze_egress = 0;
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_STREQ(h.probe.status, "200");
+    for (int i = 0; i < 500 && h.probe.raw_recv_len < sizeof(early); i++)
+        harness_pump_with_sink(&h, &sink, &never, 20);
+    ASSERT_EQ(h.probe.raw_recv_len, sizeof(early));
+    ASSERT_EQ(memcmp(h.probe.raw_recv_buf, early, sizeof(early)), 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* More than TCP_EGRESS_CONNECTING_BODY_CAP of body before the connect
+ * completes: the flow is reset instead of buffering without bound. */
+TEST(mqvpn_tcp_connecting_body_over_cap_resets)
+{
+    int target_port = 0;
+    int listen_fd = open_loopback_listener(&target_port);
+    ASSERT_EQ(listen_fd >= 0, 1);
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", target_port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    h.freeze_egress = 1;
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    svr_tcp_egress_flow_t *ef = harness_wait_flow(&h);
+    ASSERT_EQ(ef != NULL, 1);
+    if (ef->state != EGRESS_FLOW_CONNECTING) {
+        h.freeze_egress = 0;
+        harness_stop(&h);
+        close(listen_fd);
+        return;
+    }
+
+    static uint8_t junk[TCP_EGRESS_CONNECTING_BODY_CAP + 64 * 1024];
+    memset(junk, 0x5a, sizeof(junk));
+    /* The send may fail part-way once the server's reset lands. */
+    (void)probe_send_body_retry(&h, &h.probe, junk, sizeof(junk), 500);
+    harness_pump(&h, &h.probe.request_closed, 5000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(h.probe.response_done, 0); /* reset, no :status */
+    ASSERT_EQ(harness_first_flow(&h) == NULL, 1);
+    ASSERT_EQ(harness_global_flow_count(&h), 0);
+
+    harness_stop(&h);
+    close(listen_fd);
+}
+
+/* Re-entrancy: the 200 is sent from the fd-ready reactor, outside any
+ * engine callback, so the send can run the engine and deliver a teardown
+ * for this very flow. The hook injects exactly that teardown; the outer
+ * frame (on_connected, then its body drain) must not touch the freed flow
+ * (heap-use-after-free under ASan before the guard). */
+TEST(mqvpn_tcp_reentrant_teardown_during_200)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    g_reenter_server = h.svr;
+    g_reenter_fired = 0;
+    g_reenter_on_headers = 1;
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    g_reenter_on_headers = 0;
+    ASSERT_EQ(g_reenter_fired, 1);
+    ASSERT_EQ(harness_first_flow(&h) == NULL, 1);
+    ASSERT_EQ(harness_global_flow_count(&h), 0);
+
+    g_reenter_server = NULL;
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+}
+
+/* Re-entrancy, uplink direction: relay_ready's send_body runs from the
+ * reactor; a teardown delivered inside it must stop the relay loop. */
+TEST(mqvpn_tcp_reentrant_teardown_during_uplink_send)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    g_reenter_server = h.svr;
+    g_reenter_fired = 0;
+    g_reenter_on_body = 1;
+    const char *msg = "ping";
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)msg, 4, 500), 0);
+    for (int i = 0; i < 250 && !g_reenter_fired; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+    }
+    g_reenter_on_body = 0;
+    ASSERT_EQ(g_reenter_fired, 1);
+    ASSERT_EQ(harness_first_flow(&h) == NULL, 1);
+    ASSERT_EQ(harness_global_flow_count(&h), 0);
+
+    g_reenter_server = NULL;
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* svr_tcp_egress_update_fd_interest runs on every relay event; it must only
+ * call the platform's egress_fd_register when the interest changes. Steady
+ * echo traffic (readable events, want_read stays 1) re-registers nothing. */
+TEST(mqvpn_tcp_fd_interest_registered_only_on_change)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    int regs_before = h.egress_registers;
+    int dispatches_before = h.egress_dispatches;
+    size_t expect = 0;
+    for (int round = 0; round < 5; round++) {
+        ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)"ping", 4, 500),
+                  0);
+        expect += 4;
+        for (int i = 0; i < 250 && h.probe.raw_recv_len < expect; i++) {
+            int never = 0;
+            harness_pump_with_sink(&h, &sink, &never, 20);
+        }
+        ASSERT_EQ(h.probe.raw_recv_len, expect);
+    }
+    ASSERT_EQ(h.egress_dispatches > dispatches_before, 1); /* relay events ran */
+    ASSERT_EQ(h.egress_registers, regs_before);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
 
 TEST(errno_to_status_maps_known_codes)
 {
@@ -3133,6 +3693,104 @@ TEST(get_egress_policy_v6_tunnel_set_when_subnet6_configured)
 
 /* ── svr_tcp_egress_parse_path — fully attacker-controlled H3 :path bytes ── */
 
+/* Translated / tunnelled IPv6 forms that reach an IPv4 destination are
+ * judged by that IPv4 address (NAT64 well-known prefix, 6to4), or blocked
+ * outright where it cannot be recovered (Teredo, NAT64 local-use). */
+static int
+acl_v6_literal(const char *literal, const mqvpn_cidr_entry_t *allow, int n_allow)
+{
+    uint8_t addr[16];
+    ipv6_addr(literal, addr);
+    return svr_tcp_egress_acl_decide(6, addr, allow, n_allow, NULL, 0,
+                                     &NEUTRAL_TUNNEL_V6);
+}
+
+TEST(acl_v6_embedded_v4_forms)
+{
+    ASSERT_EQ(acl_v6_literal("64:ff9b::7f00:1", NULL, 0), 0);    /* NAT64 -> 127.0.0.1 */
+    ASSERT_EQ(acl_v6_literal("64:ff9b::a00:5", NULL, 0), 0);     /* NAT64 -> 10.0.0.5 */
+    ASSERT_EQ(acl_v6_literal("64:ff9b::a9fe:a9fe", NULL, 0), 0); /* -> 169.254.169.254 */
+    ASSERT_EQ(acl_v6_literal("64:ff9b::808:808", NULL, 0), 1);   /* -> 8.8.8.8 */
+    ASSERT_EQ(acl_v6_literal("2002:7f00:1::1", NULL, 0), 0);     /* 6to4 -> 127.0.0.1 */
+    ASSERT_EQ(acl_v6_literal("2002:c0a8:101::1", NULL, 0), 0);   /* 6to4 -> 192.168.1.1 */
+    ASSERT_EQ(acl_v6_literal("2002:808:808::1", NULL, 0), 1);    /* 6to4 -> 8.8.8.8 */
+    ASSERT_EQ(acl_v6_literal("2001:0:4136:e378:8000:63bf:3fff:fdd2", NULL, 0),
+              0);                                                /* Teredo */
+    ASSERT_EQ(acl_v6_literal("64:ff9b:1::808:808", NULL, 0), 0); /* NAT64 local-use */
+
+    /* An EgressAllow entry for the embedded IPv4 range (or the v6 form
+     * itself) punches the hole, like for the direct form. */
+    mqvpn_cidr_entry_t allow4 = {4, 8, {10}};
+    ASSERT_EQ(acl_v6_literal("64:ff9b::a00:5", &allow4, 1), 1);
+    mqvpn_cidr_entry_t allow6 = {6, 32, {0x20, 0x01, 0x00, 0x00}};
+    ASSERT_EQ(acl_v6_literal("2001:0:4136:e378:8000:63bf:3fff:fdd2", &allow6, 1), 1);
+}
+
+/* The server's own interface addresses are denied unless EgressAllow
+ * covers them. The process-wide cache is seeded with a TEST-NET address
+ * standing in for a public interface address, so the default table alone
+ * would allow it. */
+static void
+harness_cfg_allow_198_51_100_7_short_timeout(mqvpn_config_t *cfg)
+{
+    const char *allow[] = {"198.51.100.7/32"};
+    if (mqvpn_config_set_hybrid_egress_acl(cfg, allow, 1, NULL, 0) != MQVPN_OK ||
+        mqvpn_config_set_hybrid_connect_timeout(cfg, 1) != MQVPN_OK) {
+        printf("FAIL\n    hybrid egress config rejected valid input\n");
+        exit(1);
+    }
+}
+
+static void
+seed_local_addr_198_51_100_7(void)
+{
+    memset(s_local_addrs, 0, sizeof(s_local_addrs));
+    s_local_addrs[0].family = 4;
+    s_local_addrs[0].addr[0] = 198;
+    s_local_addrs[0].addr[1] = 51;
+    s_local_addrs[0].addr[2] = 100;
+    s_local_addrs[0].addr[3] = 7;
+    s_n_local_addrs = 1;
+    s_local_addrs_loaded = 1;
+    s_local_addrs_at_us = svr_now_us(); /* fresh: no refresh during the test */
+}
+
+TEST(mqvpn_tcp_own_interface_address_denied)
+{
+    seed_local_addr_198_51_100_7();
+    char status[16] = {0};
+    ASSERT_EQ(run_dispatch_probe_with_path("mqvpn-tcp", 9,
+                                           "/.well-known/mqvpn/tcp/198.51.100.7/80/",
+                                           NULL, status, sizeof(status)),
+              0);
+    ASSERT_STREQ(status, "403");
+    /* The NAT64 form of the same address. */
+    seed_local_addr_198_51_100_7();
+    status[0] = '\0';
+    ASSERT_EQ(run_dispatch_probe_with_path(
+                  "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/64:ff9b::c633:6407/80/", NULL,
+                  status, sizeof(status)),
+              0);
+    ASSERT_STREQ(status, "403");
+
+    /* Covered by EgressAllow: the ACL lets it through to a real connect
+     * (which then fails or times out — anything but the 403). */
+    seed_local_addr_198_51_100_7();
+    status[0] = '\0';
+    ASSERT_EQ(run_dispatch_probe_with_path(
+                  "mqvpn-tcp", 9, "/.well-known/mqvpn/tcp/198.51.100.7/80/",
+                  harness_cfg_allow_198_51_100_7_short_timeout, status, sizeof(status)),
+              0);
+    ASSERT_EQ(strcmp(status, "403") != 0, 1);
+
+    /* Back to the real interface list. */
+    s_local_addrs_loaded = 0;
+    uint8_t lo[16] = {127, 0, 0, 1};
+    ASSERT_EQ(svr_tcp_egress_is_local_addr(4, lo), 1);
+    uint8_t testnet[16] = {192, 0, 2, 1};
+    ASSERT_EQ(svr_tcp_egress_is_local_addr(4, testnet), 0);
+}
+
 TEST(parse_path_accepts_valid)
 {
     const char *path = "/.well-known/mqvpn/tcp/192.168.1.1/8080/";
@@ -3256,12 +3914,19 @@ main(void)
     run_mqvpn_tcp_h3_fin_becomes_shut_wr();
     run_mqvpn_tcp_bodiless_fin_becomes_shut_wr();
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
+    run_mqvpn_tcp_paused_flow_backpressures_client();
     run_mqvpn_tcp_relay_error_stops_fd_dispatch();
     run_mqvpn_tcp_uplink_backlog_stops_at_unsent_cap();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
     run_mqvpn_tcp_parked_flow_idle_eviction();
+    run_mqvpn_tcp_rejected_request_body_is_discarded();
+    run_mqvpn_tcp_connecting_body_relayed_after_connect();
+    run_mqvpn_tcp_connecting_body_over_cap_resets();
+    run_mqvpn_tcp_reentrant_teardown_during_200();
+    run_mqvpn_tcp_reentrant_teardown_during_uplink_send();
+    run_mqvpn_tcp_fd_interest_registered_only_on_change();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();
@@ -3293,6 +3958,8 @@ main(void)
     run_acl_v6_ungated_prefix0_would_deny_all_regression();
     run_get_egress_policy_v6_tunnel_unset_without_subnet6();
     run_get_egress_policy_v6_tunnel_set_when_subnet6_configured();
+    run_acl_v6_embedded_v4_forms();
+    run_mqvpn_tcp_own_interface_address_denied();
     run_parse_path_accepts_valid();
     run_parse_path_rejects_oversized_host();
     run_parse_path_rejects_missing_port();

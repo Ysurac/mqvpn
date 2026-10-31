@@ -31,7 +31,8 @@ typedef struct {
 int mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr);
 
 /* Initialize IPv6 pool from CIDR string (e.g. "fd00:abcd::/112").
- * Call after mqvpn_addr_pool_init(). Shares offsets with IPv4 pool. */
+ * Call after mqvpn_addr_pool_init(). Shares offsets with IPv4 pool, so it
+ * fails when the prefix cannot hold base6 + pool_size (every IPv4 offset). */
 int mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6);
 
 /* Allocate next available IP. Returns 0 on success, -1 if exhausted. */
@@ -40,7 +41,7 @@ int mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out);
 /* Allocate a specific offset (2..pool_size). Returns 0 on success,
  * -1 if the offset is out of range or already in use. */
 int mqvpn_addr_pool_alloc_at(mqvpn_addr_pool_t *pool, uint32_t offset,
-                              struct in_addr *out);
+                             struct in_addr *out);
 
 /* Release a previously allocated IP back to the pool. */
 void mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr);
@@ -48,9 +49,11 @@ void mqvpn_addr_pool_release(mqvpn_addr_pool_t *pool, const struct in_addr *addr
 /* Get the server-side IP (.1) for this pool. */
 void mqvpn_addr_pool_server_addr(const mqvpn_addr_pool_t *pool, struct in_addr *out);
 
-/* Compute IPv6 address from a pool offset (same offset used for IPv4). */
-void mqvpn_addr_pool_get6(const mqvpn_addr_pool_t *pool, uint32_t offset,
-                          struct in6_addr *out);
+/* Compute IPv6 address from a pool offset (same offset used for IPv4).
+ * Returns 0, or -1 (with *out set to the base) when the offset would fall
+ * outside the prefix. */
+int mqvpn_addr_pool_get6(const mqvpn_addr_pool_t *pool, uint32_t offset,
+                         struct in6_addr *out);
 
 /* Get the server-side IPv6 address (offset=1). */
 void mqvpn_addr_pool_server_addr6(const mqvpn_addr_pool_t *pool, struct in6_addr *out);

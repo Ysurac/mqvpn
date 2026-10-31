@@ -12,12 +12,13 @@
 #include "path_rotation.h"
 #include "path_error_policy.h"
 #include "mqvpn_scheduler.h"
-#include "mqvpn_sched_names.h" /* mqvpn_reinj_to_name for the startup log */
+#include "mqvpn_sched_names.h"     /* mqvpn_reinj_to_name for the startup log */
 #include "mqvpn_xquic_err_names.h" /* annotate |err:NNN| in cb_xqc_log_write */
-#include "auth.h" /* mqvpn_auth_debug_fingerprint for the startup log */
+#include "auth.h"                  /* mqvpn_auth_debug_fingerprint for the startup log */
 #include "cert_pin.h"
 
 #include <inttypes.h> /* PRIu64 in the udp-tx teardown line */
+#include <limits.h>   /* INT_MAX */
 #include <stddef.h>   /* offsetof for the struct_size-guarded field copies */
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,7 @@
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 
+#include "dgram_frame.h"
 #include "flow_sched.h"
 #include "mqvpn_path_label.h"
 #include "hybrid/classifier.h"
@@ -58,6 +60,7 @@
 #include "reorder_gate.h"
 #include "reorder_rx.h"
 #include "reorder_tx.h"
+#include "redundant_tx.h"
 #include "dgram_dedup.h"
 
 /* ─── Constants ─── */
@@ -70,6 +73,11 @@
  * this window, so a dead first-listed path triggers reconnect (and primary_path_idx
  * rotation, issue #46) rather than waiting for xquic's idle_time_out (120s). */
 #define HANDSHAKE_STALL_TIMEOUT_MS 5000
+/* Longest AUTHENTICATING may last: from the end of the QUIC handshake to the
+ * CONNECT-IP 2xx plus ADDRESS_ASSIGN. A server that never answers, or answers
+ * 2xx and never assigns an address, would otherwise park the client there
+ * with no reconnect. Generous for long-RTT links (satellite). */
+#define TUNNEL_SETUP_TIMEOUT_MS 15000
 /* PATH_RECREATE_* and PATH_STABLE_THRESHOLD_US relocated to path_state_machine.h
  * for PR4 — shared with path_state_machine.c. */
 
@@ -94,6 +102,7 @@ static void cli_notify_conn_closed(mqvpn_client_t *c, cli_conn_t *conn);
 static void cli_connect_ip_scan_headers(cli_conn_t *conn,
                                         const xqc_http_headers_t *headers);
 static void cli_connect_ip_on_request_close(cli_conn_t *conn);
+static void client_release_path_hold(mqvpn_client_t *c);
 
 /* Look up xquic per-path metrics by path_id in a stats snapshot.
  *
@@ -129,6 +138,19 @@ struct cli_conn_s {
     uint64_t masque_stream_id;
     int tunnel_ok;
     int tunnel_notified; /* one-shot: a tunnel_closed already fired for this conn */
+    mqvpn_error_t notified_reason; /* the reason it fired with */
+    /* Deferred local close (cli_conn_request_close): set from inside xquic
+     * callbacks, acted on by tick_conn_close_pending at the next tick, so a
+     * close never re-enters xquic from a stream callback and is dropped for
+     * free when the conn is being destroyed anyway. close_why is a static
+     * string for the log line. */
+    int close_pending;
+    const char *close_why;
+    int closed_early; /* close notify ran inside xqc_h3_connect */
+    /* Slots (bit = slot index) dropped by the platform while xquic refused
+     * their PATH_ABANDON (the last active path): retried by
+     * tick_retry_path_abandon once another path is active. */
+    uint32_t abandon_retry_mask;
     int addr_assigned;
     uint8_t assigned_ip[4];
     uint8_t assigned_prefix;
@@ -145,6 +167,18 @@ struct cli_conn_s {
     mqvpn_reorder_tx_t *reorder_tx;
     mqvpn_reorder_rx_t *reorder_rx;
     int peer_reorder_supported;
+    /* Server's mqvpn-scheduler echo from the deciding 200 (0 = none reported). */
+    int has_peer_sched;
+    int peer_sched;
+
+    /* Redundant mode (client TX): created on connect when
+     * cfg.redundant is set, freed on conn teardown. */
+    mqvpn_redundant_tx_t *redundant_tx;
+    uint64_t redundant_refresh_us; /* last 100 ms metrics/slot refresh */
+    int redundant_full_warned; /* "tracking table full" logged, until select recovers */
+    /* Test seam: NULL in production (the real xquic sends). */
+    mqvpn_test_send_fn test_send;
+    void *test_send_ud;
 
     /* Redundant scheduler only: drops the extra copies of a datagram that
      * arrive over the other paths. Created on the first datagram, freed on
@@ -181,6 +215,7 @@ struct cli_stream_s {
     cli_conn_t *conn;
     xqc_h3_request_t *h3_request;
     cli_stream_role_t role;
+    int aborted; /* CONNECT-IP: we aborted the request; ignore further body */
     uint8_t *capsule_buf;
     size_t capsule_len;
     size_t capsule_cap;
@@ -203,13 +238,18 @@ struct mqvpn_client_s {
      * get_stats branch). connected_at_us: stamped in client_set_state()
      * on entering MQVPN_STATE_ESTABLISHED, mirrors svr_conn_t's
      * connected_at_us — read by mqvpn_client_get_info() (client-mode
-     * get_status branch). Both use client_now_us() so Android's injected
-     * CLOCK_BOOTTIME clock is honored the same as handshake_started_us. */
+     * get_status branch). Both honor an injected clock (Android's
+     * CLOCK_BOOTTIME) the same as handshake_started_us; without one,
+     * boot_us is on the library's clock (client_now_us) while
+     * connected_at_us is wall clock (wall_now_us), the absolute time the
+     * control API expects. */
     uint64_t boot_us;
     uint64_t connected_at_us;
 
     /* xquic engine (Level 1) */
     xqc_engine_t *engine;
+    /* holds a share of the process's xquic clock (mqvpn_xqc_clock_acquire) */
+    int xqc_clock_held;
 
     /* Connection (Level 2, NULL when disconnected) */
     cli_conn_t *conn;
@@ -284,6 +324,9 @@ struct mqvpn_client_s {
     int n_paths;
     int64_t next_path_handle;
     int multipath_ready; /* 1 after cb_ready_to_create_path */
+    /* 1 from a scheduler request until TUNNEL_READY: secondary paths stay PENDING so
+     * the server sees only path 0 when it swaps its scheduler. */
+    int hold_extra_paths;
     /* Path index used for the QUIC handshake. Rotated on each reconnect so a
      * dead first path doesn't trap the client forever. */
     int primary_path_idx;
@@ -327,6 +370,10 @@ struct mqvpn_client_s {
      * (typically a dead primary path) before xquic's 120s idle_time_out. */
     uint64_t handshake_started_us;
 
+    /* AUTHENTICATING-entry time (client_now_us), zeroed on exit. Drives the
+     * TUNNEL_SETUP_TIMEOUT_MS watchdog (tick_conn_close_pending). */
+    uint64_t auth_started_us;
+
     /* ICMP PTB rate limit */
     mqvpn_ptb_bucket_t ptb_bucket;
 
@@ -348,7 +395,7 @@ static const uint8_t state_transitions[MQVPN_STATE__COUNT][MQVPN_STATE__COUNT] =
     /* IDLE           */ {0, 1, 0, 0, 0, 0, 0},
     /* CONNECTING     */ {0, 0, 1, 0, 0, 1, 1},
     /* AUTHENTICATING */ {0, 0, 0, 1, 0, 1, 1},
-    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 0, 1},
+    /* TUNNEL_READY   */ {0, 0, 0, 0, 1, 1, 1},
     /* ESTABLISHED    */ {0, 0, 0, 0, 0, 1, 1},
     /* RECONNECTING   */ {0, 1, 0, 0, 0, 0, 1},
     /* CLOSED         */ {0, 0, 0, 0, 0, 0, 0},
@@ -364,8 +411,11 @@ mqvpn_state_transition_valid(mqvpn_client_state_t from, mqvpn_client_state_t to)
 
 /* ─── Helpers ─── */
 
+/* Wall clock µs since the Unix epoch: the one timestamp that leaves the
+ * library as an absolute time, mqvpn_client_info_t.connected_at_us, which the
+ * control API turns into connected seconds against gettimeofday. */
 static uint64_t
-now_us(void)
+wall_now_us(void)
 {
 #ifdef _WIN32
     FILETIME ft;
@@ -379,7 +429,8 @@ now_us(void)
 #endif
 }
 
-/* Injectable clock: use config clock_fn if set, else default now_us().
+/* Injectable clock: use config clock_fn if set, else the library's clock
+ * (mqvpn_clock.c), which is also the default clock of the xquic engine.
  * PR4 — non-static + visibility hidden so path_state_machine.c can call it
  * without exporting from libmqvpn.so. MSVC ignores visibility(). */
 MQVPN_INTERNAL
@@ -387,22 +438,17 @@ uint64_t
 client_now_us(const mqvpn_client_t *c)
 {
     if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
-    return now_us();
+    return mqvpn_clock_us();
 }
 
-/*
- * xquic timestamp adapter.
- * xqc_timestamp_pt is void→uint64_t (no user_ctx), so we use a global.
- * Safe for single-client-per-process (Android VpnService model).
- */
-static mqvpn_clock_fn s_xqc_clock_fn = NULL;
-static void *s_xqc_clock_ctx = NULL;
-
-static xqc_usec_t
-xqc_custom_timestamp(void)
+/* Absolute time for mqvpn_client_info_t.connected_at_us, which the control
+ * API turns into connected seconds against gettimeofday: the injected clock
+ * when set (used as is, as before), else the wall clock. */
+static uint64_t
+client_wall_now_us(const mqvpn_client_t *c)
 {
-    if (s_xqc_clock_fn) return s_xqc_clock_fn(s_xqc_clock_ctx);
-    return now_us();
+    if (c->config.clock_fn) return c->config.clock_fn(c->config.clock_ctx);
+    return wall_now_us();
 }
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
@@ -475,14 +521,15 @@ path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
 }
 
 /* G-P15 (draft-21 §3.3 ¶6): emit PATH_STATUS to peer when local lifecycle
- * demotes. app_status is an internal relay code from g_p15_xqc_app_status_for
- * (1=standby, 2=available, 3=frozen) that this switch decodes to the named
- * xqc_conn_mark_path_* calls — the raw value is never handed to xquic, so it
- * is NOT an xquic-ABI value dependency and needs no pin (unlike path_state).
- * The mnemonic mirrors XQC_APP_PATH_STATUS_* but is not required to.
- * No-op if engine or conn is missing (e.g. during reconnect, or for
- * pre-handshake transitions); path-status will be re-asserted by the
- * caller when the conn is re-established and the lifecycle moves again. */
+ * moves a live path between classes. app_status is an internal relay code
+ * from g_p15_xqc_app_status_for (1=standby, 2=available) that this switch
+ * decodes to the named xqc_conn_mark_path_* calls — the raw value is never
+ * handed to xquic, so it is NOT an xquic-ABI value dependency.
+ *
+ * Nothing reaches here today: no FSM event moves ACTIVE <-> STANDBY (a
+ * standby path is created standby, see client_path_starts_standby), so the
+ * two codes are kept for the day one does. No-op without an engine or
+ * connection, or for a path that is not live. */
 MQVPN_INTERNAL
 void
 client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_status)
@@ -494,7 +541,6 @@ client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_s
     switch (app_status) {
     case 1: xqc_conn_mark_path_standby(c->engine, cid, pid); break;
     case 2: xqc_conn_mark_path_available(c->engine, cid, pid); break;
-    case 3: xqc_conn_mark_path_frozen(c->engine, cid, pid); break;
     default: break;
     }
 }
@@ -546,8 +592,14 @@ client_set_state(mqvpn_client_t *c, mqvpn_client_state_t new_state)
     } else if (old == MQVPN_STATE_CONNECTING) {
         c->handshake_started_us = 0;
     }
+    if (new_state == MQVPN_STATE_AUTHENTICATING) {
+        c->auth_started_us = client_now_us(c);
+    } else if (old == MQVPN_STATE_AUTHENTICATING) {
+        c->auth_started_us = 0;
+    }
     if (new_state == MQVPN_STATE_ESTABLISHED) {
-        c->connected_at_us = client_now_us(c);
+        /* Absolute time for get_info (see client_wall_now_us). */
+        c->connected_at_us = client_wall_now_us(c);
     } else if (old == MQVPN_STATE_ESTABLISHED) {
         /* Cleared so a stale connected_at_us from a previous session can't
          * leak into mqvpn_client_get_info()'s connected_sec after a
@@ -566,6 +618,15 @@ client_handshake_stalled(const mqvpn_client_t *c, uint64_t now_us)
     if (now_us <= c->handshake_started_us) return 0;
     uint64_t elapsed = now_us - c->handshake_started_us;
     return elapsed >= (uint64_t)HANDSHAKE_STALL_TIMEOUT_MS * 1000;
+}
+
+static int
+client_tunnel_setup_stalled(const mqvpn_client_t *c, uint64_t now_us)
+{
+    if (c->state != MQVPN_STATE_AUTHENTICATING) return 0;
+    if (c->auth_started_us == 0) return 0;
+    if (now_us <= c->auth_started_us) return 0;
+    return now_us - c->auth_started_us >= (uint64_t)TUNNEL_SETUP_TIMEOUT_MS * 1000;
 }
 
 #ifndef NDEBUG
@@ -681,8 +742,8 @@ get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
      * whole connection (xquic refused the PATH_ABANDON, so the slot stays
      * xquic-live), and the closing frames must still reach the server —
      * fall through to a live sibling. */
-    int closing_removed_initial = p && xqc_path_id == 0 && !p->transport_attached &&
-                                  c->initial_path_removed;
+    int closing_removed_initial =
+        p && xqc_path_id == 0 && !p->transport_attached && c->initial_path_removed;
     if (p && !closing_removed_initial)
         return p; /* even if dropped: caller checks transport_attached */
     int pidx = c->primary_path_idx;
@@ -876,6 +937,29 @@ mqvpn_client_test_conn_peer_reorder(const mqvpn_client_t *c)
     return c->conn->peer_reorder_supported;
 }
 
+MQVPN_INTERNAL
+int
+mqvpn_client_test_conn_peer_sched(mqvpn_client_t *c, int *out_sched)
+{
+    if (!c || !c->conn) return -1;
+    if (out_sched) *out_sched = c->conn->peer_sched;
+    return c->conn->has_peer_sched;
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_set_hold_extra_paths(mqvpn_client_t *c, int v)
+{
+    c->hold_extra_paths = v;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_hold_extra_paths(mqvpn_client_t *c)
+{
+    return c->hold_extra_paths;
+}
+
 /* Test-only: drive the real CONNECT-IP final-close handling
  * (cli_connect_ip_on_request_close) on the attached test conn. */
 MQVPN_INTERNAL
@@ -903,6 +987,40 @@ mqvpn_client_test_masque_request_is_null(const mqvpn_client_t *c)
 {
     if (!c || !c->conn) return -1;
     return c->conn->masque_request == NULL ? 1 : 0;
+}
+
+/* Test-only: read conn->close_pending (0 none, 1 requested, 2 issued). */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_conn_close_pending(const mqvpn_client_t *c)
+{
+    if (!c || !c->conn) return -1;
+    return c->conn->close_pending;
+}
+
+/* Test-only: plant conn->tunnel_ok (a 2xx already received). */
+MQVPN_INTERNAL
+int
+mqvpn_client_test_set_conn_tunnel_ok(mqvpn_client_t *c, int v)
+{
+    if (!c || !c->conn) return -1;
+    c->conn->tunnel_ok = v;
+    return 0;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_tunnel_setup_stalled(const mqvpn_client_t *c, uint64_t now_us)
+{
+    if (!c) return -1;
+    return client_tunnel_setup_stalled(c, now_us) ? 1 : 0;
+}
+
+MQVPN_INTERNAL
+uint64_t
+mqvpn_client_test_get_auth_started_us(const mqvpn_client_t *c)
+{
+    return c ? c->auth_started_us : 0;
 }
 
 MQVPN_INTERNAL
@@ -1031,10 +1149,17 @@ client_init_handle(mqvpn_client_t *c, const mqvpn_config_t *cfg,
 static void
 client_destroy_engine(mqvpn_client_t *c)
 {
-    if (!c || !c->engine) return;
-    xqc_h3_ctx_destroy(c->engine);
-    xqc_engine_destroy(c->engine);
-    c->engine = NULL;
+    if (!c) return;
+    if (c->engine) {
+        /* xqc_engine_destroy frees the h3 contexts with the ALPN registrations
+         * (xqc_engine_free_alpn_list); no xqc_h3_ctx_destroy() (DD §10). */
+        xqc_engine_destroy(c->engine);
+        c->engine = NULL;
+    }
+    if (c->xqc_clock_held) {
+        mqvpn_xqc_clock_release();
+        c->xqc_clock_held = 0;
+    }
 }
 
 /* Finalise a slot's transport exactly once: harvest ops.get_stats into the
@@ -1118,12 +1243,13 @@ static void
 client_reset_paths_for_reconnect(mqvpn_client_t *c)
 {
     c->multipath_ready = 0;
+    c->hold_extra_paths = 0;
     for (int i = 0; i < c->n_paths; i++) {
         client_reset_path_runtime(c, &c->paths[i]);
     }
-    /* Path rotation is handled exclusively by tick_reconnect() which builds a
-     * proper flags view marking detached paths as BACKUP before calling
-     * mqvpn_rotate_primary_path(). Rotating here as well causes a double-skip
+    /* Path rotation is handled exclusively by tick_reconnect(), through
+     * mqvpn_reconnect_path_idx(), which treats detached paths as BACKUP.
+     * Rotating here as well causes a double-skip
      * (dead path → B, then B → C) so the first reconnect attempt lands on C
      * instead of B when A is removed with B and C still live. */
 }
@@ -1148,37 +1274,6 @@ client_arm_reconnect_timer(mqvpn_client_t *c)
     c->reconnect_attempts++;
     c->reconnect_scheduled_us = client_now_us(c) + (uint64_t)delay * 1000000;
     return delay;
-}
-
-/*
- * xquic path budget is connection-scoped (XQC_MAX_PATHS_COUNT).
- * When exhausted, additional path creation cannot recover in-place; force a
- * clean reconnect so counters/CIDs are reinitialized.
- */
-static void
-client_force_reconnect_on_path_budget_exhausted(mqvpn_client_t *c, path_entry_t *p,
-                                                int idx, int ret)
-{
-    if (!c || !c->engine || !c->conn) return;
-    if (c->shutting_down || c->state == MQVPN_STATE_RECONNECTING ||
-        c->state == MQVPN_STATE_CLOSED)
-        return;
-
-    if (!c->config.reconnect_enable) {
-        LOG_W(c,
-              "path[%d] create-path budget exhausted on %s (ret=%d), "
-              "auto-reconnect disabled",
-              idx, p ? p->name : "?", ret);
-        return;
-    }
-
-    LOG_W(c,
-          "path[%d] create-path budget exhausted on %s (ret=%d), forcing "
-          "connection reconnect",
-          idx, p ? p->name : "?", ret);
-
-    xqc_conn_close(c->engine, &c->conn->cid);
-    xqc_engine_main_logic(c->engine);
 }
 
 /* ================================================================
@@ -1228,7 +1323,7 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     static const char prefix[] = "[xquic] ";
     memcpy(msg, prefix, sizeof(prefix) - 1);
     mqvpn_xquic_annotate_err_codes((const char *)buf, size, msg + sizeof(prefix) - 1,
-                                    sizeof(msg) - (sizeof(prefix) - 1));
+                                   sizeof(msg) - (sizeof(prefix) - 1));
     c->cbs.log(ml, msg, c->user_ctx);
 }
 
@@ -1397,48 +1492,52 @@ cli_effective_sni(const mqvpn_config_t *cfg)
     return cfg->tls_server_name[0] ? cfg->tls_server_name : cfg->server_host;
 }
 
+/* A rejected server certificate, whoever judged it (the platform verifier or
+ * the library): one ERROR line and tunnel_closed(MQVPN_ERR_TLS) now, instead
+ * of a plain close after the 3-PTO drain that follows the handshake alert; the
+ * conn-close notify that comes later is gated by tunnel_notified. Runs inside
+ * xqc_engine_main_logic: the platform handler must not re-enter libmqvpn
+ * (documented on mqvpn_tunnel_closed_fn). */
+static void
+cli_report_cert_rejected(cli_conn_t *conn)
+{
+    LOG_E(conn->client, "TLS certificate verification failed");
+    cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
+}
+
 /* xquic hands us the chain the server presented (leaf first, DER). Reached
  * on every handshake when a verifier is configured (APP_VERIFY): the verifier
- * is the sole judge, and its rejection is the one TLS failure the platform
- * hears about immediately, as MQVPN_ERR_TLS. Without a verifier, xquic's
- * legacy path routes only an unknown issuer (X509 error 20) here; every
- * other library-side rejection (self-signed, expired, hostname mismatch) is
- * refused inside the library and never reaches this callback. Both are one
- * class of failure — the library verifying — so both surface the same way:
- * this site only logs and refuses, and the platform sees the plain
- * connection close (MQVPN_ERR_CLOSED) after the drain, exactly like the
- * rejections that never get here. Reporting error 20 alone as MQVPN_ERR_TLS
- * would make the public reason depend on which X509 error the library hit.
- * insecure never gets here: verify_mode is NONE and xquic installs no
- * callback. An empty chain is rejected by the ssl library before this point.
- * conn_user_data is always the cli_conn_t passed to xqc_h3_connect. */
+ * is the sole judge. Without a verifier, xquic's legacy path routes only an
+ * unknown issuer (X509 error 20) here; refusing it is a library-side
+ * rejection like any other, reported by cb_cert_verify_failed, so this site
+ * stays silent rather than report it twice. insecure never gets here:
+ * verify_mode is NONE and xquic installs no callback. An empty chain is
+ * rejected by the ssl library before this point. conn_user_data is always
+ * the cli_conn_t passed to xqc_h3_connect. */
 static int
 cb_cert_verify(const unsigned char *certs[], const size_t cert_len[], size_t certs_len,
                void *conn_user_data)
 {
     cli_conn_t *conn = (cli_conn_t *)conn_user_data;
-    mqvpn_client_t *c = conn->client;
-    const mqvpn_config_t *cfg = &c->config;
+    const mqvpn_config_t *cfg = &conn->client->config;
 
-    if (cfg->cert_verify_fn) {
-        if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
-                                cfg->cert_verify_ctx) == 0)
-            return 0;
-
-        LOG_E(c, "TLS certificate verification failed");
-        /* Tell the platform now, once, instead of after the 3-PTO drain that
-         * follows the handshake alert; the conn-close notify that comes later
-         * is gated by tunnel_notified. Runs inside xqc_engine_main_logic: the
-         * platform handler must not re-enter libmqvpn (documented on
-         * mqvpn_tunnel_closed_fn). */
-        cli_signal_connect_fail(conn, MQVPN_ERR_TLS, 0);
-        return -1;
-    }
-
-    /* Library-side verification (no verifier): refuse and let the connection
-     * close report it, like every other library-side rejection. */
-    LOG_E(c, "TLS certificate verification failed");
+    if (!cfg->cert_verify_fn) return -1;
+    if (cfg->cert_verify_fn(certs, cert_len, certs_len, cli_effective_sni(cfg),
+                            cfg->cert_verify_ctx) == 0)
+        return 0;
+    cli_report_cert_rejected(conn);
     return -1;
+}
+
+/* xquic's library-side verification (no verifier) rejected the server
+ * certificate: self-signed, unknown issuer, expired, hostname mismatch. Notify
+ * only, once per handshake; never under APP_VERIFY (cb_cert_verify reported
+ * that) nor under insecure. */
+static void
+cb_cert_verify_failed(int x509_err, void *conn_user_data)
+{
+    (void)x509_err; /* the public reason is TLS whichever X509 error it was */
+    cli_report_cert_rejected((cli_conn_t *)conn_user_data);
 }
 
 static void
@@ -1466,6 +1565,8 @@ cb_save_tp(const char *d, size_t dl, void *u)
 /* ─── H3 connection callbacks ─── */
 
 static int cli_masque_start_tunnel(cli_conn_t *conn);
+static void cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason,
+                                    int status_for_log);
 
 static int
 cb_h3_conn_create(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
@@ -1514,7 +1615,8 @@ cb_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
     conn->dgram_mss = xqc_h3_ext_datagram_get_mss(h3_conn);
     LOG_I(conn->client, "handshake finished (dgram_mss=%zu)", conn->dgram_mss);
     client_set_state(conn->client, MQVPN_STATE_AUTHENTICATING);
-    cli_masque_start_tunnel(conn);
+    if (cli_masque_start_tunnel(conn) < 0)
+        cli_signal_connect_fail(conn, MQVPN_ERR_ENGINE, 0);
 }
 
 /* Map a non-200 CONNECT-IP :status to a pre-establishment failure reason.
@@ -1533,25 +1635,42 @@ cli_classify_status(int status)
     }
 }
 
+/* Ask for the connection to be closed at the next tick (see close_pending).
+ * The first reason wins. cb_h3_conn_close then runs the normal teardown:
+ * reconnect with backoff when enabled, CLOSED otherwise. */
+static void
+cli_conn_request_close(cli_conn_t *conn, const char *why)
+{
+    if (conn->close_pending) return;
+    conn->close_pending = 1;
+    conn->close_why = why;
+}
+
 /* Fire tunnel_closed(reason) exactly once per conn for a pre-establishment
- * failure: a non-200 CONNECT-IP status, the tunnel stream closing before 200,
- * or (TLS) the platform verifier rejecting the server certificate from inside
- * the handshake. Notifies only — it does not abort the request in-core
- * (cross-platform full-stop and non-iOS reconnect-suppression are a
- * documented follow-up); iOS's onTunnelClosed turns this into a startTunnel
- * throw, and the process teardown that follows stops any reconnect on the iOS
- * target. */
+ * failure: a non-2xx CONNECT-IP status, the tunnel stream closing before 2xx,
+ * the Extended CONNECT failing to go out, or (TLS) the platform verifier or
+ * the library rejecting the server certificate from inside the handshake.
+ * Then close the connection: without a tunnel it has nothing left to do, and
+ * leaving it open (a server answers 403 and keeps the connection) would park
+ * the client in AUTHENTICATING forever. The reason passed here (e.g.
+ * MQVPN_ERR_AUTH) is what the platform sees; cb_h3_conn_close adds no second
+ * tunnel_closed and applies the usual reconnect policy, except that a TLS
+ * reason keeps it from reconnecting. iOS's onTunnelClosed turns this into a
+ * startTunnel throw. */
 static void
 cli_signal_connect_fail(cli_conn_t *conn, mqvpn_error_t reason, int status_for_log)
 {
     mqvpn_client_t *c = conn->client;
+    cli_conn_request_close(conn, "tunnel setup failed");
     if (conn->tunnel_notified) return; /* once (calloc-zeroed at conn start) */
     assert(!conn->tunnel_ok);          /* every caller gates on !tunnel_ok / non-200 */
     conn->tunnel_notified = 1;
+    conn->notified_reason = reason;
     /* "CONNECT-IP request failed" is an e2e marker (tests/test_e2e_wrong_psk.sh)
      * and must keep printing once for the CONNECT-IP witnesses. A TLS
-     * rejection never sent a request, so it stays silent here — the verifier
-     * site already logged "TLS certificate verification failed". */
+     * rejection never sent a request, so it stays silent here —
+     * cli_report_cert_rejected already logged "TLS certificate verification
+     * failed". */
     if (reason != MQVPN_ERR_TLS)
         LOG_W(c, "CONNECT-IP request failed (status=%d) → tunnel_closed(%d)",
               status_for_log, (int)reason);
@@ -1582,6 +1701,17 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     cli_conn_t *conn = (cli_conn_t *)user_data;
     mqvpn_client_t *c = conn->client;
 
+    /* A connection that dies inside xqc_h3_connect (before
+     * cli_start_connection commits it to c->conn): its caller sees the
+     * failure and owns both the conn memory and the retry, so nothing here —
+     * a second reconnect arming, or IDLE -> RECONNECTING, would be wrong. */
+    if (c->conn != conn) {
+        LOG_D(c, "connection closed before start completed");
+        conn->h3_conn = NULL;
+        conn->closed_early = 1;
+        return 0;
+    }
+
     int err = xqc_h3_conn_get_errno(h3_conn);
     /* Grepped by scripts/ci_transport_smoke.py (VN_REACTION): reword it there too. */
     LOG_I(c, "connection closed (errno=%d)", err);
@@ -1589,9 +1719,11 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
     /* Notify platform (skip if a pre-establishment failure already fired). */
     cli_notify_conn_closed(c, conn);
 
+    /* the same server would present the same certificate on every retry */
+    int cert_rejected = conn->tunnel_notified && conn->notified_reason == MQVPN_ERR_TLS;
     cli_conn_destroy(c);
 
-    if (!c->shutting_down && c->config.reconnect_enable) {
+    if (!c->shutting_down && c->config.reconnect_enable && !cert_rejected) {
         int delay = client_arm_reconnect_timer(c);
         LOG_I(c, "reconnecting in %d seconds (attempt %d)...", delay,
               c->reconnect_attempts);
@@ -1606,14 +1738,21 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_data)
 
 /* ─── MASQUE tunnel start ─── */
 
-/* Append `authorization: Bearer <auth_key>` when configured. auth_buf is
- * caller-owned and must stay live until xqc_h3_request_send_headers (the
- * header only holds an iovec into it). Returns the new header count. Shared
- * by cli_masque_start_tunnel and cli_tcp_lane_open_stream. */
+/* Most headers cli_append_auth_header can add (authorization + x-user). */
+#define CLI_AUTH_HDR_MAX 2
+
+/* Append `authorization: Bearer <auth_key>` and `x-user: <username>` when
+ * configured. auth_buf is caller-owned and must stay live until
+ * xqc_h3_request_send_headers (the header only holds an iovec into it).
+ * hdr_cap is the capacity of hdrs; returns the new header count, or -1
+ * (nothing appended) when the headers would not fit. Shared by
+ * cli_masque_start_tunnel and cli_tcp_lane_open_stream. */
 static int
 cli_append_auth_header(const mqvpn_client_t *c, xqc_http_header_t *hdrs, int hdr_count,
-                       char *auth_buf, size_t auth_buf_len)
+                       int hdr_cap, char *auth_buf, size_t auth_buf_len)
 {
+    int need = (c->config.auth_key[0] != '\0') + (c->config.auth_username[0] != '\0');
+    if (hdr_count < 0 || hdr_count > hdr_cap - need) return -1;
     if (c->config.auth_key[0] != '\0') {
         snprintf(auth_buf, auth_buf_len, "Bearer %s", c->config.auth_key);
         hdrs[hdr_count].name = (struct iovec){.iov_base = "authorization", .iov_len = 13};
@@ -1657,10 +1796,8 @@ cli_masque_start_tunnel(cli_conn_t *conn)
 
     char auth_value[300];
 
-    int has_username = (c->config.auth_username[0] != '\0');
-
-
-    xqc_http_header_t hdrs[9] = {
+    /* 6 fixed + auth + mqvpn-reorder + mqvpn-scheduler */
+    xqc_http_header_t hdrs[6 + CLI_AUTH_HDR_MAX + 2] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -1680,13 +1817,20 @@ cli_masque_start_tunnel(cli_conn_t *conn)
          .value = {.iov_base = "?1", .iov_len = 2},
          .flags = 0},
     };
-    int hdr_count = 6;
-    hdr_count =
-        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
+    int hdr_count =
+        cli_append_auth_header(c, hdrs, 6, (int)(sizeof(hdrs) / sizeof(hdrs[0])),
+                               auth_value, sizeof(auth_value));
+    if (hdr_count < 0) {
+        LOG_E(c, "Extended CONNECT: header array too small");
+        conn->masque_request = NULL;
+        xqc_h3_request_close(req);
+        return -1;
+    }
     /* §19.2/§19.3: advertise the reorder capability only when locally enabled AND
      * the rx engine actually allocated — advertising with a NULL engine would make
      * the server stamp packets we then drop (one-way blackhole). */
-    if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx)) {
+    if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx) &&
+        hdr_count < (int)(sizeof(hdrs) / sizeof(hdrs[0]))) {
         hdrs[hdr_count].name =
             (struct iovec){.iov_base = MQVPN_REORDER_HDR_NAME,
                            .iov_len = sizeof(MQVPN_REORDER_HDR_NAME) - 1};
@@ -1696,7 +1840,20 @@ cli_masque_start_tunnel(cli_conn_t *conn)
         hdrs[hdr_count].flags = 0;
         hdr_count++;
     }
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 9};
+    if (c->config.request_server_scheduler &&
+        hdr_count < (int)(sizeof(hdrs) / sizeof(hdrs[0]))) {
+        const char *sn = mqvpn_sched_to_name(c->config.scheduler);
+        hdrs[hdr_count].name =
+            (struct iovec){.iov_base = MQVPN_SCHED_HDR_NAME,
+                           .iov_len = sizeof(MQVPN_SCHED_HDR_NAME) - 1};
+        hdrs[hdr_count].value =
+            (struct iovec){.iov_base = (void *)sn, .iov_len = strlen(sn)};
+        hdrs[hdr_count].flags = 0;
+        hdr_count++;
+        c->hold_extra_paths = 1;
+    }
+    xqc_http_headers_t headers = {
+        .headers = hdrs, .count = hdr_count, .capacity = sizeof(hdrs) / sizeof(hdrs[0])};
 
     ssize_t ret = xqc_h3_request_send_headers(req, &headers, 0);
     if (ret < 0) {
@@ -1785,7 +1942,7 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
      * and deliberately NO capsule-protocol / mqvpn-reorder headers — the TCP
      * lane carries a raw byte relay, not capsules, and reorder is a
      * DATAGRAM-lane concern. */
-    xqc_http_header_t hdrs[6] = {
+    xqc_http_header_t hdrs[5 + CLI_AUTH_HDR_MAX] = {
         {.name = {.iov_base = ":method", .iov_len = 7},
          .value = {.iov_base = "CONNECT", .iov_len = 7},
          .flags = 0},
@@ -1802,10 +1959,16 @@ cli_tcp_lane_open_stream(void *client_ctx, void *flow_handle, const mqvpn_flow_k
          .value = {.iov_base = path, .iov_len = strlen(path)},
          .flags = 0},
     };
-    int hdr_count = 5;
-    hdr_count =
-        cli_append_auth_header(c, hdrs, hdr_count, auth_value, sizeof(auth_value));
-    xqc_http_headers_t headers = {.headers = hdrs, .count = hdr_count, .capacity = 6};
+    int hdr_count =
+        cli_append_auth_header(c, hdrs, 5, (int)(sizeof(hdrs) / sizeof(hdrs[0])),
+                               auth_value, sizeof(auth_value));
+    if (hdr_count < 0) {
+        LOG_E(c, "connect-tcp: header array too small");
+        xqc_h3_request_close(req); /* close notify frees stream */
+        return mqvpn_tcp_lane_abort_pending(flow_handle);
+    }
+    xqc_http_headers_t headers = {
+        .headers = hdrs, .count = hdr_count, .capacity = sizeof(hdrs) / sizeof(hdrs[0])};
 
     mqvpn_tcp_lane_bind_h3_request(flow_handle, req, stream);
 
@@ -1904,7 +2067,24 @@ stream_append_capsules(cli_stream_t *s, const uint8_t *buf, size_t len)
     return 0;
 }
 
-static void
+/* Abort the CONNECT-IP request on a malformed capsule (RFC 9484 §4.7,
+ * RFC 9297 §3.3: the receiver MUST abort the request stream). Drop the
+ * buffered capsules so the bad one is not parsed (and logged) again, and mark
+ * the stream so later body reads are ignored. cb_request_close then closes
+ * the connection (cli_connect_ip_on_request_close). The stream may be freed
+ * by the close: callers return -1 at once without touching it. */
+static int
+cli_connect_ip_abort(cli_stream_t *stream)
+{
+    stream->aborted = 1;
+    stream->capsule_len = 0;
+    xqc_h3_request_close(stream->h3_request);
+    return -1;
+}
+
+/* Returns -1 when the request was aborted (stream must not be touched
+ * afterwards by the caller), 0 otherwise. */
+static int
 process_capsules(cli_stream_t *stream)
 {
     cli_conn_t *conn = stream->conn;
@@ -1930,7 +2110,14 @@ process_capsules(cli_stream_t *stream)
                 xret = xqc_h3_ext_connectip_parse_address_assign(
                     ap, aremain, &req_id, &ip_ver, ip_addr, &ip_len, &prefix,
                     &aa_consumed);
-                if (xret != XQC_OK) break;
+                /* RFC 9484 §4.7.1: the prefix length cannot exceed the
+                 * address length; anything unparsable is malformed too. */
+                if (xret != XQC_OK || (ip_ver == 4 && prefix > 32) ||
+                    (ip_ver == 6 && prefix > 128)) {
+                    LOG_E(c, "ADDRESS_ASSIGN malformed (ip_version=%d prefix=%d)",
+                          xret == XQC_OK ? ip_ver : -1, xret == XQC_OK ? prefix : -1);
+                    return cli_connect_ip_abort(stream);
+                }
 
                 if (ip_ver == 4 && !conn->addr_assigned) {
                     memcpy(conn->assigned_ip, ip_addr, 4);
@@ -1957,9 +2144,9 @@ process_capsules(cli_stream_t *stream)
         } else if (cap_type == XQC_H3_CAPSULE_ROUTE_ADVERTISEMENT) {
             xret = xqc_h3_ext_connectip_validate_route_advertisement(payload, cap_len);
             if (xret != XQC_OK) {
+                /* RFC 9484 §4.7.3: MUST abort the request stream. */
                 LOG_E(c, "ROUTE_ADVERTISEMENT validation failed");
-                xqc_h3_request_close(stream->h3_request);
-                return;
+                return cli_connect_ip_abort(stream);
             }
             /* Log routes but no action needed */
         } else if (cap_type == MQVPN_CAPSULE_PATH_LABEL_PUSH) {
@@ -2005,11 +2192,13 @@ process_capsules(cli_stream_t *stream)
                                                             p->xqc_path_id, dscp_mask);
                             }
                         }
-                        LOG_I(c, "adopted server-pushed path_label: iface=%s weight=%u "
-                                 "dscp_mask=%" PRIu64,
+                        LOG_I(c,
+                              "adopted server-pushed path_label: iface=%s weight=%u "
+                              "dscp_mask=%" PRIu64,
                               iface, weight, dscp_mask);
                     } else {
-                        LOG_D(c, "server-pushed path_label for unknown iface=%s (ignored)",
+                        LOG_D(c,
+                              "server-pushed path_label for unknown iface=%s (ignored)",
                               iface);
                     }
                 }
@@ -2023,6 +2212,7 @@ process_capsules(cli_stream_t *stream)
                     stream->capsule_len - consumed);
         stream->capsule_len -= consumed;
     }
+    return 0;
 }
 
 /* ─── H3 request callbacks ─── */
@@ -2055,10 +2245,18 @@ cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *use
 }
 
 /* CONNECT-IP tunnel stream reached its final close notify. Stream closed
- * without reaching 200 → pre-establishment failure. A prior non-200 status
+ * without reaching 2xx → pre-establishment failure. A prior non-2xx status
  * already latched (once-flag dedups); a bare RST-before-headers is a generic
  * PROTOCOL failure. This is what unblocks iOS when the server RSTs the
  * tunnel stream after 403.
+ *
+ * Stream closed AFTER 2xx (peer reset, or our own abort on a malformed
+ * capsule): the tunnel is gone for good on this connection — the client never
+ * re-opens CONNECT-IP on it — so close the connection and let the normal
+ * reconnect path run, instead of keeping a connection that only carries
+ * keepalives while every TUN packet is refused. When the whole connection is
+ * closing, xquic destroys the streams first: the deferred close is then
+ * discarded with the conn.
  *
  * Not during a LOCAL shutdown: mqvpn_client_disconnect sets shutting_down
  * before xqc_conn_close, and xquic destroys streams before the conn
@@ -2068,8 +2266,12 @@ cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err, void *use
 static void
 cli_connect_ip_on_request_close(cli_conn_t *conn)
 {
-    if (!conn->tunnel_ok && !conn->client->shutting_down)
-        cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
+    if (!conn->client->shutting_down) {
+        if (!conn->tunnel_ok)
+            cli_signal_connect_fail(conn, MQVPN_ERR_PROTOCOL, 0);
+        else
+            cli_conn_request_close(conn, "CONNECT-IP tunnel stream closed");
+    }
     conn->tunnel_ok = 0;
     /* xquic frees the request right after this close-notify, but the conn
      * lives on, so drop the borrowed pointer: later weight/dscp sends guard
@@ -2136,7 +2338,9 @@ apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
 }
 
 /* Inner (TUN) MTU for the connection's current datagram MSS. Shared by the
- * ADDRESS_ASSIGN path and cb_dgram_mss_updated so both agree.
+ * ADDRESS_ASSIGN path and cb_dgram_mss_updated so both agree;
+ * cli_inner_mtu_budget is the datagram budget before the floor and the cap,
+ * which cli_check_ipv6_mtu also checks.
  *
  * §9: when the reorder shim is in use, each stamped inner packet carries an
  * 8-byte header, so the usable inner MTU shrinks by 8. Only when the server
@@ -2146,7 +2350,7 @@ apply_mtu_cap(int cfg_mtu, int negotiated, mqvpn_client_t *c)
  * datagram budget BEFORE the config cap, so a cap that fits under the
  * budget is kept as is. Floor at IPV6_MIN_MTU when v6 is in play. */
 static int
-cli_effective_tun_mtu(mqvpn_client_t *c, cli_conn_t *conn)
+cli_inner_mtu_budget(mqvpn_client_t *c, cli_conn_t *conn)
 {
     int tun_mtu = IPV6_MIN_MTU;
     if (conn->dgram_mss > 0) {
@@ -2157,6 +2361,13 @@ cli_effective_tun_mtu(mqvpn_client_t *c, cli_conn_t *conn)
     if (mqvpn_reorder_should_advertise(c->config.reorder.mode, conn->reorder_rx) &&
         conn->peer_reorder_supported)
         tun_mtu -= MQVPN_REORDER_HDR_LEN;
+    return tun_mtu;
+}
+
+static int
+cli_effective_tun_mtu(mqvpn_client_t *c, cli_conn_t *conn)
+{
+    int tun_mtu = cli_inner_mtu_budget(c, conn);
     if (conn->addr6_assigned && tun_mtu < IPV6_MIN_MTU) tun_mtu = IPV6_MIN_MTU;
     return apply_mtu_cap(c->config.tun_mtu, tun_mtu, c);
 }
@@ -2177,6 +2388,7 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
     int final_seen = conn->tunnel_ok || conn->tunnel_notified;
     int decided_200 = 0;  /* THIS section carried the deciding 200 */
     int reorder_echo = 0; /* THIS section carried the mqvpn-reorder echo */
+    int sched_echo = -1;  /* THIS section's mqvpn-scheduler value, -1 = none/invalid */
 
     for (int i = 0; i < (int)headers->count; i++) {
         xqc_http_header_t *h = &headers->headers[i];
@@ -2195,11 +2407,12 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
                 LOG_I(c, "tunnel interim status=%d, awaiting final response", st);
             } else if (final_seen) {
                 LOG_W(c, "tunnel duplicate :status %d ignored", st);
-            } else if (st == 200) {
+            } else if (st >= 200 && st < 300) {
+                /* RFC 9484: a 2xx response means the request succeeded. */
                 final_seen = 1;
                 decided_200 = 1;
                 conn->tunnel_ok = 1;
-                LOG_I(c, "tunnel 200 OK");
+                LOG_I(c, "tunnel %d OK", st);
             } else if (st < 0) {
                 final_seen = 1;
                 LOG_W(c, "tunnel malformed :status");
@@ -2214,6 +2427,10 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
                                        h->value.iov_base, h->value.iov_len)) {
             reorder_echo = 1;
         }
+        if (h->name.iov_len == sizeof(MQVPN_SCHED_HDR_NAME) - 1 &&
+            memcmp(h->name.iov_base, MQVPN_SCHED_HDR_NAME, h->name.iov_len) == 0) {
+            sched_echo = mqvpn_sched_from_name_n(h->value.iov_base, h->value.iov_len);
+        }
     }
 
     /* §19.2/§19.3: the server echoes mqvpn-reorder in its 200 response
@@ -2223,6 +2440,11 @@ cli_connect_ip_scan_headers(cli_conn_t *conn, const xqc_http_headers_t *headers)
     if (decided_200 && reorder_echo) {
         conn->peer_reorder_supported = 1;
         LOG_I(c, "peer advertised mqvpn-reorder; TX stamping enabled");
+    }
+    /* Same rule for the scheduler echo: deciding 200 section only. */
+    if (decided_200 && sched_echo >= 0) {
+        conn->has_peer_sched = 1;
+        conn->peer_sched = sched_echo;
     }
 }
 
@@ -2239,6 +2461,54 @@ cli_connect_ip_on_headers(cli_stream_t *stream, xqc_h3_request_t *h3_request)
 static void client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p,
                                           activate_result_t r, uint64_t new_id);
 
+/* The server's own tunnel address, used as the TUN point-to-point peer. The
+ * protocol carries no trace of it: servers (0.16.0 included) assign the
+ * client a /32 and advertise 0.0.0.0-255.255.255.255, while the server
+ * itself takes the first host of its pool subnet. So keep the historical
+ * guess, the .1 of the client's /24 (exact for the default /24 pool), but
+ * never return the client's own address, which a pool wider than /24 can
+ * hand out (10.0.1.1 in 10.0.0.0/23): take the .1 of the /24 below instead,
+ * which is the server for a /23 pool and at least a distinct peer otherwise. */
+static void
+cli_guess_server_tunnel_ip(const uint8_t assigned[4], uint8_t server[4])
+{
+    memcpy(server, assigned, 3);
+    server[3] = 1;
+    if (assigned[3] == 1) {
+        uint32_t a = ((uint32_t)assigned[0] << 24) | ((uint32_t)assigned[1] << 16) |
+                     ((uint32_t)assigned[2] << 8) | assigned[3];
+        a -= 256;
+        server[0] = (uint8_t)(a >> 24);
+        server[1] = (uint8_t)(a >> 16);
+        server[2] = (uint8_t)(a >> 8);
+        server[3] = (uint8_t)a;
+    }
+}
+
+/* Test-only: drive cli_guess_server_tunnel_ip. */
+MQVPN_INTERNAL
+void
+mqvpn_client_test_guess_server_tunnel_ip(const uint8_t assigned[4], uint8_t server[4])
+{
+    cli_guess_server_tunnel_ip(assigned, server);
+}
+
+/* IPv6 needs an inner MTU of at least 1280 (RFC 8200 §5): with an IPv6
+ * address and a datagram budget below that, close the connection instead of
+ * bringing up a TUN that would have to drop full-size IPv6 packets. */
+static int
+cli_check_ipv6_mtu(cli_conn_t *conn)
+{
+    mqvpn_client_t *c = conn->client;
+    int mtu = cli_inner_mtu_budget(c, conn);
+    if (!conn->addr6_assigned || mtu >= IPV6_MIN_MTU) return 0;
+    LOG_E(c, "IPv6 requires an inner MTU of at least 1280 (available=%d)", mtu);
+    conn->tunnel_ok = 0;
+    xqc_conn_close(c->engine, &conn->cid);
+    cli_signal_connect_fail(conn, MQVPN_ERR_INVALID_ARG, 0);
+    return -1;
+}
+
 /* CONNECT-IP tunnel stream: capsule body + ADDRESS_ASSIGN → tunnel_config_ready.
  * Returns -1 on capsule buffer failure. */
 static int
@@ -2248,18 +2518,28 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
     mqvpn_client_t *c = conn->client;
     unsigned char fin = 0;
 
+    if (stream->aborted) return 0;
+
     unsigned char buf[4096];
     ssize_t n;
     do {
         n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin);
         if (n <= 0) break;
         if (stream_append_capsules(stream, buf, (size_t)n) < 0) return -1;
-        process_capsules(stream);
+        if (process_capsules(stream) < 0) return 0; /* aborted: stream may be gone */
     } while (!fin);
 
-    /* Notify platform on ADDRESS_ASSIGN */
-    if (conn->addr_assigned && c->state != MQVPN_STATE_ESTABLISHED &&
-        c->state != MQVPN_STATE_TUNNEL_READY) {
+    if (conn->tunnel_notified) return 0;
+
+    /* Validate even if IPv6 arrives in a later ADDRESS_ASSIGN capsule. */
+    if (cli_check_ipv6_mtu(conn) < 0) return 0;
+
+    /* Notify platform on ADDRESS_ASSIGN — only once per connection, and only
+     * for a request the server accepted (2xx): never resurrect a client that
+     * left AUTHENTICATING (CLOSED, RECONNECTING), nor bring a TUN up from an
+     * ADDRESS_ASSIGN that rode on a refused (e.g. 403) response. */
+    if (conn->addr_assigned && conn->tunnel_ok &&
+        c->state == MQVPN_STATE_AUTHENTICATING) {
         int tun_mtu = cli_effective_tun_mtu(c, conn);
         c->mtu = tun_mtu;
         /* The platform applies this MTU from tunnel_config_ready; a later
@@ -2327,8 +2607,8 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
          * created only when lwip_ctx exists, and a tcp_lane alloc failure
          * tears lwip_ctx back down — the ingress path guards on tcp_lane
          * alone and dereferences lwip_ctx. Hash seed mirrors the reorder
-         * engines' per-conn derivation (wall clock ^ conn_id; §6.2 needs no
-         * peer agreement). */
+         * engines' per-conn derivation (client clock ^ conn_id; §6.2 needs
+         * no peer agreement). */
         if (conn->lwip_ctx && !conn->tcp_lane) {
             uint64_t lane_seed = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
             conn->tcp_lane = mqvpn_tcp_lane_new(&c->config.hybrid, lane_seed, c,
@@ -2362,9 +2642,7 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         info.struct_size = sizeof(info);
         memcpy(info.assigned_ip, conn->assigned_ip, 4);
         info.assigned_prefix = conn->assigned_prefix;
-        /* Server IP is .1 in same subnet */
-        memcpy(info.server_ip, conn->assigned_ip, 3);
-        info.server_ip[3] = 1;
+        cli_guess_server_tunnel_ip(conn->assigned_ip, info.server_ip);
         info.server_prefix = conn->assigned_prefix;
         info.mtu = tun_mtu;
         if (conn->addr6_assigned) {
@@ -2373,6 +2651,8 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
                 (uint8_t)mqvpn_tunnel_prefix6_effective(conn->assigned_prefix6);
             info.has_v6 = 1;
         }
+        info.has_server_scheduler = conn->has_peer_sched;
+        info.server_scheduler = conn->has_peer_sched ? conn->peer_sched : 0;
 
         /* Primary path is now validated by handshake — drive
          * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
@@ -2404,6 +2684,15 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         LOG_D(c, "firing tunnel_config_ready callback");
         c->cbs.tunnel_config_ready(&info, c->user_ctx);
         c->reconnect_attempts = 0;
+        if (c->config.request_server_scheduler) {
+            const char *req = mqvpn_sched_to_name(c->config.scheduler);
+            if (info.has_server_scheduler)
+                LOG_I(c, "server scheduler: %s (requested %s)",
+                      mqvpn_sched_to_name((mqvpn_scheduler_t)info.server_scheduler), req);
+            else
+                LOG_I(c, "server did not report its scheduler (requested %s)", req);
+        }
+        client_release_path_hold(c);
     }
     return 0;
 }
@@ -2546,7 +2835,7 @@ cb_request_write(xqc_h3_request_t *h3_request, void *user_data)
 /*
  * forward_inner_ip — post-process one de-stamped inner IP packet and hand it to
  * TUN. Shared by the RAW dispatch in cb_dgram_read AND the reorder RX deliver()
- * callback, so reordered packets get identical TTL/hop-limit + ICMP handling
+ * callback, so reordered packets get identical TTL/hop-limit handling
  * (§5: both paths MUST be semantically identical). `pkt[0..len)` is the bare
  * inner IP packet (no reorder header).
  */
@@ -2557,47 +2846,61 @@ forward_inner_ip(cli_conn_t *conn, const uint8_t *pkt, size_t len)
     if (len < 1) return;
 
     uint8_t ip_ver = pkt[0] >> 4;
-    uint8_t fwd_pkt[PACKET_BUF_SIZE];
-    if (len > sizeof(fwd_pkt)) return;
+    if (len > PACKET_BUF_SIZE) return;
 
     if (ip_ver == 4) {
         if (len < IPV4_MIN_HDR) {
             LOG_D(c, "dgram: IPv4 too short (%zu bytes)", len);
             return;
         }
-        memcpy(fwd_pkt, pkt, len);
-        if (fwd_pkt[8] <= 1) {
-            if (c->conn && c->conn->addr_assigned)
-                mqvpn_icmp_send_v4(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip,
-                                   11, 0, 0, pkt, len);
+        if (!conn->addr_assigned) {
+            LOG_D(c, "dgram: IPv4 before ADDRESS_ASSIGN; dropping");
             return;
         }
-        fwd_pkt[8]--;
-        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
-        sum = (sum & 0xFFFF) + (sum >> 16);
-        fwd_pkt[10] = (sum >> 8) & 0xFF;
-        fwd_pkt[11] = sum & 0xFF;
+        if (pkt[8] <= 1) {
+            /* Expiring here. Never answer with an ICMP Time Exceeded into
+             * the local TUN: it would come from our own address, toward the
+             * host side (a martian). A packet for our own address has
+             * reached its destination and is delivered as is; one the host
+             * would forward further is dropped. */
+            if (memcmp(pkt + 16, conn->assigned_ip, 4) != 0) return;
+        }
     } else if (ip_ver == 6) {
         if (len < IPV6_MIN_HDR || !conn->addr6_assigned) {
             LOG_D(c, "dgram: IPv6 too short or no addr6 (%zu bytes)", len);
             return;
         }
-        memcpy(fwd_pkt, pkt, len);
-        if (fwd_pkt[7] <= 1) {
-            if (c->conn && c->conn->addr6_assigned)
-                mqvpn_icmp_send_v6(c->cbs.tun_output, c->user_ctx, c->conn->assigned_ip6,
-                                   3, 0, 0, pkt, len);
-            return;
+        if (pkt[7] <= 1) {
+            /* Same as the IPv4 hop limit above. */
+            if (memcmp(pkt + 24, conn->assigned_ip6, 16) != 0) return;
         }
-        fwd_pkt[7]--;
     } else {
         LOG_D(c, "dgram: unknown IP version %d", ip_ver);
         return;
     }
 
+    /* The TTL / hop limit is decremented in a copy: pkt is xquic's buffer.
+     * A packet expiring here (for our own address, see above) is delivered
+     * as is. */
+    int expiring = ip_ver == 4 ? pkt[8] <= 1 : pkt[7] <= 1;
+    uint8_t stack_buf[MQVPN_DGRAM_STACK_BUF];
+    uint8_t *fwd_pkt = len <= sizeof(stack_buf) ? stack_buf : malloc(len);
+    if (!fwd_pkt) return;
+    memcpy(fwd_pkt, pkt, len);
+    if (!expiring && ip_ver == 4) {
+        fwd_pkt[8]--;
+        uint32_t sum = ((uint32_t)fwd_pkt[10] << 8 | fwd_pkt[11]) + 0x0100;
+        sum = (sum & 0xFFFF) + (sum >> 16);
+        fwd_pkt[10] = (sum >> 8) & 0xFF;
+        fwd_pkt[11] = sum & 0xFF;
+    } else if (!expiring) {
+        fwd_pkt[7]--;
+    }
+
     c->dgram_recv++;
     c->bytes_rx += len;
     c->cbs.tun_output(fwd_pkt, len, c->user_ctx);
+    if (fwd_pkt != stack_buf) free(fwd_pkt);
 }
 
 /* Reorder RX deliver() trampoline: routes in-order packets from the reorder
@@ -2644,6 +2947,17 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         LOG_D(c, "dgram: unframe failed (xret=%d, data_len=%zu)", xret, data_len);
         return;
     }
+    /* RFC 9297 §2.1 / RFC 9484 §6: an HTTP Datagram belongs to the request
+     * whose stream ID is 4 * quarter_stream_id; anything else (a stale or
+     * unknown request) is dropped, and so is a non-zero Context ID, since
+     * CONNECT-IP only defines 0 (IP packets) and none other was registered.
+     * Servers, 0.16.0 included, frame every tunnel packet on the CONNECT-IP
+     * stream with Context ID 0. */
+    if (qsid != conn->masque_stream_id / 4 || ctx_id != 0) {
+        LOG_D(c, "dgram: dropped (quarter_stream_id=%" PRIu64 " context_id=%" PRIu64 ")",
+              qsid, ctx_id);
+        return;
+    }
     if (payload_len < 1) {
         LOG_D(c, "dgram: empty payload");
         return;
@@ -2681,28 +2995,39 @@ cb_dgram_write(xqc_h3_conn_t *h3_conn, void *user_data)
     }
 }
 
+/* Shared by the xquic callbacks and the test hook. With redundant mode the
+ * counters stay "one per original": the tracker returns 1 on the first ack /
+ * the last loss of an original, -1 for an ordinary (untracked) datagram. */
+static void
+cli_dgram_notify(cli_conn_t *conn, uint64_t id, int acked)
+{
+    if (!conn) return;
+    if (conn->redundant_tx) {
+        int r = acked ? mqvpn_redundant_tx_on_acked(conn->redundant_tx, id)
+                      : mqvpn_redundant_tx_on_lost(conn->redundant_tx, id);
+        if (r != 1 && r != -1) return;
+    }
+    if (acked) {
+        conn->dgram_acked_cnt++;
+        conn->client->dgram_acked++;
+    } else {
+        conn->dgram_lost_cnt++;
+        conn->client->dgram_lost++;
+    }
+}
+
 static void
 cb_dgram_acked(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
     (void)h;
-    (void)id;
-    cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) {
-        conn->dgram_acked_cnt++;
-        conn->client->dgram_acked++;
-    }
+    cli_dgram_notify((cli_conn_t *)ud, id, 1);
 }
 
 static int
 cb_dgram_lost(xqc_h3_conn_t *h, uint64_t id, void *ud)
 {
     (void)h;
-    (void)id;
-    cli_conn_t *conn = (cli_conn_t *)ud;
-    if (conn) {
-        conn->dgram_lost_cnt++;
-        conn->client->dgram_lost++;
-    }
+    cli_dgram_notify((cli_conn_t *)ud, id, 0);
     return 0;
 }
 
@@ -2719,6 +3044,7 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
     if (c->tun_active) {
         size_t udp_mss = xqc_h3_ext_masque_udp_mss(mss, conn->masque_stream_id);
         if (udp_mss >= 68) {
+            if (cli_check_ipv6_mtu(conn) < 0) return;
             int new_mtu = cli_effective_tun_mtu(c, conn);
             if (new_mtu != c->last_notified_mtu) {
                 c->mtu = new_mtu;
@@ -2731,29 +3057,38 @@ cb_dgram_mss_updated(xqc_h3_conn_t *h, size_t mss, void *ud)
 
 /* ─── Multipath helpers ─── */
 
+/* A secondary path is created (and, once validated, held) in STANDBY when it
+ * is a backup path (MQVPN_PATH_FLAG_BACKUP) or when the scheduler is
+ * backup_fec (spec §10.1.1). xquic then signals PATH_STATUS_BACKUP to the
+ * peer, and its backup / backup_fec schedulers send on a standby path only
+ * while no available path is usable, which is the failover. The initial
+ * path (path_id 0) is created with the connection as AVAILABLE and never
+ * passes through here. */
+static int
+client_path_starts_standby(const mqvpn_client_t *c, const path_entry_t *p)
+{
+    return c->config.scheduler == MQVPN_SCHED_BACKUP_FEC ||
+           (p->flags & MQVPN_PATH_FLAG_BACKUP) != 0;
+}
+
 /* PR4 — Call xqc_conn_create_path() and classify per spec §6.6.
  * On OK, *out_path_id receives the new xqc-side path_id; on fail it is 0.
  * The caller passes the classification + path_id into path_on_event()'s
  * ctx (ACTIVATE_REQUESTED / RETRY_TIMER / MANUAL_REACTIVATE). */
 static activate_result_t
-activate_via_xquic_classify(mqvpn_client_t *c, uint64_t *out_path_id)
+activate_via_xquic_classify(mqvpn_client_t *c, const path_entry_t *p,
+                            uint64_t *out_path_id)
 {
-    int path_status = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC) ? 1 : 0;
+    int path_status = client_path_starts_standby(c, p) ? 1 : 0;
     *out_path_id = 0;
     xqc_int_t ret =
         xqc_conn_create_path(c->engine, &c->conn->cid, out_path_id, path_status);
     if (ret == 0) return ACTIVATE_OK;
-    if (ret == -XQC_EMP_CREATE_PATH) return ACTIVATE_PERMANENT_FAIL;
+    if (mqvpn_path_error_is_create_budget_exhausted((int)ret))
+        return ACTIVATE_PERMANENT_FAIL;
     return ACTIVATE_TRANSIENT_FAIL;
 }
 
-/* Create an xquic path for a secondary path entry. Thin caller — all state
- * mutation happens inside path_on_event(ACTIVATE_REQUESTED) per spec §6.6.
- *
- * For MQVPN_SCHED_BACKUP_FEC the secondary path is created in STANDBY
- * (path_status=1) so that xquic's backup_fec scheduler routes only FEC repair
- * symbols to it, while the primary path stays AVAILABLE. Per xquic's public
- * API: 1 = STANDBY, anything else = AVAILABLE (xquic.h L2210). */
 /* Tell the server "path_id N is my iface I, with this weight/dscp_mask"
  * via a PATH_LABEL capsule (RFC 9297) on the CONNECT-IP request stream —
  * see mqvpn_path_label.h for why. Carrying weight/dscp_mask (not just the
@@ -2787,20 +3122,21 @@ client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *ifac
                                     weight, dscp_mask);
     if (n <= 0) return;
 
-    uint8_t cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
+    uint8_t
+        cap_buf[MQVPN_PATH_LABEL_PAYLOAD_MAX + 16]; /* + capsule type/length varints */
     size_t cap_written = 0;
-    xqc_int_t xret = xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
-                                               MQVPN_CAPSULE_PATH_LABEL, label_payload,
-                                               (size_t)n);
+    xqc_int_t xret =
+        xqc_h3_ext_capsule_encode(cap_buf, sizeof(cap_buf), &cap_written,
+                                  MQVPN_CAPSULE_PATH_LABEL, label_payload, (size_t)n);
     if (xret != XQC_OK) {
         LOG_W(c, "path_label capsule encode failed: %d", xret);
         return;
     }
 
-    xqc_int_t sret = xqc_h3_request_send_body(c->conn->masque_request, cap_buf,
-                                              cap_written, 0);
+    ssize_t sret =
+        xqc_h3_request_send_body(c->conn->masque_request, cap_buf, cap_written, 0);
     if (sret < 0) {
-        LOG_W(c, "path_label capsule send failed: path_id=%" PRIu64 " iface=%s ret=%d",
+        LOG_W(c, "path_label capsule send failed: path_id=%" PRIu64 " iface=%s ret=%zd",
               path_id, iface, sret);
     } else {
         LOG_D(c, "announced path_label: path_id=%" PRIu64 " iface=%s", path_id, iface);
@@ -2812,8 +3148,7 @@ client_announce_path_label(mqvpn_client_t *c, uint64_t path_id, const char *ifac
  * slot gets an xquic path_id calls it: client_activate_path() (first
  * activation attempt), tick_drive_retry_timer() (retry after a
  * failed/timed-out validation), mqvpn_client_reactivate_path() (platform
- * reactivation), client_create_standby_path() (backup path) and
- * cli_connect_ip_on_body() for the primary path, path_id 0, which is
+ * reactivation) and cli_connect_ip_on_body() for the primary path, path_id 0, which is
  * created with the connection. Each of these gets its OWN path_id, so it
  * needs the exact same treatment. Missing it on one of them was a real bug
  * every time: the path silently lost its weight/dscp_mask/label
@@ -2835,13 +3170,18 @@ client_apply_path_assignments(mqvpn_client_t *c, path_entry_t *p, activate_resul
     }
 }
 
+/* Create an xquic path for a secondary path entry. Thin caller — all state
+ * mutation happens inside path_on_event(ACTIVATE_REQUESTED) per spec §6.6.
+ * Backup paths, and every secondary under backup_fec (whose scheduler then
+ * routes only FEC repair symbols to it), are created STANDBY: see
+ * client_path_starts_standby(). */
 static void
 client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 {
     if (p->xquic_path_live) return;
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
     LOG_I(c, "path[%d] activate: result=%s id=%llu", idx,
           r == ACTIVATE_OK               ? "OK"
           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
@@ -2894,129 +3234,14 @@ activate_pending_paths(mqvpn_client_t *c)
     }
 }
 
-/*
- * Create an xquic path for a backup entry and immediately mark it standby in
- * the xquic scheduler.  The path participates in probing (keeping RTT fresh)
- * but carries no data until client_check_failover promotes it.
- *
- * xqc_conn_mark_path_standby() handles the case where the path has not
- * completed validation yet (path_state < ACTIVE) by setting a deferred flag,
- * so it is safe to call right after xqc_conn_create_path().
- */
+/* End the post-request hold (TUNNEL_READY): secondary paths may now activate.
+ * If multipath_ready is still 0, cb_ready_to_create_path activates later. */
 static void
-client_create_standby_path(mqvpn_client_t *c, path_entry_t *p, int idx)
+client_release_path_hold(mqvpn_client_t *c)
 {
-    uint64_t new_id = 0;
-    xqc_int_t ret = xqc_conn_create_path(c->engine, &c->conn->cid, &new_id, 0);
-    if (ret < 0) {
-        LOG_W(c, "xqc_conn_create_path (backup)[%d]: %d", idx, ret);
-        if (mqvpn_path_error_is_create_budget_exhausted((int)ret)) {
-            client_force_reconnect_on_path_budget_exhausted(c, p, idx, (int)ret);
-        }
-        return;
-    }
-    p->xqc_path_id = new_id;   /* LINT-ALLOW: standby backup path create */
-    p->xquic_path_live = 1;    /* LINT-ALLOW: standby backup path create */
-    p->status = MQVPN_PATH_STANDBY;
-    xqc_conn_mark_path_standby(c->engine, &c->conn->cid, new_id);
-    LOG_I(c, "backup path[%d] standby: path_id=%" PRIu64 " iface=%s", idx, new_id,
-          p->name);
-    /* After the slot owns new_id (sends resolve it through find_path_by_xqc_id). */
-    client_apply_path_assignments(c, p, ACTIVATE_OK, new_id);
-    if (c->cbs.path_event) c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
-}
-
-/* Returns 1 if the configured scheduler natively understands
- * XQC_APP_PATH_STATUS_STANDBY and will not send data on standby paths while
- * an available path exists.  Only the backup and backup_fec schedulers do
- * this.  All others (wlb, minrtt, rap) only check FROZEN, so the xquic
- * standby API has no effect on them.
- */
-static int
-client_scheduler_supports_standby(const mqvpn_client_t *c)
-{
-    return c->config.scheduler == MQVPN_SCHED_BACKUP ||
-           c->config.scheduler == MQVPN_SCHED_BACKUP_FEC;
-}
-
-/* Count primary (non-backup) paths that are currently active in xquic. */
-static int
-client_count_active_primaries(mqvpn_client_t *c)
-{
-    int n = 0;
-    for (int i = 0; i < c->n_paths; i++) {
-        path_entry_t *p = &c->paths[i];
-        if (!(p->flags & MQVPN_PATH_FLAG_BACKUP) && p->xquic_path_live) n++;
-    }
-    return n;
-}
-
-/*
- * Promote/demote backup paths on failover/recovery.
- *
- * Two strategies depending on the scheduler:
- *
- *  xquic-standby (backup / backup_fec):
- *    The xquic path exists from connection time.  We flip app_path_status
- *    between AVAILABLE and STANDBY so the scheduler handles it natively.
- *    Backup paths that temporarily lost their xquic path (in_use == 0) are
- *    skipped — the tick recreation timer will re-call this after rebuilding.
- *
- *  create-on-demand (all other schedulers):
- *    Other schedulers do not check STANDBY, so the xquic path must not exist
- *    at all while the backup is idle.  We create it on failover and close it
- *    on recovery, same as the original behaviour.
- *
- * Must be called after any path status change.
- */
-static void
-client_check_failover(mqvpn_client_t *c)
-{
-    if (!c->multipath_ready || !c->config.multipath || !c->conn) return;
-
-    int use_standby_api = client_scheduler_supports_standby(c);
-
-    if (client_count_active_primaries(c) == 0) {
-        /* No active primary — promote all eligible backup paths */
-        for (int i = 0; i < c->n_paths; i++) {
-            path_entry_t *p = &c->paths[i];
-            if (!(p->flags & MQVPN_PATH_FLAG_BACKUP)) continue;
-            if (p->status == MQVPN_PATH_ACTIVE) continue; /* already promoted */
-
-            if (use_standby_api) {
-                if (!p->xquic_path_live) continue; /* xquic path not ready yet */
-                LOG_I(c, "failover: promoting backup path[%d] iface=%s", i, p->name);
-                xqc_conn_mark_path_available(c->engine, &c->conn->cid, p->xqc_path_id);
-                p->status = MQVPN_PATH_ACTIVE;
-                if (c->cbs.path_event)
-                    c->cbs.path_event(p->handle, MQVPN_PATH_ACTIVE, c->user_ctx);
-            } else {
-                if (!p->transport_attached || p->xquic_path_live) continue;
-                LOG_I(c, "failover: activating backup path[%d] iface=%s", i, p->name);
-                client_activate_path(c, p, i);
-            }
-        }
-    } else {
-        /* Primary paths are up — stand backup paths down */
-        for (int i = 0; i < c->n_paths; i++) {
-            path_entry_t *p = &c->paths[i];
-            if (!(p->flags & MQVPN_PATH_FLAG_BACKUP)) continue;
-            if (!p->xquic_path_live || p->status != MQVPN_PATH_ACTIVE) continue;
-
-            if (use_standby_api) {
-                LOG_I(c, "failover: standing down backup path[%d] iface=%s", i, p->name);
-                xqc_conn_mark_path_standby(c->engine, &c->conn->cid, p->xqc_path_id);
-                p->status = MQVPN_PATH_STANDBY;
-                if (c->cbs.path_event)
-                    c->cbs.path_event(p->handle, MQVPN_PATH_STANDBY, c->user_ctx);
-            } else {
-                LOG_I(c, "failover: primary restored, closing backup path[%d] iface=%s",
-                      i, p->name);
-                p->status = MQVPN_PATH_STANDBY; /* guard re-entry */
-                xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
-            }
-        }
-    }
+    if (!c->hold_extra_paths) return;
+    c->hold_extra_paths = 0;
+    if (c->multipath_ready && c->config.multipath) activate_pending_paths(c);
 }
 
 /* ─── Multipath callbacks ─── */
@@ -3029,9 +3254,30 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     mqvpn_client_t *c = conn->client;
 
     c->multipath_ready = 1;
-    if (!c->config.multipath) return;
+    if (!c->config.multipath || c->hold_extra_paths) return;
 
     activate_pending_paths(c);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_reset_paths_for_reconnect(mqvpn_client_t *c)
+{
+    client_reset_paths_for_reconnect(c);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_ready_to_create_path(mqvpn_client_t *c)
+{
+    cb_ready_to_create_path(NULL, c->conn);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_release_path_hold(mqvpn_client_t *c)
+{
+    client_release_path_hold(c);
 }
 
 /* PR4 — path_recreate_backoff relocated to path_state_machine.c
@@ -3246,6 +3492,8 @@ cli_conn_destroy(mqvpn_client_t *c)
         mqvpn_reorder_rx_free(conn->reorder_rx);
         conn->reorder_rx = NULL;
     }
+    mqvpn_redundant_tx_free(conn->redundant_tx);
+    conn->redundant_tx = NULL;
     mqvpn_dgram_dedup_free(conn->dgram_dedup);
     conn->dgram_dedup = NULL;
 
@@ -3321,6 +3569,9 @@ cli_start_connection(mqvpn_client_t *c)
         .scheduler = c->config.scheduler,
         .cc = c->config.cc,
         .init_max_path_id = c->config.init_max_path_id,
+        .path_mtu = c->config.path_mtu,
+        .pmtud = c->config.pmtud != 0,
+        .reorder = c->config.reorder.mode != MQVPN_REORDER_OFF,
         .recv_rate_bytes_per_sec = c->config.recv_rate_limit,
         .reinjection = c->config.reinjection,
         .reinj_srtt_factor_pct = c->config.reinj_srtt_factor_pct,
@@ -3389,14 +3640,23 @@ cli_start_connection(mqvpn_client_t *c)
             LOG_W(c, "reinjection mode=deadline protects only stream traffic; hybrid "
                      "lane is disabled, effect limited to control streams");
         }
-    } else if (c->config.reinjection == MQVPN_REINJ_IDLE ||
-               c->config.reinjection == MQVPN_REINJ_DGRAM) {
+    } else if (c->config.reinjection == MQVPN_REINJ_IDLE) {
         LOG_I(c, "reinjection enabled: mode=%s",
               mqvpn_reinj_to_name(c->config.reinjection));
-        if (c->config.reinjection == MQVPN_REINJ_DGRAM) {
-            LOG_I(c, "reinjection mode=dgram duplicates every datagram: datagram-lane "
-                     "goodput is capped at one path's capacity");
+    }
+
+    if (c->config.redundant) {
+        char ports[MQVPN_REDUNDANT_MAX_PORTS * 6 + 4] = "all";
+        for (int i = 0, o = 0; i < c->config.n_redundant_ports; i++) {
+            int n = snprintf(ports + o, sizeof(ports) - (size_t)o, "%s%u", i ? "," : "",
+                             (unsigned)c->config.redundant_ports[i]);
+            if (n < 0 || (size_t)n >= sizeof(ports) - (size_t)o) break;
+            o += n;
         }
+        LOG_I(c, "redundant mode enabled: ports=%s", ports);
+        if (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
+            LOG_W(c, "redundant mode has no effect with scheduler backup_fec (the "
+                     "second path stays on standby)");
     }
 
     /* One owner of the certificate decision, readable from the config alone:
@@ -3426,7 +3686,7 @@ cli_start_connection(mqvpn_client_t *c)
     const xqc_cid_t *cid =
         xqc_h3_connect(c->engine, &cs, NULL, 0, sni, 0, &ssl_cfg,
                        (struct sockaddr *)&c->server_addr, c->server_addrlen, conn);
-    if (!cid) {
+    if (!cid || conn->closed_early) {
         LOG_E(c, "xqc_h3_connect failed");
         goto cleanup;
     }
@@ -3450,11 +3710,16 @@ cli_start_connection(mqvpn_client_t *c)
 
     c->conn = conn; /* ownership transfer — cleanup won't free */
 
+    if (c->config.redundant) {
+        conn->redundant_tx = mqvpn_redundant_tx_new();
+        if (!conn->redundant_tx)
+            LOG_W(c, "redundant mode alloc failed; sending without redundancy");
+    }
     /* §5: create the reorder shim engines when locally enabled. TX stamping
      * stays gated on peer_reorder_supported (set later by negotiation), so until
      * then everything is sent RAW. RX is created so we can accept stamped
      * datagrams as soon as the peer advertises support. The hash seeds need not
-     * match the peer (§6.2); derive them from wall-clock time + conn_id. */
+     * match the peer (§6.2); derive them from the client clock + conn_id. */
     if (c->config.reorder.mode != MQVPN_REORDER_OFF) {
         uint64_t seed_base = client_now_us(c) ^ ((uint64_t)c->conn_id << 32);
         conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, seed_base);
@@ -3526,13 +3791,19 @@ init_xquic_engine(mqvpn_client_t *c)
             },
     };
 
-    /* Inject custom clock — critical for Android CLOCK_BOOTTIME */
-    if (cfg->clock_fn) {
-        s_xqc_clock_fn = cfg->clock_fn;
-        s_xqc_clock_ctx = cfg->clock_ctx;
-        engine_cbs.realtime_ts = xqc_custom_timestamp;
-        engine_cbs.monotonic_ts = xqc_custom_timestamp;
+    /* The receive times handed to xqc_engine_packet_process() come from
+     * client_now_us(), so xquic's timers must run on the same clock: the
+     * injected one (Android: CLOCK_BOOTTIME) or the library's. xquic's clock
+     * is process-wide (see mqvpn_clock.c), so take a share of it; it is
+     * refused while another client or a server runs on a different clock. */
+    if (mqvpn_xqc_clock_acquire(cfg->clock_fn, cfg->clock_ctx) != 0) {
+        LOG_E(c, "another client or server of this process runs on a different "
+                 "clock (xquic's clock is process-wide)");
+        return -1;
     }
+    c->xqc_clock_held = 1;
+    if (cfg->clock_fn) engine_cbs.realtime_ts = mqvpn_xqc_clock_now;
+    engine_cbs.monotonic_ts = mqvpn_xqc_clock_now;
 
     xqc_transport_callbacks_t tcbs = {
         .write_socket = cb_write_socket,
@@ -3541,6 +3812,7 @@ init_xquic_engine(mqvpn_client_t *c)
         .save_session_cb = cb_save_session,
         .save_tp_cb = cb_save_tp,
         .cert_verify_cb = cb_cert_verify,
+        .cert_verify_failed_notify = cb_cert_verify_failed,
         .ready_to_create_path_notify = cb_ready_to_create_path,
         .path_removed_notify = cb_path_removed,
     };
@@ -3597,6 +3869,7 @@ init_xquic_engine(mqvpn_client_t *c)
         .qpack_dec_max_table_capacity = 16 * 1024,
         .enable_connect_protocol = 1,
         .h3_datagram = 1,
+        .recv_body_buf_high_water = MQVPN_H3_RECV_BODY_HIGH_WATER,
     };
     xqc_h3_engine_set_local_settings(c->engine, &h3s);
     return 0;
@@ -4013,7 +4286,7 @@ mqvpn_client_add_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc,
     path_on_event(c, p, PATH_EVENT_ADD, &add_ctx);
 
     if (outcome) *outcome = MQVPN_ADD_PATH_OK;
-    if (c->multipath_ready && c->config.multipath && c->conn) {
+    if (c->multipath_ready && c->config.multipath && c->conn && !c->hold_extra_paths) {
         activate_pending_paths(c);
         if (outcome) *outcome = add_path_outcome_from_state(p->state);
     }
@@ -4033,7 +4306,8 @@ path_xquic_abandon_due(const path_entry_t *p)
 }
 
 int
-mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint32_t weight)
+mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle,
+                             uint32_t weight)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -4052,7 +4326,8 @@ mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint
          * already-live path needs its own fresh capsule or the server
          * keeps applying the stale value it saw at activation. */
         if (p->name[0]) {
-            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight, p->dscp_mask);
+            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight,
+                                       p->dscp_mask);
         }
     }
     return MQVPN_OK;
@@ -4060,7 +4335,7 @@ mqvpn_client_set_path_weight(mqvpn_client_t *c, mqvpn_path_handle_t handle, uint
 
 int
 mqvpn_client_set_path_dscp_mask(mqvpn_client_t *c, mqvpn_path_handle_t handle,
-                                 uint64_t dscp_mask)
+                                uint64_t dscp_mask)
 {
     if (!c) return MQVPN_ERR_INVALID_ARG;
     ASSERT_TICK_THREAD(c);
@@ -4074,7 +4349,8 @@ mqvpn_client_set_path_dscp_mask(mqvpn_client_t *c, mqvpn_path_handle_t handle,
         xqc_conn_set_path_dscp_mask(c->engine, &c->conn->cid, p->xqc_path_id, dscp_mask);
         /* Re-announce — same reasoning as mqvpn_client_set_path_weight() above. */
         if (p->name[0]) {
-            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight, p->dscp_mask);
+            client_announce_path_label(c, p->xqc_path_id, p->name, p->weight,
+                                       p->dscp_mask);
         }
     }
     return MQVPN_OK;
@@ -4142,10 +4418,19 @@ mqvpn_client_on_platform_path_dropped(mqvpn_client_t *c, mqvpn_path_handle_t han
 
     /* Draft-21 PATH_ABANDON: tell xquic to abandon the dead path so its
      * CID/path_id slot is released for reuse. Non-blocking (queues frame
-     * on an alternate path). Fails gracefully if this is the only active
-     * path or if the connection is already closing. */
-    if (path_xquic_abandon_due(p) && c->engine && c->conn)
-        xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+     * on an alternate path). xquic refuses it for the last active path:
+     * unlike remove_path, the connection is kept then (on desktop the
+     * platform re-adds the interface once it is back, and the new path can
+     * take over without a reconnect), and the abandon is retried by
+     * tick_retry_path_abandon as soon as another path is active, so the
+     * dead path never lingers next to a live one. */
+    if (path_xquic_abandon_due(p) && c->engine && c->conn) {
+        xqc_int_t rc = xqc_conn_close_path(c->engine, &c->conn->cid, p->xqc_path_id);
+        if (rc == -XQC_EMP_NO_ACTIVE_PATH) {
+            LOG_I(c, "path[%s] PATH_ABANDON deferred: last active path", p->name);
+            c->conn->abandon_retry_mask |= 1u << (unsigned)(p - c->paths);
+        }
+    }
 
     path_event_ctx_t ctx = {.now_us = client_now_us(c)};
     path_on_event(c, p, PATH_EVENT_PLATFORM_DROP, &ctx);
@@ -4223,7 +4508,7 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
           path_lifecycle_name(p->state));
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
     path_event_ctx_t ctx = {
         .result = r,
         .new_xqc_path_id = new_id,
@@ -4342,12 +4627,13 @@ hybrid_tcp_syn_policy(const mqvpn_client_t *c)
 
 /* Reorder STAMP/RAW/DROP_MTU decision + both ICMP PTB paths (stamped
  * over-MTU and RAW over-MTU). Computes udp_mss internally. Caller must
- * zero-initialize *do_stamp and *peek: early returns (drops before the gate)
- * leave both untouched; the gate itself sets *do_stamp from the verdict and
+ * zero-initialize *do_stamp, *redundant and *peek: early returns (drops before the gate)
+ * leave all three untouched; the gate itself sets *do_stamp from the verdict and
  * fills peek->hdr only on STAMP. */
 static tun_ingress_verdict_t
 tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
-                uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek)
+                uint8_t ip_ver, int *do_stamp, mqvpn_reorder_tx_peek_t *peek,
+                int *redundant)
 {
     /* Hybrid H2: classify, then route TCP-lane candidates through the
      * sticky per-flow table — feed lwIP or fall to RAW. `break` out of the
@@ -4500,9 +4786,20 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
         udp_mss = xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
 
     size_t ptb_mtu = 0;
-    mqvpn_rgate_verdict_t rv = mqvpn_rgate_decide(
-        conn->reorder_tx, conn->peer_reorder_supported, c->config.reorder.mode, pkt, len,
-        client_now_us(c), (uint32_t)udp_mss, peek, &ptb_mtu);
+    mqvpn_rgate_verdict_t rv;
+    if (conn->redundant_tx &&
+        mqvpn_redundant_match(c->config.redundant_ports, c->config.n_redundant_ports, pkt,
+                              len)) {
+        /* Redundant packets go out RAW on every path: no stamp, no reorder
+         * peek, so no sequence is consumed or committed. */
+        *redundant = 1;
+        rv = mqvpn_rgate_decide(NULL, 0, MQVPN_REORDER_OFF, pkt, len, client_now_us(c),
+                                (uint32_t)udp_mss, peek, &ptb_mtu);
+    } else {
+        rv = mqvpn_rgate_decide(conn->reorder_tx, conn->peer_reorder_supported,
+                                c->config.reorder.mode, pkt, len, client_now_us(c),
+                                (uint32_t)udp_mss, peek, &ptb_mtu);
+    }
     *do_stamp = (rv == MQVPN_RGATE_STAMP);
     if (rv == MQVPN_RGATE_DROP_REORDER_MTU || rv == MQVPN_RGATE_DROP_RAW_MTU) {
         int addr_ok = ip_ver == 4 ? conn->addr_assigned : conn->addr6_assigned;
@@ -4515,44 +4812,135 @@ tun_decide_lane(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t 
     return TUN_INGRESS_PROCEED;
 }
 
+/* One xquic datagram send. path_id UINT64_MAX = the ordinary scheduled send
+ * (with the flow-hash and DSCP hints), anything else pins the copy to that
+ * xquic path. conn->test_send (tests only) replaces both. */
+static xqc_int_t
+tun_xqc_send(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *buf, size_t n,
+             uint64_t *dgram_id, uint32_t flow_hash, uint8_t dscp, uint64_t path_id)
+{
+    if (conn->test_send)
+        return conn->test_send(conn->test_send_ud, path_id, buf, n, dgram_id);
+    if (path_id != UINT64_MAX)
+        return xqc_h3_ext_datagram_send_on_path(
+            conn->h3_conn, (void *)buf, n, dgram_id,
+            mqvpn_dgram_qos_level(c->config.scheduler), path_id);
+    xqc_connection_t *xqc_conn = xqc_h3_conn_get_xqc_conn(conn->h3_conn);
+    xqc_conn_set_dgram_flow_hash(xqc_conn, flow_hash);
+    xqc_conn_set_dscp(xqc_conn, dscp);
+    return xqc_h3_ext_datagram_send(conn->h3_conn, (void *)buf, n, dgram_id,
+                                    mqvpn_dgram_qos_level(c->config.scheduler));
+}
+
+/* Usable slots for a redundant copy; also keeps the tracker's slot bindings in
+ * step (the FSM owns liveness, so this is the one place it is read). Returns
+ * the count written to out[]. */
+static int
+redundant_usable_paths(mqvpn_client_t *c, cli_conn_t *conn, int *out)
+{
+    int n = 0;
+    for (int i = 0; i < c->n_paths; i++) {
+        const path_entry_t *p = &c->paths[i];
+        if (p->xquic_path_live && p->state == PATH_LC_ACTIVE) {
+            mqvpn_redundant_tx_bind_path(conn->redundant_tx, i, p->xqc_path_id);
+            out[n++] = i;
+        } else {
+            mqvpn_redundant_tx_detach_path(conn->redundant_tx, i);
+        }
+    }
+    return n;
+}
+
+/* Send one framed redundant packet on every selected path. Returns 1 when at
+ * least one copy was accepted (counted), -1 for backpressure (latched), 0 to
+ * fall back to the ordinary send. */
+static int
+tun_send_redundant(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *frame, size_t n)
+{
+    int usable[MQVPN_MAX_PATHS], sel[MQVPN_MAX_PATHS], paths[MQVPN_MAX_PATHS];
+    uint64_t ids[MQVPN_MAX_PATHS];
+    int nu = redundant_usable_paths(c, conn, usable);
+    uint64_t now = client_now_us(c);
+    /* overload mode: one ordinary send, still counted toward the stream rate */
+    if (nu && mqvpn_redundant_tx_overload_bypass(conn->redundant_tx, now)) return 0;
+    int k = nu ? mqvpn_redundant_tx_select(conn->redundant_tx, usable, nu, sel, now) : 0;
+    if (nu && !k) { /* a usable path always yields a pick unless the tables are full */
+        if (!conn->redundant_full_warned)
+            LOG_W(c, "redundant mode: tracking table full; sending without redundancy");
+        conn->redundant_full_warned = 1;
+    } else if (k) {
+        conn->redundant_full_warned = 0;
+    }
+    int accepted = 0, eagain = 0;
+    for (int j = 0; j < k; j++) {
+        uint64_t id = 0;
+        xqc_int_t r =
+            tun_xqc_send(c, conn, frame, n, &id, 0, 0, c->paths[sel[j]].xqc_path_id);
+        if (r >= 0) {
+            ids[accepted] = id;
+            paths[accepted++] = sel[j];
+        } else if (r == -XQC_EAGAIN) {
+            eagain++;
+        }
+    }
+    mqvpn_redundant_tx_commit(conn->redundant_tx, ids, paths, accepted, now, n);
+    if (accepted) {
+        c->dgram_sent++;
+        return 1;
+    }
+    if (eagain) {
+        c->backpressure = 1; /* as the ordinary send: this packet is dropped */
+        return -1;
+    }
+    return 0;
+}
+
 /* MASQUE framing + flow-hash hint + datagram send + reorder commit +
  * backpressure latch. Returns the mqvpn error code. */
 static int
 tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_t len,
-                  int do_stamp, mqvpn_reorder_tx_peek_t *peek)
+                  int do_stamp, mqvpn_reorder_tx_peek_t *peek, int redundant)
 {
-    /* On STAMP, prepend the 8-byte reorder header to the inner IP packet; the
-     * framed payload is then [hdr || pkt]. On RAW, frame the bare packet. */
-    const uint8_t *frame_src = pkt;
-    size_t frame_src_len = len;
-    uint8_t stamped[MQVPN_REORDER_HDR_LEN + PACKET_BUF_SIZE];
-    if (do_stamp) {
-        if (len > PACKET_BUF_SIZE) return MQVPN_ERR_INVALID_ARG;
-        memcpy(stamped, peek->hdr, MQVPN_REORDER_HDR_LEN);
-        memcpy(stamped + MQVPN_REORDER_HDR_LEN, pkt, len);
-        frame_src = stamped;
-        frame_src_len = len + MQVPN_REORDER_HDR_LEN;
-    }
+    /* On STAMP, the 8-byte reorder header goes between the MASQUE header and
+     * the inner IP packet; on RAW the bare packet is framed. */
+    if (do_stamp && len > PACKET_BUF_SIZE) return MQVPN_ERR_INVALID_ARG;
 
-    /* MASQUE frame and send */
-    uint8_t frame_buf[MASQUE_FRAME_BUF];
+    /* MASQUE frame and send (one copy of pkt; see dgram_frame.h) */
+    uint8_t stack_buf[MQVPN_DGRAM_STACK_BUF];
+    uint8_t *frame_buf = stack_buf;
+    size_t cap = mqvpn_dgram_frame_cap(len, do_stamp);
+    if (cap > MASQUE_FRAME_BUF) cap = MASQUE_FRAME_BUF; /* larger never framed */
+    if (cap > sizeof(stack_buf)) {
+        frame_buf = malloc(cap);
+        if (!frame_buf) return MQVPN_ERR_NO_MEMORY;
+    } else {
+        cap = sizeof(stack_buf);
+    }
     size_t frame_written = 0;
     xqc_int_t xret =
-        xqc_h3_ext_masque_frame_udp(frame_buf, sizeof(frame_buf), &frame_written,
-                                    conn->masque_stream_id, frame_src, frame_src_len);
+        mqvpn_dgram_frame(frame_buf, cap, conn->masque_stream_id,
+                          do_stamp ? peek->hdr : NULL, pkt, len, &frame_written);
     if (xret != XQC_OK) {
+        if (frame_buf != stack_buf) free(frame_buf);
         LOG_W(c, "masque frame failed: xret=%d", xret);
         return MQVPN_ERR_ENGINE;
     }
 
+    if (redundant) {
+        int rr = tun_send_redundant(c, conn, frame_buf, frame_written);
+        if (rr != 0) {
+            if (frame_buf != stack_buf) free(frame_buf);
+            return rr > 0 ? MQVPN_OK : MQVPN_ERR_AGAIN;
+        }
+        /* nothing accepted and no backpressure: one ordinary, untracked send */
+    }
+
     uint64_t dgram_id;
-    xqc_connection_t *xqc_conn = xqc_h3_conn_get_xqc_conn(conn->h3_conn);
     uint32_t fh =
         flow_hash_pkt(pkt, (int)len, c->config.scheduler == MQVPN_SCHED_WLB_UDP_PIN);
-    xqc_conn_set_dgram_flow_hash(xqc_conn, fh);
-    xqc_conn_set_dscp(xqc_conn, dscp_from_pkt(pkt, (int)len));
-    xret = xqc_h3_ext_datagram_send(conn->h3_conn, frame_buf, frame_written, &dgram_id,
-                                    mqvpn_dgram_qos_level(c->config.scheduler));
+    xret = tun_xqc_send(c, conn, frame_buf, frame_written, &dgram_id, fh,
+                        dscp_from_pkt(pkt, (int)len), UINT64_MAX);
+    if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
         /* Backpressure: xquic returns -XQC_EAGAIN before writing any datagram
@@ -4580,6 +4968,12 @@ tun_send_datagram(mqvpn_client_t *c, cli_conn_t *conn, const uint8_t *pkt, size_
 }
 
 int
+mqvpn_client_pmtud_enabled(const mqvpn_client_t *client)
+{
+    return client && client->config.pmtud ? 1 : 0;
+}
+
+int
 mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
 {
     if (!c || !pkt || len == 0) return MQVPN_ERR_INVALID_ARG;
@@ -4598,14 +4992,14 @@ mqvpn_client_on_tun_packet(mqvpn_client_t *c, const uint8_t *pkt, size_t len)
     if (tun_validate_src(c, conn, pkt, len, ip_ver) != TUN_INGRESS_PROCEED)
         return MQVPN_OK;
 
-    int do_stamp = 0;
+    int do_stamp = 0, redundant = 0;
     mqvpn_reorder_tx_peek_t peek = {0};
-    if (tun_decide_lane(c, conn, pkt, len, ip_ver, &do_stamp, &peek) !=
+    if (tun_decide_lane(c, conn, pkt, len, ip_ver, &do_stamp, &peek, &redundant) !=
         TUN_INGRESS_PROCEED) {
         return MQVPN_OK;
     }
 
-    return tun_send_datagram(c, conn, pkt, len, do_stamp, &peek);
+    return tun_send_datagram(c, conn, pkt, len, do_stamp, &peek, redundant);
 }
 
 int
@@ -4655,7 +5049,7 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
     if (p->recreate_after_us == 0 || now < p->recreate_after_us) return;
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
     LOG_I(c, "path[%d] retry: result=%s retries=%d/%d", idx,
           r == ACTIVATE_OK               ? "OK"
           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
@@ -4720,15 +5114,16 @@ tick_check_all_validations(mqvpn_client_t *c, uint64_t now)
          * value is pinned to xquic's enum by tests/test_xquic_abi_pin.c. */
         if (pm->path_state != MQVPN_XQC_PATH_STATE_ACTIVE) continue;
 
-        /* Branch on connection-scoped scheduler config — secondary paths
-         * created under backup_fec are STANDBY (spec §10.1.1). Scheduler
-         * is immutable per-connection so the result is stable for the
-         * lifetime of this path. Dispatched via VALIDATION_OK; the
-         * handler sets path_stable_since_us = now and transitions to
-         * the carried target. */
-        path_lifecycle_t target = (c->config.scheduler == MQVPN_SCHED_BACKUP_FEC)
-                                      ? PATH_LC_STANDBY
-                                      : PATH_LC_ACTIVE;
+        /* Secondary paths created STANDBY (backup paths, and every
+         * secondary under backup_fec, spec §10.1.1 — see
+         * client_path_starts_standby) validate into STANDBY. The initial
+         * path (path_id 0) was created AVAILABLE with the connection, so it
+         * validates into ACTIVE even on a backup slot. Dispatched via
+         * VALIDATION_OK; the handler sets path_stable_since_us = now and
+         * transitions to the carried target. */
+        path_lifecycle_t target =
+            (p->xqc_path_id != 0 && client_path_starts_standby(c, p)) ? PATH_LC_STANDBY
+                                                                      : PATH_LC_ACTIVE;
         path_event_ctx_t v_ctx = {.validated_target = target, .now_us = now};
         path_on_event(c, p, PATH_EVENT_VALIDATION_OK, &v_ctx);
         LOG_I(c, "path[%d] activated: path_id=%" PRIu64 " iface=%s state=%s", i,
@@ -4778,7 +5173,7 @@ tick_reconnect(mqvpn_client_t *c)
     client_reset_paths_for_reconnect(c);
 
     /* Rotate to the next usable primary path (issue #4271 Bug 2).
-     * mqvpn_reconnect_path_idx() treats inactive paths (fd gone, active=0) as
+     * mqvpn_reconnect_path_idx() treats detached paths (transport gone) as
      * backup so the rotation skips them, and falls back to an attached
      * backup path when no attached primary is left. This prevents hammering
      * a dead path when a live alternative exists. */
@@ -4834,19 +5229,114 @@ tick_handshake_watchdog(mqvpn_client_t *c)
         /* xqc_h3_conn_close marks the conn for close. Engine drains it on
          * the next main_logic call (already queued in mqvpn_client_tick after
          * this watchdog) and fires cb_h3_conn_close, which arms the reconnect
-         * timer; tick_reconnect → client_reset_paths_for_reconnect rotates
-         * primary_path_idx so the dead first path is skipped. */
+         * timer; tick_reconnect then rotates primary_path_idx
+         * (mqvpn_reconnect_path_idx) so the dead first path is skipped. */
         xqc_h3_conn_close(c->engine, &c->conn->cid);
     } else {
         /* No live conn (cli_start_connection failed earlier) — shortcut to
          * reconnect via the same code path. Rotation still happens in
-         * client_reset_paths_for_reconnect. */
+         * tick_reconnect. */
         client_arm_reconnect_timer(c);
         client_set_state(c, MQVPN_STATE_RECONNECTING);
     }
 }
 
+/* ─── Tick: deferred connection close + tunnel setup watchdog ─── */
+
+static void
+tick_conn_close_pending(mqvpn_client_t *c)
+{
+    cli_conn_t *conn = c->conn;
+    if (c->shutting_down || !conn || !c->engine) return;
+
+    if (!conn->close_pending && client_tunnel_setup_stalled(c, client_now_us(c))) {
+        c->auth_started_us = 0; /* fire once */
+        LOG_W(c, "tunnel setup timed out after %dms (%s)", TUNNEL_SETUP_TIMEOUT_MS,
+              conn->tunnel_ok ? "no ADDRESS_ASSIGN" : "no CONNECT-IP response");
+        if (!conn->tunnel_notified) {
+            conn->tunnel_notified = 1; /* cb_h3_conn_close reports nothing more */
+            if (c->cbs.tunnel_closed)
+                c->cbs.tunnel_closed(MQVPN_ERR_TIMEOUT, c->user_ctx);
+        }
+        cli_conn_request_close(conn, "tunnel setup timed out");
+    }
+
+    if (conn->close_pending != 1) return;
+    conn->close_pending = 2; /* issued: xqc_h3_conn_close is not repeated */
+    LOG_I(c, "closing connection: %s", conn->close_why ? conn->close_why : "?");
+    /* The close notify (cb_h3_conn_close) runs from the main_logic call that
+     * follows in mqvpn_client_tick. */
+    xqc_h3_conn_close(c->engine, &conn->cid);
+}
+
+/* ─── Tick: deferred PATH_ABANDON of platform-dropped paths ─── */
+
+static void
+tick_retry_path_abandon(mqvpn_client_t *c)
+{
+    cli_conn_t *conn = c->conn;
+    if (!conn || !conn->abandon_retry_mask || !c->engine || c->shutting_down) return;
+    for (int i = 0; i < c->n_paths; i++) {
+        uint32_t bit = 1u << (unsigned)i;
+        if (!(conn->abandon_retry_mask & bit)) continue;
+        path_entry_t *p = &c->paths[i];
+        /* Gone from xquic meanwhile (or slot moved on): nothing to abandon. */
+        if (p->state != PATH_LC_CLOSED_DROPPED || !path_xquic_abandon_due(p)) {
+            conn->abandon_retry_mask &= ~bit;
+            continue;
+        }
+        /* Only once another validated path exists: asking xquic earlier
+         * would just be refused again, with a warning on every tick. */
+        int other_live = 0;
+        for (int j = 0; j < c->n_paths && !other_live; j++)
+            other_live = j != i && (c->paths[j].state == PATH_LC_ACTIVE ||
+                                    c->paths[j].state == PATH_LC_STANDBY);
+        if (!other_live) continue;
+        xqc_int_t rc = xqc_conn_close_path(c->engine, &conn->cid, p->xqc_path_id);
+        if (rc == -XQC_EMP_NO_ACTIVE_PATH) continue; /* still the last one */
+        conn->abandon_retry_mask &= ~bit;
+        LOG_I(c, "path[%s] deferred PATH_ABANDON sent (rc=%d)", p->name, (int)rc);
+    }
+}
+
 /* ─── Tick ─── */
+
+/* Redundant mode, every 100 ms: re-sync the tracker's slot bindings; while some
+ * path is usable, feed it each usable path's minimum RTT (base of its queue) and
+ * load, and update overload mode. An update that finds no packet counted for 1 s,
+ * or no judgement for 1 s (a total outage skips the update), starts the judgement
+ * afresh. */
+static void
+tick_redundant_refresh(mqvpn_client_t *c)
+{
+    cli_conn_t *conn = c->conn;
+    if (!conn || !conn->redundant_tx) return;
+    uint64_t now = client_now_us(c);
+    if (conn->redundant_refresh_us && now - conn->redundant_refresh_us < 100000) return;
+    conn->redundant_refresh_us = now ? now : 1;
+
+    int usable[MQVPN_MAX_PATHS];
+    int nu = redundant_usable_paths(c, conn, usable);
+    if (nu == 0 || !c->engine || !c->multipath_ready) return;
+
+    xqc_conn_stats_t st = xqc_conn_get_stats(c->engine, &conn->cid);
+    for (int j = 0; j < nu; j++) {
+        const xqc_path_metrics_t *pm =
+            xqc_find_path_metrics(&st, c->paths[usable[j]].xqc_path_id);
+        if (pm)
+            mqvpn_redundant_tx_set_path_metrics(conn->redundant_tx, usable[j],
+                                                pm->path_min_rtt, pm->path_est_bw,
+                                                pm->path_bytes_in_flight);
+    }
+    free(st.paths_info);
+
+    int mode = mqvpn_redundant_tx_update_mode(conn->redundant_tx, usable, nu, now);
+    if (mode > 0)
+        LOG_I(c, "redundant mode: no path can carry the stream alone; "
+                 "sending without copies");
+    else if (mode < 0)
+        LOG_I(c, "redundant mode: sending copies on every path again");
+}
 
 int
 mqvpn_client_tick(mqvpn_client_t *c)
@@ -4855,9 +5345,13 @@ mqvpn_client_tick(mqvpn_client_t *c)
     ASSERT_TICK_THREAD(c);
 
     tick_handshake_watchdog(c);
+    tick_conn_close_pending(c);
     if (c->engine) xqc_engine_main_logic(c->engine);
+    tick_retry_path_abandon(c);
     tick_path_recovery(c);
     tick_reconnect(c);
+
+    tick_redundant_refresh(c);
 
     /* §5/§11.1: drive reorder RX gap timeouts + idle eviction. */
     if (c->conn && c->conn->reorder_rx)
@@ -4885,12 +5379,51 @@ mqvpn_client_get_state(const mqvpn_client_t *c)
     return c->state;
 }
 
-int
-mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
+/* Out-parameter structs (mqvpn_stats_t, mqvpn_interest_t, mqvpn_path_info_t)
+ * grow by appending fields. The caller states how much storage it has in
+ * struct_size; the library writes at most that much, and never more than
+ * its own sizeof. Callers that leave struct_size unset or below the layout
+ * every libmqvpn.so.4 caller has (CLI_*_SIZE_SO4) are given that baseline,
+ * which is what the library always wrote, so they keep working; a large or
+ * garbage value is clamped to the library's own size. */
+#define CLI_SIZE_THROUGH(T, f) (offsetof(T, f) + sizeof(((T *)0)->f))
+#define CLI_ROUND_UP(n, a)     ((((n) + (a) - 1) / (a)) * (a))
+#define CLI_STATS_SIZE_SO4                                          \
+    CLI_ROUND_UP(CLI_SIZE_THROUGH(mqvpn_stats_t, udp_tx_datagrams), \
+                 _Alignof(mqvpn_stats_t))
+#define CLI_INTEREST_SIZE_SO4 \
+    CLI_ROUND_UP(CLI_SIZE_THROUGH(mqvpn_interest_t, is_idle), _Alignof(mqvpn_interest_t))
+#define CLI_PATH_INFO_SIZE_SO4                                  \
+    CLI_ROUND_UP(CLI_SIZE_THROUGH(mqvpn_path_info_t, bytes_rx), \
+                 _Alignof(mqvpn_path_info_t))
+_Static_assert(CLI_STATS_SIZE_SO4 <= sizeof(mqvpn_stats_t), "stats baseline");
+_Static_assert(CLI_INTEREST_SIZE_SO4 <= sizeof(mqvpn_interest_t), "interest baseline");
+_Static_assert(CLI_PATH_INFO_SIZE_SO4 <= sizeof(mqvpn_path_info_t), "path_info baseline");
+
+static size_t
+cli_out_struct_size(uint32_t caller_size, size_t baseline, size_t full)
 {
-    if (!c || !out) return MQVPN_ERR_INVALID_ARG;
+    if (caller_size < baseline) return baseline;
+    return caller_size < full ? caller_size : full;
+}
+
+MQVPN_INTERNAL
+size_t
+mqvpn_client_test_out_struct_size(uint32_t caller_size, size_t baseline, size_t full)
+{
+    return cli_out_struct_size(caller_size, baseline, full);
+}
+
+int
+mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out_user)
+{
+    if (!c || !out_user) return MQVPN_ERR_INVALID_ARG;
+    size_t out_size =
+        cli_out_struct_size(out_user->struct_size, CLI_STATS_SIZE_SO4, sizeof(*out_user));
+    mqvpn_stats_t st_local;
+    mqvpn_stats_t *out = &st_local;
     memset(out, 0, sizeof(*out));
-    out->struct_size = sizeof(*out);
+    out->struct_size = (uint32_t)out_size;
     out->bytes_tx = c->bytes_tx;
     out->bytes_rx = c->bytes_rx;
     out->dgram_sent = c->dgram_sent;
@@ -4927,6 +5460,7 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
         out->srtt_ms = (int)(xs.srtt / 1000);
         free(xs.paths_info);
     }
+    memcpy(out_user, out, out_size);
     return MQVPN_OK;
 }
 
@@ -4954,22 +5488,30 @@ mqvpn_client_get_paths(const mqvpn_client_t *c, mqvpn_path_info_t *out, int max_
     if (c->engine && c->conn) xstats = xqc_conn_get_stats(c->engine, &c->conn->cid);
 
     int count = c->n_paths < max_paths ? c->n_paths : max_paths;
+    /* The array stride is the caller's element size (out[0].struct_size),
+     * see cli_out_struct_size. */
+    size_t stride = count > 0 ? cli_out_struct_size(out[0].struct_size,
+                                                    CLI_PATH_INFO_SIZE_SO4, sizeof(*out))
+                              : sizeof(*out);
     for (int i = 0; i < count; i++) {
         const path_entry_t *p = &c->paths[i];
-        out[i].struct_size = sizeof(out[i]);
-        out[i].handle = p->handle;
-        out[i].status = p->status;
-        out[i].flags = p->flags;
-        memcpy(out[i].name, p->name, sizeof(out[i].name));
-        out[i].bytes_tx = p->bytes_tx;
-        out[i].bytes_rx = p->bytes_rx;
+        mqvpn_path_info_t pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.struct_size = (uint32_t)stride;
+        pi.handle = p->handle;
+        pi.status = p->status;
+        pi.flags = p->flags;
+        memcpy(pi.name, p->name, sizeof(pi.name));
+        pi.bytes_tx = p->bytes_tx;
+        pi.bytes_rx = p->bytes_rx;
 
         /* Map SRTT from xquic path metrics (us -> ms) */
-        out[i].srtt_ms = 0;
+        pi.srtt_ms = 0;
         if (p->xquic_path_live) {
             const xqc_path_metrics_t *pm = xqc_find_path_metrics(&xstats, p->xqc_path_id);
-            if (pm) out[i].srtt_ms = (int)(pm->path_srtt / 1000);
+            if (pm) pi.srtt_ms = (int)(pm->path_srtt / 1000);
         }
+        memcpy((uint8_t *)out + (size_t)i * stride, &pi, stride);
     }
     *n_paths = count;
     free(xstats.paths_info);
@@ -5064,8 +5606,8 @@ mqvpn_client_get_info(const mqvpn_client_t *c, mqvpn_client_info_t *out)
         out->bytes_rx += st.paths_info[p].path_recv_bytes;
 
     int np = 0;
-    for (uint32_t p = 0;
-         st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS; p++) {
+    for (uint32_t p = 0; st.paths_info && p < st.paths_info_count && np < MQVPN_MAX_PATHS;
+         p++) {
         const xqc_path_metrics_t *pm = &st.paths_info[p];
 
         mqvpn_path_stats_t *ps = &out->paths[np];
@@ -5105,7 +5647,8 @@ mqvpn_client_get_reinject(const mqvpn_client_t *c, mqvpn_internal_client_reinjec
 
     xqc_conn_stats_t st = xqc_conn_get_stats(c->engine, &c->conn->cid);
     for (uint32_t p = 0;
-         st.paths_info && p < st.paths_info_count && out->n_paths < MQVPN_MAX_PATHS; p++) {
+         st.paths_info && p < st.paths_info_count && out->n_paths < MQVPN_MAX_PATHS;
+         p++) {
         const xqc_path_metrics_t *pm = &st.paths_info[p];
         out->paths[out->n_paths].path_id = pm->path_id;
         out->paths[out->n_paths].reinject_tx_bytes = pm->path_send_reinject_bytes;
@@ -5177,11 +5720,15 @@ mqvpn_client_get_fec_stats(const mqvpn_client_t *c, mqvpn_internal_fec_stats_t *
 }
 
 int
-mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
+mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out_user)
 {
-    if (!c || !out) return MQVPN_ERR_INVALID_ARG;
+    if (!c || !out_user) return MQVPN_ERR_INVALID_ARG;
+    size_t out_size = cli_out_struct_size(out_user->struct_size, CLI_INTEREST_SIZE_SO4,
+                                          sizeof(*out_user));
+    mqvpn_interest_t in_local;
+    mqvpn_interest_t *out = &in_local;
     memset(out, 0, sizeof(*out));
-    out->struct_size = sizeof(*out);
+    out->struct_size = (uint32_t)out_size;
 
     int ms = (int)(c->next_wake_us / 1000);
 
@@ -5213,6 +5760,18 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
         int hms = (deadline > now_val) ? (int)((deadline - now_val) / 1000) : 1;
         if (ms <= 0 || hms < ms) ms = hms;
     }
+
+    /* During AUTHENTICATING, wake up no later than the tunnel setup deadline
+     * (tick_conn_close_pending), for the same reason as above. */
+    if (c->state == MQVPN_STATE_AUTHENTICATING && c->auth_started_us > 0) {
+        uint64_t deadline = c->auth_started_us + (uint64_t)TUNNEL_SETUP_TIMEOUT_MS * 1000;
+        uint64_t now_val = client_now_us(c);
+        int ams = (deadline > now_val) ? (int)((deadline - now_val) / 1000) : 1;
+        if (ms <= 0 || ams < ms) ms = ams;
+    }
+
+    /* A deferred connection close is due at the next tick. */
+    if (c->conn && c->conn->close_pending == 1) ms = 1;
 
     /* Account for path recovery and stability timers */
     if (c->multipath_ready && c->state == MQVPN_STATE_ESTABLISHED) {
@@ -5273,9 +5832,23 @@ mqvpn_client_get_interest(const mqvpn_client_t *c, mqvpn_interest_t *out)
     }
 #endif
 
+    /* Reorder RX gap deadline: no platform runs a periodic tick, so without
+     * this a packet held behind a gap waits for an unrelated xquic timer or
+     * I/O event instead of MaxWaitMs. Shorten-only, like the blocks above. */
+    if (c->conn && c->conn->reorder_rx) {
+        uint64_t d = mqvpn_reorder_rx_next_deadline_us(c->conn->reorder_rx);
+        if (d != UINT64_MAX) {
+            uint64_t now_val = client_now_us(c);
+            uint64_t dms = d > now_val ? (d - now_val + 999) / 1000 : 1;
+            int rms = dms > INT_MAX ? INT_MAX : (int)dms;
+            if (ms > 0 && rms < ms) ms = rms;
+        }
+    }
+
     out->next_timer_ms = ms > 0 ? ms : 1;
     out->tun_readable = (c->tun_active && !c->backpressure) ? 1 : 0;
     out->is_idle = (c->state != MQVPN_STATE_ESTABLISHED) ? 1 : 0;
+    memcpy(out_user, out, out_size);
     return MQVPN_OK;
 }
 
@@ -5298,4 +5871,127 @@ mqvpn_client_set_server_addr(mqvpn_client_t *c, const struct sockaddr *addr,
     memcpy(&c->server_addr, addr, addrlen);
     c->server_addrlen = addrlen;
     return MQVPN_OK;
+}
+
+/* ── Redundant-mode test hooks (declared in mqvpn_internal.h) ── */
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_redundant_fixture(mqvpn_client_t *c, int n_paths, size_t dgram_mss,
+                                    int reorder_peer)
+{
+    if (!c || !c->config.redundant || n_paths < 0 || n_paths > MQVPN_MAX_PATHS) return -1;
+    if (!c->conn && mqvpn_client_test_conn_alloc(c) != 0) return -1;
+    cli_conn_t *conn = c->conn;
+    conn->redundant_tx = mqvpn_redundant_tx_new();
+    if (!conn->redundant_tx) return -1;
+    conn->tunnel_ok = 1;
+    conn->dgram_mss = dgram_mss;
+    conn->masque_stream_id = 4;
+    if (reorder_peer) {
+        conn->reorder_tx = mqvpn_reorder_tx_new(&c->config.reorder, 1);
+        if (!conn->reorder_tx) return -1;
+        conn->peer_reorder_supported = 1;
+    }
+    for (int i = 0; i < n_paths; i++) {
+        path_entry_t *p = &c->paths[i];
+        p->xquic_path_live = 1;             /* LINT-ALLOW: test wrapper seed */
+        p->state = PATH_LC_ACTIVE;          /* LINT-ALLOW: test wrapper seed */
+        p->xqc_path_id = 100 + (uint64_t)i; /* LINT-ALLOW: test wrapper seed */
+    }
+    if (c->n_paths < n_paths) c->n_paths = n_paths; /* LINT-ALLOW: test wrapper seed */
+    return 0;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_mss_updated(mqvpn_client_t *c, size_t dgram_mss, int reorder_peer)
+{
+    if (!c) return -1;
+    if (!c->conn && mqvpn_client_test_conn_alloc(c) != 0) return -1;
+    cli_conn_t *conn = c->conn;
+    conn->masque_stream_id = 4;
+    conn->peer_reorder_supported = reorder_peer;
+    /* A connection with reorder configured has its RX engine (the
+     * advertise condition of cli_inner_mtu_budget). */
+    if (c->config.reorder.mode != MQVPN_REORDER_OFF && !conn->reorder_rx) {
+        conn->reorder_rx =
+            mqvpn_reorder_rx_new(&c->config.reorder, 1, cli_reorder_deliver, conn);
+        if (!conn->reorder_rx) return -1;
+    }
+    c->tun_active = 1;
+    cb_dgram_mss_updated(NULL, dgram_mss, conn);
+    return c->mtu;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_reorder_peek_hdr(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                                   uint8_t hdr_out[MQVPN_REORDER_HDR_LEN])
+{
+    cli_conn_t *conn = c ? c->conn : NULL;
+    if (!conn || !conn->reorder_tx) return -1;
+    size_t udp_mss = xqc_h3_ext_masque_udp_mss(conn->dgram_mss, conn->masque_stream_id);
+    mqvpn_reorder_tx_peek_t peek = {0};
+    int act = (int)mqvpn_reorder_tx_peek(conn->reorder_tx, pkt, len, client_now_us(c),
+                                         (uint32_t)udp_mss, &peek);
+    if (act == MQVPN_REORDER_TX_STAMP) memcpy(hdr_out, peek.hdr, MQVPN_REORDER_HDR_LEN);
+    return act;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_redundant_send(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                                 mqvpn_test_send_fn send, void *ud)
+{
+    if (!c || !c->conn) return -1;
+    c->conn->test_send = send;
+    c->conn->test_send_ud = ud;
+    int r = mqvpn_client_on_tun_packet(c, pkt, len);
+    c->conn->test_send = NULL;
+    c->conn->test_send_ud = NULL;
+    return r;
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_decide_lane(mqvpn_client_t *c, const uint8_t *pkt, size_t len,
+                              int *do_stamp, int *redundant)
+{
+    mqvpn_reorder_tx_peek_t peek = {0};
+    *do_stamp = 0;
+    *redundant = 0;
+    return (int)tun_decide_lane(c, c->conn, pkt, len, pkt[0] >> 4, do_stamp, &peek,
+                                redundant);
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_dgram_notify(mqvpn_client_t *c, uint64_t dgram_id, int acked)
+{
+    cli_dgram_notify(c ? c->conn : NULL, dgram_id, acked);
+}
+
+MQVPN_INTERNAL
+int
+mqvpn_client_test_redundant_outstanding(mqvpn_client_t *c, int idx)
+{
+    if (!c || !c->conn || !c->conn->redundant_tx) return -1;
+    return mqvpn_redundant_tx_outstanding(c->conn->redundant_tx, idx);
+}
+
+MQVPN_INTERNAL
+struct mqvpn_redundant_tx_s *
+mqvpn_client_test_redundant_tx(mqvpn_client_t *c)
+{
+    return (c && c->conn) ? c->conn->redundant_tx : NULL;
+}
+
+MQVPN_INTERNAL
+void
+mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live, uint64_t xqc_path_id)
+{
+    path_entry_t *p = &c->paths[idx];
+    p->xquic_path_live = live ? 1 : 0; /* LINT-ALLOW: test wrapper seed */
+    p->xqc_path_id = xqc_path_id;      /* LINT-ALLOW: test wrapper seed */
 }

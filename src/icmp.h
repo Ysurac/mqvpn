@@ -15,6 +15,25 @@
 /* Uses existing mqvpn_tun_output_fn from libmqvpn.h */
 
 /*
+ * Whether an ICMP error may be sent about `orig` (RFC 1122 §3.2.2): 0 for a
+ * non-first fragment, a multicast or limited-broadcast destination, a source
+ * that does not name a single host (zero, loopback, multicast, class E), an
+ * ICMP error message, or a malformed header; 1 otherwise. The send functions
+ * below apply it themselves; callers that rate-limit check it first so a
+ * suppressed error does not use up a token.
+ */
+int mqvpn_icmp_error_allowed_v4(const uint8_t *orig, size_t orig_len);
+
+/*
+ * IPv6 counterpart (RFC 4443 §2.4(e)) for an error of (type, code): 0 for an
+ * unspecified or multicast source, a multicast destination (except Packet
+ * Too Big and Parameter Problem code 2), a non-first fragment, an ICMPv6
+ * error message (type < 128) or a short header; 1 otherwise.
+ */
+int mqvpn_icmp_error_allowed_v6(const uint8_t *orig, size_t orig_len, uint8_t type,
+                                uint8_t code);
+
+/*
  * Send ICMPv4 error message.  Generic (type, code, mtu) supports:
  *   type=3,code=4,mtu=N  -> Fragmentation Needed (PTB)
  *   type=3,code=1,mtu=0  -> Host Unreachable (Dest Unreach)

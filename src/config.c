@@ -10,9 +10,10 @@
  * are hand-written in both parsers.
  */
 #include "config.h"
-#include "json_mini.h"
+#include "json_util.h"
 #include "libmqvpn.h"
 #include "log.h"
+#include "redundant_tx.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -21,9 +22,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifndef _WIN32
+#  include <sys/stat.h>
+#endif
 
 #ifdef _MSC_VER
 #  define strcasecmp _stricmp
+#endif
+
+/* Upper bound for [Reorder] / [ReorderRule] CapPackets (a power of two on
+ * top of mqvpn_reorder_cap_is_valid()): the per-flow ring is allocated at
+ * this size, so an unbounded value is an allocation the operator did not
+ * mean. Defaults and presets (1024, 2048) are far below it. */
+#ifdef MQVPN_REORDER_CAP_MAX
+#  define MQVPN_CONFIG_REORDER_CAP_MAX MQVPN_REORDER_CAP_MAX
+#else
+#  define MQVPN_CONFIG_REORDER_CAP_MAX 65536u
 #endif
 
 /* ---- helpers ---- */
@@ -41,13 +55,19 @@ trim(char *s)
     return s;
 }
 
-/* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
-
-/* Parse boolean: "true"/"yes"/"1" → 1, else 0 */
+/* Parse an INI boolean, case-insensitively: true/yes/on/1 → 1,
+ * false/no/off/0 → 0. Returns -1 for anything else; callers warn and keep
+ * the default rather than silently reading an unknown word as false. */
 static int
 parse_bool(const char *val)
 {
-    return (strcmp(val, "true") == 0 || strcmp(val, "yes") == 0 || strcmp(val, "1") == 0);
+    static const char *const yes[] = {"true", "yes", "on", "1"};
+    static const char *const no[] = {"false", "no", "off", "0"};
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); i++) {
+        if (strcasecmp(val, yes[i]) == 0) return 1;
+        if (strcasecmp(val, no[i]) == 0) return 0;
+    }
+    return -1;
 }
 
 static int
@@ -131,6 +151,30 @@ section_name(int section)
     }
 }
 
+/* RedundantPorts: a bad list sets redundant_ports_err (the CLI then refuses to
+ * start) instead of degrading to "all UDP". `val` is already trimmed. */
+/* Bounded copy with an explicit NUL: a too-long value is kept truncated. */
+static void
+store_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
+{
+    size_t n = strlen(val);
+    if (n > sizeof(cfg->redundant_ports) - 1) n = sizeof(cfg->redundant_ports) - 1;
+    memcpy(cfg->redundant_ports, val, n);
+    cfg->redundant_ports[n] = '\0';
+}
+
+static void
+set_redundant_ports(mqvpn_file_config_t *cfg, const char *val)
+{
+    uint16_t tmp[MQVPN_REDUNDANT_MAX_PORTS];
+    /* The value is stored even when bad (for the error message); consumers
+     * must check redundant_ports_err before using it. */
+    store_redundant_ports(cfg, val);
+    cfg->redundant_ports_err =
+        strlen(val) >= sizeof(cfg->redundant_ports) - 1 ||
+        mqvpn_redundant_parse_ports(val, tmp, MQVPN_REDUNDANT_MAX_PORTS) < 0;
+}
+
 /* Split comma-separated DNS list into cfg->dns_servers[] */
 static void
 parse_dns_list(mqvpn_file_config_t *cfg, const char *val)
@@ -170,6 +214,11 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
         LOG_WRN("%s:%d: invalid user entry", path, lineno);
         return;
     }
+    if (strlen(name) >= sizeof(cfg->user_names[0])) {
+        LOG_WRN("%s:%d: username exceeds %zu bytes; ignoring", path, lineno,
+                sizeof(cfg->user_names[0]) - 1);
+        return;
+    }
 
     /* Reject characters that would break JSON serialization in control API */
     for (const char *p = name; *p; p++) {
@@ -179,12 +228,23 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
         }
     }
 
+    /* Too long for the table: skip rather than store a shortened name or key
+     * (a truncated name could collide with another user). */
+    if (strlen(name) >= sizeof(cfg->user_names[0]) ||
+        strlen(key) >= sizeof(cfg->user_keys[0]) ||
+        (fixed_ip && strlen(fixed_ip) >= sizeof(cfg->user_fixed_ips[0]))) {
+        LOG_WRN("%s:%d: user entry too long (name max %zu, key max %zu bytes); ignoring",
+                path, lineno, sizeof(cfg->user_names[0]) - 1,
+                sizeof(cfg->user_keys[0]) - 1);
+        return;
+    }
+
     for (int i = 0; i < cfg->n_users; i++) {
         if (strcmp(cfg->user_names[i], name) == 0) {
             snprintf(cfg->user_keys[i], sizeof(cfg->user_keys[i]), "%s", key);
             if (fixed_ip)
-                snprintf(cfg->user_fixed_ips[i], sizeof(cfg->user_fixed_ips[i]),
-                         "%s", fixed_ip);
+                snprintf(cfg->user_fixed_ips[i], sizeof(cfg->user_fixed_ips[i]), "%s",
+                         fixed_ip);
             return;
         }
     }
@@ -209,6 +269,10 @@ static void
 parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const char *path)
 {
     char pair[384];
+    if (strlen(val) >= sizeof(pair)) {
+        LOG_WRN("%s:%d: [Auth] User entry too long; ignoring", path, lineno);
+        return;
+    }
     snprintf(pair, sizeof(pair), "%s", val);
     char *sep = strchr(pair, ':');
     if (!sep) {
@@ -216,6 +280,12 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
         char *name = trim(pair);
         if (name[0] == '\0') {
             LOG_WRN("%s:%d: [Auth] User is empty", path, lineno);
+            return;
+        }
+        if (!mqvpn_user_name_ok(name, sizeof(cfg->auth_username))) {
+            LOG_WRN("%s:%d: [Auth] User contains an invalid character or is too long "
+                    "(max %zu bytes); ignoring",
+                    path, lineno, sizeof(cfg->auth_username) - 1);
             return;
         }
         snprintf(cfg->auth_username, sizeof(cfg->auth_username), "%s", name);
@@ -236,44 +306,31 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
     }
 }
 
-/* json_skip_ws, json_find_key, json_read_string, json_read_bool,
- * json_read_int are provided by json_mini.h */
-
 /* Parse JSON string array, silently capping at max_items (parity with INI
- * Path=/DNS= lists). Extra entries are parsed syntactically but not copied. */
+ * Path=/DNS= lists). Extra entries are type-checked but not copied. */
 static int
-json_read_string_array(const char *p, char out[][64], int max_items, int *n_items)
+json_read_string_array(yyjson_val *arr, char out[][64], int max_items, int *n_items)
 {
-    if (!p || !out || !n_items || *p != '[') return -1;
+    if (!yyjson_is_arr(arr) || !out || !n_items) return -1;
 
-    p = json_skip_ws(p + 1);
     int n = 0;
     int dropped = 0;
-    while (*p && *p != ']') {
-        if (*p != '"') return -1;
-
-        if (n < max_items) {
-            if (json_read_string(p, out[n], sizeof(out[n])) < 0) return -1;
-            n++;
-        } else {
-            dropped++;
-        }
-
-        const char *e = p + 1;
-        while (*e && *e != '"') {
-            if (*e == '\\' && e[1]) e++;
-            e++;
-        }
-        if (*e != '"') return -1;
-        p = json_skip_ws(e + 1);
-
-        if (*p == ',')
-            p = json_skip_ws(p + 1);
-        else if (*p != ']')
+    yyjson_arr_iter it = yyjson_arr_iter_with(arr);
+    yyjson_val *el;
+    while ((el = yyjson_arr_iter_next(&it)) != NULL) {
+        char spill[64];
+        if (json_copy_str(el, n < max_items ? out[n] : spill, sizeof(spill)) < 0)
             return -1;
+        /* An entry that does not fit is skipped, never stored shortened. */
+        if (yyjson_get_len(el) >= sizeof(spill))
+            LOG_WRN("JSON: array entry longer than %zu bytes; ignoring it",
+                    sizeof(spill) - 1);
+        else if (n < max_items)
+            n++;
+        else
+            dropped++;
     }
 
-    if (*p != ']') return -1;
     if (dropped)
         LOG_WRN("JSON: array capped at %d items, dropped %d", max_items, dropped);
     *n_items = n;
@@ -281,8 +338,7 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
 }
 
 static int
-json_add_user_cb(void *ctx, const char *name, const char *key,
-                 const char *fixed_ip)
+json_add_user_cb(void *ctx, const char *name, const char *key, const char *fixed_ip)
 {
     /* add_user_entry() logs and skips invalid/duplicate/overflow entries
      * rather than failing the whole parse; preserve that here. */
@@ -291,11 +347,11 @@ json_add_user_cb(void *ctx, const char *name, const char *key,
 }
 
 static int
-json_read_users(mqvpn_file_config_t *cfg, const char *p)
+json_read_users(mqvpn_file_config_t *cfg, yyjson_val *v)
 {
-    if (!cfg || !p || *p != '[') return -1;
+    if (!cfg || !yyjson_is_arr(v)) return -1;
     cfg->n_users = 0;
-    return mqvpn_json_parse_users(p, cfg, json_add_user_cb);
+    return mqvpn_json_parse_users(v, cfg, json_add_user_cb);
 }
 
 /* Parse the "reorder_rules" JSON array of {proto, port, profile} objects into
@@ -305,22 +361,21 @@ json_read_users(mqvpn_file_config_t *cfg, const char *p)
  * object is seeded with begin-time defaults (proto UDP, profile QUIC_BULK) and
  * over-cap objects are dropped without touching the last accepted rule. An
  * invalid proto/profile/port warns but keeps the begin-time default (the rule
- * is still added), exactly as the INI parser does. Returns 0 on success, -1 on
- * malformed JSON. Declared here; defined after the reorder mappers below. */
-static int json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p);
+ * is still added), exactly as the INI parser does. Returns 0 on success, -1 if
+ * the value is not an array or an element is not an object. Declared here;
+ * defined after the reorder mappers below. */
+static int json_read_reorder_rules(mqvpn_file_config_t *cfg, yyjson_val *arr);
 
-/* §16.1 [Reorder] Enabled mapping: off/false→OFF, on/true→ON, auto→ON+warn
- * (adaptive is a later phase; v1 treats auto as ON). Returns 0 on a recognized
- * value (and writes *out), -1 otherwise. */
+/* §16.1 [Reorder] Enabled mapping: any parse_bool() word (off/false/no/0 →
+ * OFF, on/true/yes/1 → ON), plus auto→ON+warn (adaptive is a later phase; v1
+ * treats auto as ON). Returns 0 on a recognized value (and writes *out), -1
+ * otherwise. */
 static int
 parse_reorder_enabled(const char *val, mqvpn_reorder_mode_t *out)
 {
-    if (strcasecmp(val, "off") == 0 || strcasecmp(val, "false") == 0) {
-        *out = MQVPN_REORDER_OFF;
-        return 0;
-    }
-    if (strcasecmp(val, "on") == 0 || strcasecmp(val, "true") == 0) {
-        *out = MQVPN_REORDER_ON;
+    int b = parse_bool(val);
+    if (b >= 0) {
+        *out = b ? MQVPN_REORDER_ON : MQVPN_REORDER_OFF;
         return 0;
     }
     if (strcasecmp(val, "auto") == 0) {
@@ -438,7 +493,8 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
 
 typedef enum {
     CFGK_STR,             /* char[]: snprintf copy, silent truncation          */
-    CFGK_BOOL,            /* int: parse_bool / json_read_bool                  */
+    CFGK_BOOL,            /* int: parse_bool / JSON bool                       */
+    CFGK_BOOL_ONOFF,      /* int: INI also accepts on/off (any case); bad = ignored */
     CFGK_INT,             /* int: int_ok() gate; optional fallback on invalid  */
     CFGK_U32,             /* uint32_t: inclusive max bound                     */
     CFGK_U16,             /* uint16_t: max 0xffff                              */
@@ -475,6 +531,12 @@ static int
 cfgk_int_positive(int v)
 {
     return v > 0;
+}
+
+static int
+cfgk_int_nonneg(int v)
+{
+    return v >= 0;
 }
 
 static int
@@ -535,45 +597,46 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
 #define CFGK_OFF(field) offsetof(mqvpn_file_config_t, field)
 
 /* Row helpers keep the table readable; positional init otherwise. */
-#define CFG_STR(sec, ik, jk, field)                                        \
-    {                                                                      \
-        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
-            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
-    }
-#define CFG_STR_POST(sec, ik, jk, field, post)                               \
-    {                                                                        \
-        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
-            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
-    }
-#define CFG_BOOL(sec, ik, jk, field)                                          \
-    {                                                                         \
-        (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
-    }
-#define CFG_INT(sec, ik, jk, field, okfn)                                      \
-    {                                                                          \
-        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL \
-    }
-#define CFG_INT_FB(sec, ik, jk, field, okfn, fb)                                  \
-    {                                                                             \
-        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL \
-    }
-#define CFG_U32(sec, ik, jk, field)                                                      \
-    {                                                                                    \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL \
-    }
-#define CFG_U32_POST(sec, ik, jk, field, post)                                      \
-    {                                                                               \
-        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
-            (post)                                                                  \
-    }
-#define CFG_U16(sec, ik, jk, field)                                                  \
-    {                                                                                \
-        (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
-    }
-#define CFG_U64(sec, ik, jk, field, maxv)                                         \
-    {                                                                             \
-        (sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
-    }
+#define CFG_STR(sec, ik, jk, field)             \
+    {(sec),                                     \
+     (ik),                                      \
+     (jk),                                      \
+     CFGK_STR,                                  \
+     CFGK_OFF(field),                           \
+     sizeof(((mqvpn_file_config_t *)0)->field), \
+     0,                                         \
+     NULL,                                      \
+     0,                                         \
+     0,                                         \
+     NULL}
+#define CFG_STR_POST(sec, ik, jk, field, post)  \
+    {(sec),                                     \
+     (ik),                                      \
+     (jk),                                      \
+     CFGK_STR,                                  \
+     CFGK_OFF(field),                           \
+     sizeof(((mqvpn_file_config_t *)0)->field), \
+     0,                                         \
+     NULL,                                      \
+     0,                                         \
+     0,                                         \
+     (post)}
+#define CFG_BOOL(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL}
+#define CFG_INT(sec, ik, jk, field, okfn) \
+    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL}
+#define CFG_INT_FB(sec, ik, jk, field, okfn, fb) \
+    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL}
+#define CFG_U32(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL}
+#define CFG_U32_POST(sec, ik, jk, field, post) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, (post)}
+#define CFG_U32_MAX_POST(sec, ik, jk, field, maxv, post) \
+    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, (post)}
+#define CFG_U16(sec, ik, jk, field) \
+    {(sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL}
+#define CFG_U64(sec, ik, jk, field, maxv) \
+    {(sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL}
 
 static const cfg_key_desc_t cfg_keys[] = {
     /* [Interface] */
@@ -585,10 +648,17 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_BOOL(SEC_INTERFACE, "KillSwitch", "kill_switch", kill_switch),
     CFG_BOOL(SEC_INTERFACE, "RouteViaServer", "route_via_server", route_via_server),
     CFG_BOOL(SEC_INTERFACE, "NoRoutes", "no_routes", no_routes),
+    /* Upstream (v0.16.0) spelling of the same switch, inverted: false leaves
+     * the host routing table alone. main.c folds the two together. */
+    CFG_BOOL(SEC_INTERFACE, "ManageRoutes", "manage_routes", manage_routes),
     CFG_BOOL(SEC_INTERFACE, "Reconnect", "reconnect", reconnect),
     CFG_INT(SEC_INTERFACE, "ReconnectInterval", "reconnect_interval", reconnect_interval,
             cfgk_int_positive),
     CFG_INT(SEC_INTERFACE, "MTU", "mtu", tun_mtu, cfgk_int_mtu),
+    CFG_INT(SEC_INTERFACE, "PathMTU", "path_mtu", path_mtu, cfgk_int_mtu),
+    /* strict: a value that is not a boolean is reported, not read as off */
+    {SEC_INTERFACE, "PMTUD", "pmtud", CFGK_BOOL_ONOFF, CFGK_OFF(pmtud), 0, 0, NULL, 0, 0,
+     NULL},
     /* [Server] */
     CFG_STR(SEC_SERVER, "Address", "server_addr", server_addr),
     CFG_STR(SEC_SERVER, "ServerName", "tls_server_name", tls_server_name),
@@ -607,6 +677,8 @@ static const cfg_key_desc_t cfg_keys[] = {
                  cfgk_post_warn_server_auth_key),
     CFG_STR(SEC_AUTH, "Username", "auth_username", auth_username),
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
+    CFG_INT_FB(SEC_AUTH, "MaxSessionsPerUser", "max_sessions_per_user",
+               max_sessions_per_user, cfgk_int_nonneg, 0),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
     CFG_INT(SEC_CONTROL, "Port", "control_port", control_port, cfgk_int_positive),
@@ -615,6 +687,10 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_CONTROL, "ControlAddr", NULL, control_addr),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
+    CFG_BOOL(SEC_MULTIPATH, "AllowClientScheduler", "allow_client_scheduler",
+             allow_client_scheduler),
+    CFG_BOOL(SEC_MULTIPATH, "RequestServerScheduler", "request_server_scheduler",
+             request_server_scheduler),
     CFG_STR(SEC_MULTIPATH, "Reinjection", "reinjection", reinjection),
     CFG_INT_FB(SEC_MULTIPATH, "ReinjectionSrttFactorPct", "reinjection_srtt_factor_pct",
                reinjection_srtt_factor_pct, cfgk_int_reinj_factor_pct, 110),
@@ -623,11 +699,14 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_INT_FB(SEC_MULTIPATH, "ReinjectionDeadlineLowerBoundMs",
                "reinjection_deadline_lower_bound_ms", reinjection_deadline_lower_bound_ms,
                cfgk_int_reinj_deadline_ms, 20),
+    {SEC_MULTIPATH, "Redundant", "redundant", CFGK_BOOL_ONOFF, CFGK_OFF(redundant), 0, 0,
+     NULL, 0, 0, NULL},
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_STR(SEC_MULTIPATH, "CongestionControl", "congestion_control", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
-    CFG_BOOL(SEC_MULTIPATH, "ReinjectionControl", "reinjection_control", reinjection_control),
+    CFG_BOOL(SEC_MULTIPATH, "ReinjectionControl", "reinjection_control",
+             reinjection_control),
     CFG_STR(SEC_MULTIPATH, "ReinjectionMode", "reinjection_mode", reinjection_mode),
     CFG_STR(SEC_MULTIPATH, "ReinjCtl", "reinj_ctl", reinjection_mode),
     CFG_BOOL(SEC_MULTIPATH, "Fec", "fec", fec_enable),
@@ -640,8 +719,9 @@ static const cfg_key_desc_t cfg_keys[] = {
      NULL, 0, 0, NULL},
     CFG_U32_POST(SEC_REORDER, "MaxWaitMs", "max_wait_ms", reorder.max_wait_ms,
                  cfgk_post_explicit_wait),
-    CFG_U32_POST(SEC_REORDER, "CapPackets", "cap_packets", reorder.cap_packets_per_flow,
-                 cfgk_post_explicit_cap),
+    CFG_U32_MAX_POST(SEC_REORDER, "CapPackets", "cap_packets",
+                     reorder.cap_packets_per_flow, MQVPN_CONFIG_REORDER_CAP_MAX,
+                     cfgk_post_explicit_cap),
     CFG_U64(SEC_REORDER, "MaxBytesPerFlow", "max_bytes_per_flow",
             reorder.max_buffer_bytes_per_flow, 0xffffffffffffffffULL),
     CFG_U16(SEC_REORDER, "ClassifyWindow", "classify_window", reorder.classify_window),
@@ -678,11 +758,17 @@ static const cfg_key_desc_t cfg_keys[] = {
             MQVPN_RECV_RATE_LIMIT_MAX),
     CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso),
     CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
+    CFG_BOOL(SEC_ADVANCED, "TunOffload", "tun_offload", tun_offload),
+    CFG_BOOL(SEC_ADVANCED, "TunGro", "tun_gro", tun_gro),
 };
 
-/* Shared typed store. Returns 0 on success, -1 on invalid value (caller
- * warns per-surface). `v_ull` carries U32/U16/U64 payloads, `v_int` carries
- * BOOL/INT, `v_str` carries STR/REORDER_MODE. */
+/* cfg_key_store() result for a CFGK_STR value longer than its field. */
+#define CFGK_TOO_LONG (-2)
+
+/* Shared typed store. Returns 0 on success, -1 on invalid value,
+ * CFGK_TOO_LONG for an over-long string (caller warns per-surface, without
+ * echoing the value: it may be a key). `v_ull` carries U32/U16/U64 payloads,
+ * `v_int` carries BOOL/INT, `v_str` carries STR/REORDER_MODE. */
 static int
 cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_str,
               int v_int, unsigned long long v_ull)
@@ -691,8 +777,14 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
     /* memcpy for sub-int/64-bit/enum fields avoids alignment+aliasing questions;
      * int fields store via *(int *) since the offset names a real int member. */
     switch (d->type) {
-    case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
-    case CFGK_BOOL: *(int *)base = v_int; break;
+    case CFGK_STR:
+        /* A value that does not fit is rejected, never stored shortened (a
+         * truncated key or path would fail later in a confusing way). */
+        if (strlen(v_str) >= d->size) return CFGK_TOO_LONG;
+        snprintf(base, d->size, "%s", v_str);
+        break;
+    case CFGK_BOOL:
+    case CFGK_BOOL_ONOFF: *(int *)base = v_int; break;
     case CFGK_INT:
         /* forced-invalid sentinel from the walkers. Note: a genuine input of
          * -2147483648 collides with this sentinel and is rejected too;
@@ -758,7 +850,12 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         case CFGK_STR:
         case CFGK_REORDER_MODE:
         case CFGK_HYBRID_TCP_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
-        case CFGK_BOOL: rc = cfg_key_store(cfg, d, NULL, parse_bool(val), 0); break;
+        case CFGK_BOOL:
+        case CFGK_BOOL_ONOFF: {
+            int b = parse_bool(val);
+            rc = (b < 0) ? -1 : cfg_key_store(cfg, d, NULL, b, 0);
+            break;
+        }
         case CFGK_INT: {
             /* INT_MIN sentinel: forced-invalid marker so an unparseable value
              * takes the same fallback path as a parsed-but-rejected one
@@ -783,7 +880,10 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
             break;
         }
         }
-        if (rc < 0)
+        if (rc == CFGK_TOO_LONG)
+            LOG_WRN("%s:%d: %s value too long (max %zu bytes); ignoring", path, lineno,
+                    d->ini_key, d->size - 1);
+        else if (rc < 0)
             LOG_WRN("%s:%d: invalid %s '%s'; %s", path, lineno, d->ini_key, val,
                     d->has_invalid_fallback ? "using default" : "ignoring");
         return 1;
@@ -792,15 +892,13 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
 }
 
 /* JSON-side walker: applies every table row that has a json_key. SEC_REORDER
- * rows are searched inside [ro_raw, ro_end) (the bounded "reorder" object),
- * SEC_HYBRID rows inside [hy_raw, hy_end) (the bounded "hybrid" object),
- * SEC_ADVANCED rows inside [adv_raw, adv_end) (the bounded "advanced" object);
- * everything else at top level. Absent keys are silent (forward-compat);
- * present-but-invalid keys warn. */
+ * rows are looked up in the "reorder" object (ro), SEC_HYBRID rows in the
+ * "hybrid" object (hy), SEC_ADVANCED rows in the "advanced" object (adv);
+ * everything else in root. A NULL section object skips its rows. Absent keys
+ * are silent (forward-compat); present-but-invalid keys warn. */
 static void
-cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
-                   const char *ro_end, const char *hy_raw, const char *hy_end,
-                   const char *adv_raw, const char *adv_end)
+cfg_key_apply_json(mqvpn_file_config_t *cfg, yyjson_val *root, yyjson_val *ro,
+                   yyjson_val *hy, yyjson_val *adv)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
      * control_listen, all char[280]) or JSON strings would truncate
@@ -810,19 +908,11 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         const cfg_key_desc_t *d = &cfg_keys[i];
         if (!d->json_key) continue;
 
-        const char *v;
-        if (d->section == SEC_REORDER) {
-            if (!ro_raw || !ro_end) continue;
-            v = json_find_key_bounded(ro_raw, ro_end, d->json_key);
-        } else if (d->section == SEC_HYBRID) {
-            if (!hy_raw || !hy_end) continue;
-            v = json_find_key_bounded(hy_raw, hy_end, d->json_key);
-        } else if (d->section == SEC_ADVANCED) {
-            if (!adv_raw || !adv_end) continue;
-            v = json_find_key_bounded(adv_raw, adv_end, d->json_key);
-        } else {
-            v = json_find_key(json_text, d->json_key);
-        }
+        yyjson_val *obj = d->section == SEC_REORDER    ? ro
+                          : d->section == SEC_HYBRID   ? hy
+                          : d->section == SEC_ADVANCED ? adv
+                                                       : root;
+        yyjson_val *v = yyjson_obj_get(obj, d->json_key);
         if (!v) continue;
 
         int rc = 0;
@@ -830,19 +920,22 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         case CFGK_STR:
         case CFGK_REORDER_MODE:
         case CFGK_HYBRID_TCP_MODE:
-            if (json_read_string(v, sbuf, sizeof(sbuf)) < 0)
+            /* json_copy_str truncates silently: a full buffer means too long. */
+            if (json_copy_str(v, sbuf, sizeof(sbuf)) < 0)
                 rc = -1;
+            else if (d->type == CFGK_STR && yyjson_get_len(v) >= sizeof(sbuf))
+                rc = CFGK_TOO_LONG;
             else
                 rc = cfg_key_store(cfg, d, sbuf, 0, 0);
             break;
-        case CFGK_BOOL: {
-            int iv = 0;
-            rc = (json_read_bool(v, &iv) < 0) ? -1 : cfg_key_store(cfg, d, NULL, iv, 0);
+        case CFGK_BOOL:
+        case CFGK_BOOL_ONOFF:
+            rc = yyjson_is_bool(v) ? cfg_key_store(cfg, d, NULL, yyjson_get_bool(v), 0)
+                                   : -1;
             break;
-        }
         case CFGK_INT: {
             int iv = 0;
-            if (json_read_int(v, &iv) < 0)
+            if (json_get_int(v, &iv) < 0)
                 rc = d->has_invalid_fallback ? cfg_key_store(cfg, d, NULL, INT_MIN, 0)
                                              : -1;
             else
@@ -855,12 +948,14 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
             /* u64 lexing + table bound == INI parse_u32_strict semantics for
              * u32 fields (accepts (2^31, 2^32); regression pin deb2115). */
             uint64_t uv = 0;
-            rc = (json_read_u64_strict(v, &uv) < 0) ? -1
-                                                    : cfg_key_store(cfg, d, NULL, 0, uv);
+            rc = (json_get_u64(v, &uv) < 0) ? -1 : cfg_key_store(cfg, d, NULL, 0, uv);
             break;
         }
         }
-        if (rc < 0)
+        if (rc == CFGK_TOO_LONG)
+            LOG_WRN("JSON: %s value too long (max %zu bytes); ignoring", d->json_key,
+                    d->size - 1);
+        else if (rc < 0)
             LOG_WRN("JSON: invalid %s%s; %s",
                     d->section == SEC_REORDER    ? "reorder "
                     : d->section == SEC_HYBRID   ? "hybrid "
@@ -873,46 +968,33 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
 /* Parse a JSON array of "a.b.c.d/n" CIDR strings into out[], capping at
  * max_items (parity with the INI EgressAllow/EgressDeny cap). A malformed
  * CIDR string is skipped with a warning (same tolerance as an invalid INI
- * entry); malformed JSON syntax (unterminated string, wrong shape) aborts
- * the whole array, same as json_read_string_array. */
+ * entry); a non-string element aborts the whole array, same as
+ * json_read_string_array. */
 static int
-json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items, const char *p)
+json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items,
+                     yyjson_val *arr)
 {
-    if (!p || !out || !n_items || *p != '[') return -1;
+    if (!yyjson_is_arr(arr) || !out || !n_items) return -1;
 
-    p = json_skip_ws(p + 1);
     int n = 0;
     int dropped = 0;
-    while (*p && *p != ']') {
-        if (*p != '"') return -1;
-
+    yyjson_arr_iter it = yyjson_arr_iter_with(arr);
+    yyjson_val *el;
+    while ((el = yyjson_arr_iter_next(&it)) != NULL) {
         char s[INET6_ADDRSTRLEN + 8];
-        if (json_read_string(p, s, sizeof(s)) < 0) return -1;
+        if (json_copy_str(el, s, sizeof(s)) < 0) return -1;
+        int src = yyjson_get_len(el) >= sizeof(s) ? -1 : 0; /* too long: invalid */
 
         mqvpn_cidr_entry_t entry;
-        if (mqvpn_parse_cidr(s, &entry) < 0) {
+        if (src != 0 || mqvpn_parse_cidr(s, &entry) < 0) {
             LOG_WRN("JSON: invalid hybrid egress CIDR '%s'; ignoring", s);
         } else if (n < max_items) {
             out[n++] = entry;
         } else {
             dropped++;
         }
-
-        const char *e = p + 1;
-        while (*e && *e != '"') {
-            if (*e == '\\' && e[1]) e++;
-            e++;
-        }
-        if (*e != '"') return -1;
-        p = json_skip_ws(e + 1);
-
-        if (*p == ',')
-            p = json_skip_ws(p + 1);
-        else if (*p != ']')
-            return -1;
     }
 
-    if (*p != ']') return -1;
     if (dropped)
         LOG_WRN("JSON: egress ACL array capped at %d items, dropped %d", max_items,
                 dropped);
@@ -921,18 +1003,14 @@ json_read_cidr_array(mqvpn_cidr_entry_t *out, int max_items, int *n_items, const
 }
 
 static int
-json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
+json_read_reorder_rules(mqvpn_file_config_t *cfg, yyjson_val *arr)
 {
-    if (!cfg || !p || *p != '[') return -1;
-    p = json_skip_ws(p + 1);
+    if (!cfg || !yyjson_is_arr(arr)) return -1;
 
-    while (*p && *p != ']') {
-        if (*p != '{') return -1;
-        /* Bound sub-key searches to this rule's object span (no fixed-size copy):
-         * json_find_key() would otherwise leak into the next rule. An
-         * unterminated object aborts the whole array. */
-        const char *obj_end = json_object_end(p);
-        if (!obj_end) return -1;
+    yyjson_arr_iter it = yyjson_arr_iter_with(arr);
+    yyjson_val *obj;
+    while ((obj = yyjson_arr_iter_next(&it)) != NULL) {
+        if (!yyjson_is_obj(obj)) return -1;
 
         /* Push a default-initialized slot (proto UDP, profile QUIC_BULK, port 0);
          * over-cap rules are dropped without clobbering the last accepted one.
@@ -941,49 +1019,42 @@ json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
         if (reorder_rule_begin(cfg, 0, "json") == 0) {
             mqvpn_reorder_rule_t *rule = &cfg->reorder.rules[cfg->reorder.n_rules - 1];
 
-            const char *proto_v = json_find_key_bounded(p, obj_end, "proto");
-            if (proto_v) {
-                char s[32];
-                if (json_read_string(proto_v, s, sizeof(s)) == 0) {
-                    uint8_t pr = 0;
-                    if (parse_reorder_proto(s, &pr) == 0)
-                        rule->proto = pr;
-                    else
-                        LOG_WRN("JSON: invalid reorder rule proto '%s'; keeping default",
-                                s);
-                }
+            /* proto/profile go to the mapper only when they are strings; any
+             * other type keeps the begin-time default without a warning. */
+            char s[32];
+            if (json_copy_str(yyjson_obj_get(obj, "proto"), s, sizeof(s)) == 0) {
+                uint8_t pr = 0;
+                if (parse_reorder_proto(s, &pr) == 0)
+                    rule->proto = pr;
+                else
+                    LOG_WRN("JSON: invalid reorder rule proto '%s'; keeping default", s);
             }
 
-            const char *port_v = json_find_key_bounded(p, obj_end, "port");
+            yyjson_val *port_v = yyjson_obj_get(obj, "port");
             if (port_v) {
                 int pv = 0;
-                if (json_read_int_strict(port_v, &pv) == 0 && pv >= 0 && pv <= 0xffff)
+                if (json_get_int(port_v, &pv) == 0 && pv >= 0 && pv <= 0xffff)
                     rule->port = (uint16_t)pv;
                 else
                     LOG_WRN("JSON: invalid reorder rule port; keeping default");
             }
 
-            const char *prof_v = json_find_key_bounded(p, obj_end, "profile");
-            if (prof_v) {
-                char s[32];
-                if (json_read_string(prof_v, s, sizeof(s)) == 0) {
-                    mqvpn_reorder_profile_t prof = MQVPN_RPROF_QUIC_BULK;
-                    if (parse_reorder_profile(s, &prof) == 0)
-                        rule->profile = prof;
-                    else
-                        LOG_WRN(
-                            "JSON: invalid reorder rule profile '%s'; keeping default",
+            if (json_copy_str(yyjson_obj_get(obj, "profile"), s, sizeof(s)) == 0) {
+                mqvpn_reorder_profile_t prof = MQVPN_RPROF_QUIC_BULK;
+                if (parse_reorder_profile(s, &prof) == 0)
+                    rule->profile = prof;
+                else
+                    LOG_WRN("JSON: invalid reorder rule profile '%s'; keeping default",
                             s);
-                }
             }
 
             /* per-rule param overrides, validated exactly like the INI path:
              * max_wait_ms==0 is rejected (use profile default_udp), cap must be
              * a non-zero power of two; rejected values stay unset (explicit_*==0). */
-            const char *wait_v = json_find_key_bounded(p, obj_end, "max_wait_ms");
+            yyjson_val *wait_v = yyjson_obj_get(obj, "max_wait_ms");
             if (wait_v) {
                 uint64_t wv = 0;
-                if (json_read_u64_strict(wait_v, &wv) != 0 || wv > 0xffffffffULL)
+                if (json_get_u64(wait_v, &wv) != 0 || wv > 0xffffffffULL)
                     LOG_WRN("JSON: invalid reorder rule max_wait_ms; ignoring");
                 else if (wv == 0)
                     LOG_WRN("JSON: reorder rule max_wait_ms=0 unsupported; use "
@@ -992,56 +1063,54 @@ json_read_reorder_rules(mqvpn_file_config_t *cfg, const char *p)
                     rule->explicit_wait_ms = (uint32_t)wv;
             }
 
-            const char *cap_v = json_find_key_bounded(p, obj_end, "cap_packets");
+            yyjson_val *cap_v = yyjson_obj_get(obj, "cap_packets");
             if (cap_v) {
                 uint64_t cv = 0;
-                if (json_read_u64_strict(cap_v, &cv) != 0 || cv > 0xffffffffULL)
+                if (json_get_u64(cap_v, &cv) != 0 || cv > 0xffffffffULL)
                     LOG_WRN("JSON: invalid reorder rule cap_packets; ignoring");
                 else if (!mqvpn_reorder_cap_is_valid((uint32_t)cv))
                     LOG_WRN("JSON: reorder rule cap_packets must be a non-zero power "
                             "of two; ignoring");
+                else if (cv > MQVPN_CONFIG_REORDER_CAP_MAX)
+                    LOG_WRN("JSON: reorder rule cap_packets exceeds the maximum %u; "
+                            "ignoring",
+                            (unsigned)MQVPN_CONFIG_REORDER_CAP_MAX);
                 else
                     rule->explicit_cap = (uint32_t)cv;
             }
         }
-
-        p = json_skip_ws(obj_end + 1);
-        if (*p == ',')
-            p = json_skip_ws(p + 1);
-        else if (*p != ']')
-            return -1;
     }
 
-    return (*p == ']') ? 0 : -1;
+    return 0;
 }
 
 /* "path_policy" JSON array: [{"user","iface","weight"?,"dscp_mask"?}, ...] —
  * persisted per-(user,iface) downlink weight/dscp_mask overrides (see
  * mqvpn_path_policy_t in config.h). No INI equivalent, same as
- * reorder_rules above, whose bounded-object-span parsing this mirrors.
+ * reorder_rules above, whose per-object parsing this mirrors.
  * "weight" alone or "dscp_mask" alone is fine (has_weight/has_dscp_mask
  * track which); an entry with neither present is dropped rather than kept
  * as a no-op slot. */
 static int
-json_read_path_policy(mqvpn_file_config_t *cfg, const char *p)
+json_read_path_policy(mqvpn_file_config_t *cfg, yyjson_val *arr)
 {
-    if (!cfg || !p || *p != '[') return -1;
-    p = json_skip_ws(p + 1);
+    if (!cfg || !yyjson_is_arr(arr)) return -1;
 
-    while (*p && *p != ']') {
-        if (*p != '{') return -1;
-        const char *obj_end = json_object_end(p);
-        if (!obj_end) return -1;
+    yyjson_arr_iter it = yyjson_arr_iter_with(arr);
+    yyjson_val *obj;
+    while ((obj = yyjson_arr_iter_next(&it)) != NULL) {
+        if (!yyjson_is_obj(obj)) return -1;
 
         char user[64] = {0};
         char iface[MQVPN_PATH_LABEL_IFACE_MAX + 1] = {0};
 
-        const char *user_v = json_find_key_bounded(p, obj_end, "user");
-        const char *iface_v = json_find_key_bounded(p, obj_end, "iface");
-        int have_user = user_v && json_read_string(user_v, user, sizeof(user)) == 0 &&
-                        user[0] != '\0';
-        int have_iface = iface_v && json_read_string(iface_v, iface, sizeof(iface)) == 0 &&
-                         iface[0] != '\0';
+        /* A user or iface that does not fit counts as missing, not shortened. */
+        yyjson_val *user_v = yyjson_obj_get(obj, "user");
+        yyjson_val *iface_v = yyjson_obj_get(obj, "iface");
+        int have_user = json_copy_str(user_v, user, sizeof(user)) == 0 &&
+                        yyjson_get_len(user_v) < sizeof(user) && user[0] != '\0';
+        int have_iface = json_copy_str(iface_v, iface, sizeof(iface)) == 0 &&
+                         yyjson_get_len(iface_v) < sizeof(iface) && iface[0] != '\0';
 
         if (!have_user || !have_iface) {
             LOG_WRN("JSON: path_policy entry missing user/iface; skipping");
@@ -1051,13 +1120,13 @@ json_read_path_policy(mqvpn_file_config_t *cfg, const char *p)
         } else {
             mqvpn_path_policy_t entry;
             memset(&entry, 0, sizeof(entry));
-            mqvpn_copy_str(entry.user, sizeof(entry.user), user);
-            mqvpn_copy_str(entry.iface, sizeof(entry.iface), iface);
+            snprintf(entry.user, sizeof(entry.user), "%s", user);
+            snprintf(entry.iface, sizeof(entry.iface), "%s", iface);
 
-            const char *weight_v = json_find_key_bounded(p, obj_end, "weight");
+            yyjson_val *weight_v = yyjson_obj_get(obj, "weight");
             if (weight_v) {
                 uint64_t wv = 0;
-                if (json_read_u64_strict(weight_v, &wv) == 0 && wv <= 65535) {
+                if (json_get_u64(weight_v, &wv) == 0 && wv <= 65535) {
                     entry.weight = (uint32_t)wv;
                     entry.has_weight = 1;
                 } else {
@@ -1065,10 +1134,10 @@ json_read_path_policy(mqvpn_file_config_t *cfg, const char *p)
                 }
             }
 
-            const char *dscp_v = json_find_key_bounded(p, obj_end, "dscp_mask");
+            yyjson_val *dscp_v = yyjson_obj_get(obj, "dscp_mask");
             if (dscp_v) {
                 uint64_t mv = 0;
-                if (json_read_u64_strict(dscp_v, &mv) == 0) {
+                if (json_get_u64(dscp_v, &mv) == 0) {
                     entry.dscp_mask = mv;
                     entry.has_dscp_mask = 1;
                 } else {
@@ -1080,15 +1149,9 @@ json_read_path_policy(mqvpn_file_config_t *cfg, const char *p)
             if (entry.has_weight || entry.has_dscp_mask)
                 cfg->path_policy[cfg->n_path_policy++] = entry;
         }
-
-        p = json_skip_ws(obj_end + 1);
-        if (*p == ',')
-            p = json_skip_ws(p + 1);
-        else if (*p != ']')
-            return -1;
     }
 
-    return (*p == ']') ? 0 : -1;
+    return 0;
 }
 
 /* Handle a key=value pair in the given section */
@@ -1129,6 +1192,10 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
                 LOG_WRN("%s:%d: max %d backup paths supported, ignoring '%s'", path,
                         lineno, MQVPN_CONFIG_MAX_PATHS, val);
             }
+            return;
+        }
+        if (strcasecmp(key, "RedundantPorts") == 0) {
+            set_redundant_ports(cfg, val);
             return;
         }
         break;
@@ -1179,6 +1246,10 @@ handle_kv(mqvpn_file_config_t *cfg, int section, const char *key, const char *va
                 LOG_WRN("%s:%d: [ReorderRule] CapPackets '%s' must be a non-zero power "
                         "of two; ignoring",
                         path, lineno, val);
+            else if (v > MQVPN_CONFIG_REORDER_CAP_MAX)
+                LOG_WRN("%s:%d: [ReorderRule] CapPackets '%s' exceeds the maximum %u; "
+                        "ignoring",
+                        path, lineno, val, (unsigned)MQVPN_CONFIG_REORDER_CAP_MAX);
             else
                 rule->explicit_cap = v;
         } else {
@@ -1230,17 +1301,23 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
 {
     if (!cfg || !json_text) return -1;
 
-    const char *v = NULL;
-    char s32[32];
-
-    /* Mode has no INI counterpart (INI infers from Listen/Address). */
-    v = json_find_key(json_text, "mode");
-    if (v && json_read_string(v, s32, sizeof(s32)) == 0) {
-        if (strcasecmp(s32, "server") == 0)
-            cfg->is_server = 1;
-        else if (strcasecmp(s32, "client") == 0)
-            cfg->is_server = 0;
+    yyjson_read_err err;
+    yyjson_doc *doc = yyjson_read_opts((char *)json_text, strlen(json_text),
+                                       YYJSON_READ_NOFLAG, NULL, &err);
+    if (!doc) {
+        LOG_ERR("config: invalid JSON: %s at byte %zu", err.msg, err.pos);
+        return -1;
     }
+
+    int rc = -1;
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (!yyjson_is_obj(root)) {
+        LOG_ERR("config: JSON root must be an object");
+        goto out;
+    }
+
+    yyjson_val *v = NULL;
+    char s32[32];
 
     /* [Reorder] equivalent: a "reorder" object holding the same flat scalar
      * knobs as the INI section (snake_case), plus a "reorder_rules" array of
@@ -1251,99 +1328,134 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
      * (cap power-of-two, ingress < egress) are enforced by
      * mqvpn_reorder_config_validate() at apply time, not here. Unknown sub-keys
      * are simply not found (forward-compat). eval_force_no_demotion is
-     * deliberately NOT parseable (internal/test knob, same as INI). */
-    const char *ro_raw = json_find_key(json_text, "reorder");
-    /* Bound every sub-key search to the reorder object's span. json_find_key()
-     * does not stop at the object's closing brace, so an unbounded search would
-     * leak into sibling keys (e.g. reorder_rules' max_wait_ms) and falsely set
-     * has_explicit_*. json_object_end() returns the matching '}' (no fixed-size
-     * copy, so arbitrarily large objects are handled); a malformed/unterminated
-     * object yields ro_end == NULL and the block is skipped (same as absent). */
-    const char *ro_end = (ro_raw && *ro_raw == '{') ? json_object_end(ro_raw) : NULL;
+     * deliberately NOT parseable (internal/test knob, same as INI). A
+     * non-object "reorder" value is treated as absent. */
+    yyjson_val *ro = yyjson_obj_get(root, "reorder");
+    if (!yyjson_is_obj(ro)) ro = NULL;
 
     /* [Hybrid] equivalent: a "hybrid" object holding the same flat scalar knobs
-     * as the INI section (snake_case). Bounded the same way as "reorder". */
-    const char *hy_raw = json_find_key(json_text, "hybrid");
-    const char *hy_end = (hy_raw && *hy_raw == '{') ? json_object_end(hy_raw) : NULL;
+     * as the INI section (snake_case). Non-object is absent, like "reorder". */
+    yyjson_val *hy = yyjson_obj_get(root, "hybrid");
+    if (!yyjson_is_obj(hy)) hy = NULL;
 
     /* [Advanced] equivalent: an "advanced" object holding the same flat
-     * scalar knobs as the INI section (snake_case). Bounded the same way
-     * as "reorder"/"hybrid". */
-    const char *adv_raw = json_find_key(json_text, "advanced");
-    const char *adv_end = (adv_raw && *adv_raw == '{') ? json_object_end(adv_raw) : NULL;
+     * scalar knobs as the INI section (snake_case). Non-object is absent,
+     * like "reorder"/"hybrid". */
+    yyjson_val *adv = yyjson_obj_get(root, "advanced");
+    if (!yyjson_is_obj(adv)) adv = NULL;
 
     /* All scalar keys — one walk of the shared descriptor table. */
-    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end, adv_raw, adv_end);
+    cfg_key_apply_json(cfg, root, ro, hy, adv);
+
+    /* Mode has no INI counterpart (INI infers from Listen/Address). Applied
+     * after the table walk so an explicit "mode" wins over the server
+     * inference the "listen" row makes (cfgk_post_mark_server). */
+    v = yyjson_obj_get(root, "mode");
+    if (v) {
+        int is_str = json_copy_str(v, s32, sizeof(s32)) == 0;
+        if (is_str && strcasecmp(s32, "server") == 0)
+            cfg->is_server = 1;
+        else if (is_str && strcasecmp(s32, "client") == 0)
+            cfg->is_server = 0;
+        else
+            LOG_WRN("JSON: invalid mode (expected \"client\" or \"server\"); ignoring");
+    }
 
     /* [Hybrid] EgressAllow/EgressDeny — hand-coded like "users" below,
-     * bounded to the "hybrid" object span like every other hybrid key. */
-    if (hy_raw && hy_end) {
-        const char *ea_v = json_find_key_bounded(hy_raw, hy_end, "egress_allow");
-        if (ea_v && json_read_cidr_array(cfg->hybrid.egress_allow, MQVPN_EGRESS_ACL_MAX,
-                                         &cfg->hybrid.n_egress_allow, ea_v) < 0)
-            return -1;
+     * looked up in the "hybrid" object like every other hybrid key. */
+    v = yyjson_obj_get(hy, "egress_allow");
+    if (v && json_read_cidr_array(cfg->hybrid.egress_allow, MQVPN_EGRESS_ACL_MAX,
+                                  &cfg->hybrid.n_egress_allow, v) < 0)
+        goto out;
 
-        const char *ed_v = json_find_key_bounded(hy_raw, hy_end, "egress_deny");
-        if (ed_v && json_read_cidr_array(cfg->hybrid.egress_deny, MQVPN_EGRESS_ACL_MAX,
-                                         &cfg->hybrid.n_egress_deny, ed_v) < 0)
-            return -1;
+    v = yyjson_obj_get(hy, "egress_deny");
+    if (v && json_read_cidr_array(cfg->hybrid.egress_deny, MQVPN_EGRESS_ACL_MAX,
+                                  &cfg->hybrid.n_egress_deny, v) < 0)
+        goto out;
+
+    v = yyjson_obj_get(root, "redundant_ports");
+    if (v) {
+        char rp[1024] = "";
+        /* json_copy_str truncates silently: a full buffer means too long. */
+        if (json_copy_str(v, rp, sizeof(rp)) != 0 ||
+            yyjson_get_len(v) >= sizeof(rp) - 1) {
+            store_redundant_ports(cfg, rp); /* may be partial/empty; message only */
+            cfg->redundant_ports_err = 1;
+        } else {
+            set_redundant_ports(cfg, trim(rp));
+        }
     }
 
     char dns_buf[MQVPN_CONFIG_MAX_DNS][64];
     int n_dns = 0;
-    v = json_find_key(json_text, "dns");
+    v = yyjson_obj_get(root, "dns");
     if (v && json_read_string_array(v, dns_buf, MQVPN_CONFIG_MAX_DNS, &n_dns) == 0) {
         cfg->n_dns = 0;
         for (int i = 0; i < n_dns; i++) {
-            mqvpn_copy_str(cfg->dns_servers[cfg->n_dns],
-                           sizeof(cfg->dns_servers[cfg->n_dns]), dns_buf[i]);
+            snprintf(cfg->dns_servers[cfg->n_dns], sizeof(cfg->dns_servers[cfg->n_dns]),
+                     "%s", dns_buf[i]);
             cfg->n_dns++;
         }
     }
 
     char path_buf[MQVPN_CONFIG_MAX_PATHS][64];
     int n_paths = 0;
-    v = json_find_key(json_text, "paths");
+    v = yyjson_obj_get(root, "paths");
     if (v && json_read_string_array(v, path_buf, MQVPN_CONFIG_MAX_PATHS, &n_paths) == 0) {
         cfg->n_paths = 0;
         for (int i = 0; i < n_paths; i++) {
-            mqvpn_copy_str(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]),
-                           path_buf[i]);
+            if (strlen(path_buf[i]) >= sizeof(cfg->paths[0])) {
+                LOG_WRN("JSON: path '%s' too long; ignoring", path_buf[i]);
+                continue;
+            }
+            snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]), "%s",
+                     path_buf[i]);
             cfg->n_paths++;
         }
     }
 
     char backup_path_buf[MQVPN_CONFIG_MAX_PATHS][64];
     int n_backup_paths = 0;
-    v = json_find_key(json_text, "backup_paths");
+    v = yyjson_obj_get(root, "backup_paths");
     if (v && json_read_string_array(v, backup_path_buf, MQVPN_CONFIG_MAX_PATHS,
                                     &n_backup_paths) == 0) {
         cfg->n_backup_paths = 0;
         for (int i = 0; i < n_backup_paths; i++) {
-            mqvpn_copy_str(cfg->backup_paths[cfg->n_backup_paths],
-                     sizeof(cfg->backup_paths[cfg->n_backup_paths]),
+            if (strlen(backup_path_buf[i]) >= sizeof(cfg->backup_paths[0])) {
+                LOG_WRN("JSON: backup path '%s' too long; ignoring", backup_path_buf[i]);
+                continue;
+            }
+            snprintf(cfg->backup_paths[cfg->n_backup_paths],
+                     sizeof(cfg->backup_paths[cfg->n_backup_paths]), "%s",
                      backup_path_buf[i]);
             cfg->n_backup_paths++;
         }
     }
 
-    v = json_find_key(json_text, "users");
-    if (v && json_read_users(cfg, v) < 0) return -1;
+    v = yyjson_obj_get(root, "users");
+    if (v && json_read_users(cfg, v) < 0) {
+        LOG_ERR("config: invalid \"users\": use an array of \"name:key\" or "
+                "{\"name\":...,\"key\":...} entries, with names up to 63 bytes");
+        goto out;
+    }
 
-    v = json_find_key(json_text, "reorder_rules");
-    if (v && json_read_reorder_rules(cfg, v) < 0) return -1;
+    v = yyjson_obj_get(root, "reorder_rules");
+    if (v && json_read_reorder_rules(cfg, v) < 0) goto out;
 
-    v = json_find_key(json_text, "path_policy");
-    if (v && json_read_path_policy(cfg, v) < 0) return -1;
+    v = yyjson_obj_get(root, "path_policy");
+    if (v && json_read_path_policy(cfg, v) < 0) goto out;
 
-    return 0;
+    rc = 0;
+out:
+    yyjson_doc_free(doc);
+    return rc;
 }
 
 /* Split "host:port" or "[host]:port" (IPv6 bracket form). Pure — no I/O.
  * Returns 0 on success, -1 on malformed input.
  */
-static int
-split_addr_port(const char *str, char *host, size_t host_len, int *port)
+int
+mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *port)
 {
     if (!str || !host || !port || host_len == 0) return -1;
     const char *port_start;
@@ -1368,9 +1480,41 @@ split_addr_port(const char *str, char *host, size_t host_len, int *port)
      * silently accept. Port must be a bare unsigned decimal. */
     if (!isdigit((unsigned char)*port_start)) return -1;
     char *end;
+    errno = 0;
     long p = strtol(port_start, &end, 10);
-    if (*end != '\0' || p <= 0 || p > 65535) return -1;
+    if (errno == ERANGE || *end != '\0' || p <= 0 || p > 65535) return -1;
     *port = (int)p;
+    return 0;
+}
+
+int
+mqvpn_resolve_control_endpoint_ex(const char *file_listen, const char *file_addr,
+                                  int file_port, const char *cli_addr, int cli_port,
+                                  int cli_port_set, char *addr_buf, size_t addr_buf_len,
+                                  const char **out_addr, int *out_port)
+{
+    if (!addr_buf || addr_buf_len == 0 || !out_addr || !out_port) return -1;
+    *out_addr = NULL;
+    *out_port = 0;
+    addr_buf[0] = '\0';
+
+    /* Step 1: file base — [Control] Listen ("addr:port")... */
+    if (file_listen && file_listen[0] != '\0') {
+        int port_buf = 0;
+        if (mqvpn_parse_host_port(file_listen, addr_buf, addr_buf_len, &port_buf) < 0) {
+            return -1;
+        }
+        *out_addr = addr_buf;
+        *out_port = port_buf;
+    }
+    /* ...then the separate [Control] Addr / Port keys, field by field. */
+    if (file_addr && file_addr[0] != '\0') *out_addr = file_addr;
+    if (file_port > 0) *out_port = file_port;
+
+    /* Step 2: per-field CLI overrides. */
+    if (cli_addr != NULL) *out_addr = cli_addr;
+    if (cli_port_set) *out_port = cli_port; /* 0 means explicit disable */
+
     return 0;
 }
 
@@ -1379,26 +1523,9 @@ mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr,
                                int cli_port, int cli_port_set, char *addr_buf,
                                size_t addr_buf_len, const char **out_addr, int *out_port)
 {
-    if (!addr_buf || addr_buf_len == 0 || !out_addr || !out_port) return -1;
-    *out_addr = NULL;
-    *out_port = 0;
-    addr_buf[0] = '\0';
-
-    /* Step 1: INI base. */
-    if (file_listen && file_listen[0] != '\0') {
-        int port_buf = 0;
-        if (split_addr_port(file_listen, addr_buf, addr_buf_len, &port_buf) < 0) {
-            return -1;
-        }
-        *out_addr = addr_buf;
-        *out_port = port_buf;
-    }
-
-    /* Step 2: per-field CLI overrides. */
-    if (cli_addr != NULL) *out_addr = cli_addr;
-    if (cli_port_set) *out_port = cli_port; /* 0 means explicit disable */
-
-    return 0;
+    return mqvpn_resolve_control_endpoint_ex(file_listen, NULL, 0, cli_addr, cli_port,
+                                             cli_port_set, addr_buf, addr_buf_len,
+                                             out_addr, out_port);
 }
 
 /* ---- public API ---- */
@@ -1429,21 +1556,55 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->udp_gso = 1;
     cfg->udp_gro = 1;
     cfg->sync_path_labels = 1;
-    cfg->push_path_labels = 0; /* opt-in; memset above already zeroes this, set explicitly for clarity */
+    cfg->push_path_labels =
+        0; /* opt-in; memset above already zeroes this, set explicitly for clarity */
+    cfg->tun_offload = 1;
+    cfg->tun_gro = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
+}
+
+/* Cut an INI line at its inline comment: a '#' or ';' at the start of the
+ * line or preceded by whitespace begins a comment. A '#'/';' directly after
+ * a non-space character stays part of the value (e.g. "a#b", or base64 keys
+ * and paths, which never contain whitespace followed by '#'/';'). */
+static void
+strip_inline_comment(char *line)
+{
+    for (char *p = line; *p; p++) {
+        if ((*p == '#' || *p == ';') && (p == line || isspace((unsigned char)p[-1]))) {
+            *p = '\0';
+            return;
+        }
+    }
+}
+
+/* Warn (never fail) when a file holding a pre-shared key can be read by
+ * group or others. The key itself is never logged. */
+static void
+warn_if_secret_file_exposed(const mqvpn_file_config_t *cfg, unsigned mode,
+                            const char *path)
+{
+    if (!cfg->auth_key[0] && !cfg->server_auth_key[0] && cfg->n_users == 0) return;
+    if (mode & 077)
+        LOG_WRN("config: '%s' contains a pre-shared key but is accessible by group/other "
+                "users (mode %03o); restrict it with chmod 600",
+                path, mode & 0777);
 }
 
 int
 mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
 {
-    FILE *fp = fopen(path, "r");
+    FILE *fp = fopen(path, "rb");
     if (!fp) {
-        LOG_ERR("config: cannot open '%s': %m", path);
+        LOG_ERR("config: cannot open '%s': %s", path, strerror(errno));
         return -1;
     }
 
-    fseek(fp, 0, SEEK_END);
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
     long sz = ftell(fp);
     if (sz < 0) {
         fclose(fp);
@@ -1458,36 +1619,59 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
     }
 
     size_t got = fread(buf, 1, (size_t)sz, fp);
+    if (ferror(fp)) {
+        LOG_ERR("config: cannot read '%s': %m", path);
+        fclose(fp);
+        free(buf);
+        return -1;
+    }
+    unsigned mode = 0;
+#ifndef _WIN32
+    struct stat st;
+    if (fstat(fileno(fp), &st) == 0) mode = (unsigned)st.st_mode;
+#endif
     fclose(fp);
     buf[got] = '\0';
 
-    const char *s = buf;
+    /* Reject a truncated C string before either parser can apply any keys. */
+    if (strlen(buf) != got) {
+        LOG_ERR("%s: contains a NUL byte at offset %zu; save the file as UTF-8 "
+                "(not UTF-16)",
+                path, strlen(buf));
+        free(buf);
+        return -1;
+    }
+    char *start = buf;
+    if (got >= 3 && memcmp(start, "\xef\xbb\xbf", 3) == 0) start += 3;
+    const char *s = start;
     while (*s && isspace((unsigned char)*s))
         s++;
 
     if (*s == '{') {
         int rc = mqvpn_config_load_json_filecfg(cfg, s);
+        if (rc == 0) warn_if_secret_file_exposed(cfg, mode, path);
         free(buf);
         return rc;
     }
 
+    /* Walk physical lines by hand: strtok() would merge runs of '\n' and
+     * report wrong line numbers after blank lines. */
     int lineno = 0;
     int section = SEC_NONE;
-    char *line = strtok(buf, "\n");
-    while (line) {
+    for (char *line = start, *next; line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = '\0';
         lineno++;
+        strip_inline_comment(line);
         char *t = trim(line);
 
-        if (*t == '\0' || *t == '#' || *t == ';') {
-            line = strtok(NULL, "\n");
-            continue;
-        }
+        if (*t == '\0') continue;
 
         if (*t == '[') {
             char *end = strchr(t, ']');
             if (!end) {
                 LOG_WRN("%s:%d: malformed section header", path, lineno);
-                line = strtok(NULL, "\n");
+                section = SEC_NONE;
                 continue;
             }
             *end = '\0';
@@ -1508,22 +1692,19 @@ mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path)
                     }
                 }
             }
-            line = strtok(NULL, "\n");
             continue;
         }
 
         char *eq = strchr(t, '=');
         if (!eq) {
             LOG_WRN("%s:%d: malformed line (no '=')", path, lineno);
-            line = strtok(NULL, "\n");
             continue;
         }
         *eq = '\0';
         handle_kv(cfg, section, trim(t), trim(eq + 1), lineno, path);
-
-        line = strtok(NULL, "\n");
     }
 
+    warn_if_secret_file_exposed(cfg, mode, path);
     free(buf);
     return 0;
 }

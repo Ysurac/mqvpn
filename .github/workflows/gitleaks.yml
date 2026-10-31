@@ -7,6 +7,12 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# gitleaks-action reads the commits to scan and comments on a pull request
+# that leaks a secret.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -16,7 +22,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@v3
+      # Pinned by SHA: this step holds GITHUB_TOKEN and GITLEAKS_LICENSE, so a
+      # moved tag must not be able to run unreviewed code with them.
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # required for orgs, not personal accounts

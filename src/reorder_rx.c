@@ -17,6 +17,7 @@
 
 #include "reorder_rx.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,9 +52,19 @@ struct ring {
     uint32_t cap;       /* upper bound (power of two); window = [expected, +cap) */
     uint32_t count;     /* occupied slots */
     uint64_t bytes;     /* sum of buffered packet lengths */
+    /* Optional running total of slot-array bytes (the rx's ring_bytes_used,
+     * charged against the shared pool, §13.2). NULL = not accounted. */
+    uint64_t *mem_acct;
 };
 
 #define RING_IDX(r, s) ((uint32_t)((s) & ((uint64_t)((r)->size) - 1)))
+
+/* Slot-array bytes of a ring of `n` slots: what a peer-chosen seq span costs. */
+#define RING_SLOT_BYTES(n) ((uint64_t)(n) * sizeof(struct slot))
+
+/* First allocation size: small spans (the common case) are covered without a
+ * chain of 1→2→4→8 regrowths each time a drained ring is re-allocated. */
+#define RING_MIN_SIZE 16u
 
 /* Initialize a ring from config cap (§13.2): cap pinned, slots lazy. cap is
  * assumed a non-zero power of two (validated by mqvpn_reorder_config_validate). */
@@ -65,13 +76,19 @@ ring_init(struct ring *r, uint32_t cap)
     r->cap = cap;
     r->count = 0;
     r->bytes = 0;
+    r->mem_acct = NULL;
 }
 
 /* Release the slots array (does NOT free the referenced packets — those are
- * caller/pool owned). After free the ring is empty and slots==NULL. */
+ * caller/pool owned). After free the ring is empty and slots==NULL; cap and
+ * mem_acct are kept, and the array's bytes are uncharged. */
 static void
 ring_free(struct ring *r)
 {
+    if (r->mem_acct != NULL && r->slots != NULL) {
+        uint64_t b = RING_SLOT_BYTES(r->size);
+        *r->mem_acct = *r->mem_acct >= b ? *r->mem_acct - b : 0; /* never underflow */
+    }
     free(r->slots);
     r->slots = NULL;
     r->size = 0;
@@ -120,6 +137,31 @@ ring_alloc_slots(struct ring *r, uint32_t new_size)
     return 0;
 }
 
+/* Size the ring must have to cover `span`: the smallest power of two strictly
+ * greater than span, starting from the current size (never shrinks while
+ * allocated) or RING_MIN_SIZE, and never above cap. */
+static uint32_t
+ring_size_for_span(const struct ring *r, uint64_t span)
+{
+    uint32_t want = r->size ? r->size : (RING_MIN_SIZE < r->cap ? RING_MIN_SIZE : r->cap);
+    while (want <= span && want < r->cap) {
+        want <<= 1;
+    }
+    return want;
+}
+
+/* Extra slot-array bytes an insert at `span` would allocate (0 if it fits).
+ * The admit path charges this against the shared pool before inserting. */
+static uint64_t
+ring_growth_bytes(const struct ring *r, uint64_t span)
+{
+    if (r->slots != NULL && span < r->size) {
+        return 0;
+    }
+    uint32_t cur = r->slots != NULL ? r->size : 0;
+    return RING_SLOT_BYTES(ring_size_for_span(r, span)) - RING_SLOT_BYTES(cur);
+}
+
 /* Grow the ring so size > span (i.e. (seq-expected) < size), doubling and
  * rehashing, capped at cap. Returns 0 on success, -1 on OOM. The caller has
  * already ensured the seq is in-window (span < cap), so a fitting size <= cap
@@ -127,15 +169,7 @@ ring_alloc_slots(struct ring *r, uint32_t new_size)
 static int
 ring_grow_to_cover(struct ring *r, uint64_t span)
 {
-    /* smallest power of two strictly greater than span, but never below 1 and
-     * never above cap. */
-    uint32_t want = r->size ? r->size : 1;
-    while (want <= span && want < r->cap) {
-        want <<= 1;
-    }
-    if (want < r->size) {
-        want = r->size; /* never shrink */
-    }
+    uint32_t want = ring_size_for_span(r, span);
     if (want == r->size && r->slots != NULL) {
         return 0; /* already big enough */
     }
@@ -155,6 +189,10 @@ ring_grow_to_cover(struct ring *r, uint64_t span)
             }
         }
         free(old);
+    }
+    if (r->mem_acct != NULL) {
+        *r->mem_acct +=
+            RING_SLOT_BYTES(want) - RING_SLOT_BYTES(old != NULL ? old_size : 0);
     }
     return 0;
 }
@@ -209,6 +247,12 @@ ring_remove(struct ring *r, uint64_t seq, uint16_t *out_len, uint64_t *out_enque
     r->bytes -= s->len;
     s->len = 0;
     s->enqueue_us = 0;
+    if (r->count == 0) {
+        /* Drained: give the slot array back. Its size follows the peer-chosen
+         * seq span, so an idle flow must not keep it (§13.2: idle flows hold
+         * no ring memory; the next out-of-order insert re-allocates lazily). */
+        ring_free(r);
+    }
     return pkt;
 }
 
@@ -252,6 +296,14 @@ typedef struct mqvpn_reorder_flow {
     uint64_t gap_deadline_us;
     uint64_t gap_armed_us;
     uint32_t wait_ms; /* receiver-local; v1 = max_wait_ms (§16.3) */
+    /* §12.2 reordering mark (3GPP TS 38.323 t-Reordering, RX_NEXT / RX_REORD).
+     * rx_next: highest seq buffered in this epoch + 1; written only on a
+     * successful ring_insert (so reord-1 is always a buffered seq) and cleared
+     * by FLOW_RESET. reord: the mark of the armed period — the timeout skips
+     * every gap below it and leaves gaps at or above it to the next period.
+     * Meaningful only while gap_timer_active. */
+    uint64_t rx_next;
+    uint64_t reord;
 
     uint64_t last_seen_us;     /* observation time (stats) */
     uint64_t last_progress_us; /* deliver/buffer/advance time (eviction) */
@@ -265,6 +317,10 @@ typedef struct mqvpn_reorder_flow {
 
     mqvpn_reorder_stats_t stats;
     struct mqvpn_reorder_flow *next; /* hash chain */
+    /* §13.5 recency list, ordered by last_progress_us (head = least recent):
+     * O(1) at-cap LRU eviction, and the walk order of tick and get_stats. */
+    struct mqvpn_reorder_flow *lru_prev;
+    struct mqvpn_reorder_flow *lru_next;
 } mqvpn_reorder_flow_t;
 
 /* §11.3 process result enum (source of truth: spec §11.3). */
@@ -283,14 +339,36 @@ struct mqvpn_reorder_rx {
     void *deliver_ctx;
 
     mqvpn_reorder_flow_t **buckets;
-    uint32_t n_buckets;
+    uint32_t n_buckets;   /* power of two; doubles with n_flows up to max_buckets */
+    uint32_t max_buckets; /* sized from cfg.max_flows like the TX table */
     uint32_t n_flows;
+    mqvpn_reorder_flow_t *lru_head; /* least recent last_progress_us */
+    mqvpn_reorder_flow_t *lru_tail; /* most recent */
+
+    /* Lower bound that, with next_deadline_us below, lets
+     * mqvpn_reorder_rx_tick skip its pass over every flow: no flow can become
+     * idle before next_idle_us. Creating a flow lowers it, each pass
+     * recomputes it exactly, and progress only moves the real value later, so
+     * the pass still runs on the first tick that has something to do. (A
+     * clock that steps back could only delay an eviction by that step.) */
+    uint64_t next_idle_us;
 
     /* §13.2 shared packet pool: a global byte budget enforced across all flows.
      * Buffered packets are still individually heap-allocated, but every admit is
      * charged against this counter and rejected when it would exceed
      * cfg.global_max_buffer_bytes (pool exhaustion). */
     uint64_t pool_bytes_used;
+    /* Slot-array bytes of every flow's ring. Charged against the same
+     * global_max_buffer_bytes budget as pool_bytes_used: the array size follows
+     * the peer-chosen seq span, not the bytes buffered, so it needs its own
+     * counter but no separate allowance. */
+    uint64_t ring_bytes_used;
+
+    /* Lower bound on the earliest armed gap deadline (UINT64_MAX = none).
+     * Lowered whenever a timer is armed, recomputed exactly by every tick that
+     * sweeps; it may be early (a stopped timer) but is never late, so a tick
+     * before it has no gap timeout to fire. */
+    uint64_t next_deadline_us;
 
     /* §17 stats of flows that have been destroyed (idle eviction / teardown).
      * Folded in here so mqvpn_reorder_rx_get_stats reports lifetime totals that
@@ -330,21 +408,36 @@ mqvpn_reorder_stats_accumulate(mqvpn_reorder_stats_t *dst,
 
 /* ─────────────────────────── flow table (§14.1) ───────────────────────────
  *
- * 5-tuple-keyed hash table with chaining. LRU eviction + idle sweep are part B;
- * part A only creates and looks up flows.
+ * 5-tuple-keyed hash table with chaining, plus a recency list ordered by
+ * last_progress_us. The bucket array starts small and doubles with n_flows up
+ * to a size picked from cfg.max_flows (load factor ~1, like the TX table), so
+ * a large MaxFlows costs memory only once that many flows exist.
  */
 
-#define MQVPN_RX_BUCKETS 1024 /* power of two */
+#define MQVPN_RX_BUCKETS_INIT 1024u      /* power of two */
+#define MQVPN_RX_BUCKETS_MAX  (1u << 20) /* same ceiling as the TX table */
+
+/* Power-of-two bucket count for `max_flows` (0 = uncapped table). */
+static uint32_t
+rx_pick_max_buckets(uint32_t max_flows)
+{
+    uint32_t n = 16;
+    while ((max_flows == 0 || n < max_flows) && n < MQVPN_RX_BUCKETS_MAX) {
+        n <<= 1;
+    }
+    return n;
+}
+
+static uint32_t
+flow_bucket(const mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
+{
+    return (uint32_t)(mqvpn_flow_key_hash(key, rx->hash_seed) & (rx->n_buckets - 1));
+}
 
 static mqvpn_reorder_flow_t *
-flow_lookup(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key, uint32_t *out_idx)
+flow_lookup(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
 {
-    uint64_t h = mqvpn_flow_key_hash(key, rx->hash_seed);
-    uint32_t idx = (uint32_t)(h & (rx->n_buckets - 1));
-    if (out_idx) {
-        *out_idx = idx;
-    }
-    for (mqvpn_reorder_flow_t *f = rx->buckets[idx]; f; f = f->next) {
+    for (mqvpn_reorder_flow_t *f = rx->buckets[flow_bucket(rx, key)]; f; f = f->next) {
         if (mqvpn_flow_key_eq(&f->key, key)) {
             return f;
         }
@@ -352,33 +445,108 @@ flow_lookup(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key, uint32_t *out_i
     return NULL;
 }
 
+static void
+lru_unlink(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    if (f->lru_prev) {
+        f->lru_prev->lru_next = f->lru_next;
+    } else {
+        rx->lru_head = f->lru_next;
+    }
+    if (f->lru_next) {
+        f->lru_next->lru_prev = f->lru_prev;
+    } else {
+        rx->lru_tail = f->lru_prev;
+    }
+    f->lru_prev = NULL;
+    f->lru_next = NULL;
+}
+
+static void
+lru_append(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    f->lru_next = NULL;
+    f->lru_prev = rx->lru_tail;
+    if (rx->lru_tail) {
+        rx->lru_tail->lru_next = f;
+    } else {
+        rx->lru_head = f;
+    }
+    rx->lru_tail = f;
+}
+
+/* last_progress_us just advanced to "now": move the flow to the recent end. */
+static void
+lru_touch(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    if (rx->lru_tail != f) {
+        lru_unlink(rx, f);
+        lru_append(rx, f);
+    }
+}
+
 static void flow_destroy(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f);
 
-/* §13.5: bound the RX flow table. Evict the LRU flow (oldest last_progress_us)
- * so a peer flooding distinct inner 5-tuples cannot grow the table without bound
- * (the per-flow structs live outside the packet-pool byte budget). An evicted RX
- * flow simply re-inits first-observed on its next packet, so eviction is free —
- * unlike the TX side, which must never force-evict an active flow. Linear scan;
- * only walked on the rare at-cap creation path. */
+/* Unlink `f` from its hash chain and the recency list, then destroy it. The
+ * chain walk is O(load factor). */
+static void
+flow_remove(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
+{
+    for (mqvpn_reorder_flow_t **pp = &rx->buckets[flow_bucket(rx, &f->key)]; *pp;
+         pp = &(*pp)->next) {
+        if (*pp == f) {
+            *pp = f->next;
+            break;
+        }
+    }
+    lru_unlink(rx, f);
+    flow_destroy(rx, f);
+    rx->n_flows--;
+}
+
+/* §13.5: bound the RX flow table. Evict the LRU flow (oldest last_progress_us,
+ * the recency-list head) so a peer flooding distinct inner 5-tuples cannot grow
+ * the table without bound (the per-flow structs live outside the packet-pool
+ * byte budget). An evicted RX flow simply re-inits first-observed on its next
+ * packet, so eviction is free — unlike the TX side, which must never force-evict
+ * an active flow. O(1). */
 static void
 evict_lru_flow(mqvpn_reorder_rx_t *rx)
 {
-    mqvpn_reorder_flow_t **victim_pp = NULL;
-    uint64_t oldest = UINT64_MAX;
-    for (uint32_t i = 0; i < rx->n_buckets; i++) {
-        for (mqvpn_reorder_flow_t **pp = &rx->buckets[i]; *pp; pp = &(*pp)->next) {
-            if ((*pp)->last_progress_us <= oldest) {
-                oldest = (*pp)->last_progress_us;
-                victim_pp = pp;
-            }
+    if (rx->lru_head != NULL) {
+        flow_remove(rx, rx->lru_head);
+    }
+}
+
+/* Double the bucket array (rehash) when the load factor reaches 1, up to
+ * max_buckets. On allocation failure the table keeps working with longer
+ * chains. */
+static void
+maybe_grow_buckets(mqvpn_reorder_rx_t *rx)
+{
+    if (rx->n_flows < rx->n_buckets || rx->n_buckets >= rx->max_buckets) {
+        return;
+    }
+    uint32_t nb = rx->n_buckets << 1;
+    mqvpn_reorder_flow_t **nbk = (mqvpn_reorder_flow_t **)calloc(nb, sizeof(*nbk));
+    if (nbk == NULL) {
+        return;
+    }
+    mqvpn_reorder_flow_t **old = rx->buckets;
+    uint32_t old_n = rx->n_buckets;
+    rx->buckets = nbk;
+    rx->n_buckets = nb;
+    for (uint32_t i = 0; i < old_n; i++) {
+        mqvpn_reorder_flow_t *f = old[i];
+        while (f) {
+            mqvpn_reorder_flow_t *next = f->next;
+            uint32_t b = flow_bucket(rx, &f->key);
+            f->next = nbk[b];
+            nbk[b] = f;
+            f = next;
         }
     }
-    if (victim_pp != NULL) {
-        mqvpn_reorder_flow_t *victim = *victim_pp;
-        *victim_pp = victim->next; /* unlink before destroy */
-        flow_destroy(rx, victim);
-        rx->n_flows--;
-    }
+    free(old);
 }
 
 /* Find or create the reorder_flow for `key`. New flows have ring.cap initialized
@@ -387,14 +555,12 @@ evict_lru_flow(mqvpn_reorder_rx_t *rx)
 static mqvpn_reorder_flow_t *
 flow_get_or_create(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
 {
-    uint32_t idx = 0;
-    mqvpn_reorder_flow_t *f = flow_lookup(rx, key, &idx);
+    mqvpn_reorder_flow_t *f = flow_lookup(rx, key);
     if (f) {
         return f;
     }
-    /* §13.5: enforce the flow-table cap before creating (idx stays valid — it is
-     * the hash bucket for `key`, unaffected by which flow is evicted; the prepend
-     * below re-reads rx->buckets[idx] after eviction). max_flows == 0 = no cap. */
+    /* §13.5: enforce the flow-table cap before creating. max_flows == 0 = no
+     * cap. */
     if (rx->cfg.max_flows > 0 && rx->n_flows >= rx->cfg.max_flows) {
         evict_lru_flow(rx);
     }
@@ -413,33 +579,75 @@ flow_get_or_create(mqvpn_reorder_rx_t *rx, const mqvpn_flow_key_t *key)
         uint32_t cap = r ? r->resolved_cap : rx->cfg.cap_packets_per_flow;
         uint32_t wait_ms = r ? r->resolved_wait_ms : rx->cfg.max_wait_ms;
         ring_init(&f->buffer, cap);
+        f->buffer.mem_acct = &rx->ring_bytes_used; /* §13.2: charged to the pool */
         f->wait_ms = wait_ms;
     }
+    maybe_grow_buckets(rx); /* before picking the bucket: growth rehashes */
+    uint32_t idx = flow_bucket(rx, key);
     f->next = rx->buckets[idx];
     rx->buckets[idx] = f;
+    lru_append(rx, f);
     rx->n_flows++;
+    /* last_progress_us is still 0 here: let the next tick sweep. */
+    rx->next_idle_us = 0;
     return f;
 }
 
 /* ─────────────────────────── timer helpers (§12) ──────────────────────────
  *
  * Maintains the §11.1 invariant: gap_timer_active is set exactly when the buffer
- * is non-empty. The deadline is informational in part A (the real timeout
- * handler + tick driver land in part B).
+ * is non-empty. One armed timer = one "period" (§17): it waits for the cohort of
+ * gaps present when it was armed (every missing seq below `reord`), stays
+ * anchored while the cohort is incomplete, ends when expected reaches `reord`
+ * (filled / overflow) or the deadline passes (timeout), and restarts with a
+ * fresh mark if anything is still buffered (§12.2). The invariants below hold at
+ * operation boundaries (after a packet, a tick, a reset or a demote is fully
+ * processed), not in the middle of a drain:
+ *
+ *   gap_timer_active  ⟺  !ring_empty
+ *   gap_timer_active  ⟹  expected < reord <= rx_next  ∧  ring_contains(reord-1)
  */
 
 static void
-arm_gap_timer(mqvpn_reorder_flow_t *f, uint64_t now_us, uint32_t wait_ms)
+arm_gap_timer(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us,
+              uint32_t wait_ms)
 {
     f->gap_timer_active = 1;
     f->gap_armed_us = now_us;
     f->gap_deadline_us = now_us + (uint64_t)wait_ms * 1000ULL;
+    if (f->gap_deadline_us < rx->next_deadline_us)
+        rx->next_deadline_us = f->gap_deadline_us;
 }
 
 static void
 stop_gap_timer(mqvpn_reorder_flow_t *f)
 {
     f->gap_timer_active = 0;
+}
+
+/* §12.2: called after expected advanced. If the armed period's cohort is done
+ * (expected reached the mark, or the buffer drained), end it on the caller's
+ * §17 counter and stop the timer. ring_empty implies expected >= reord (reord-1
+ * is buffered until delivered) but is spelled out to keep §11.1 self-evident. */
+static void
+period_end_if_done(mqvpn_reorder_flow_t *f, uint64_t *end_counter)
+{
+    if (f->gap_timer_active && (ring_empty(&f->buffer) || f->expected >= f->reord)) {
+        (*end_counter)++;
+        stop_gap_timer(f);
+    }
+}
+
+/* §12.2: with the timer stopped and packets still buffered, start a new period
+ * whose cohort is everything missing below rx_next. */
+static void
+period_start_if_needed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
+{
+    if (!f->gap_timer_active && !ring_empty(&f->buffer)) {
+        f->reord = f->rx_next;
+        arm_gap_timer(rx, f, now_us, f->wait_ms);
+        f->stats.gap_count++;
+    }
 }
 
 /* ───────────────── deliver helpers + contiguous drain (§11.3) ──────────────
@@ -567,10 +775,10 @@ drain_contiguous(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_u
 
 /* ───────────────── §12: timeout handler + overflow flush ───────────────────
  *
- * Both share the same skip-then-drain core: jump `expected` to the lowest
- * occupied seq (§13.3 bounded scan), deliver the now-contiguous run, and update
- * last_progress. They differ only in (a) which §17 period counter they charge
- * and (b) whether they rearm the timer afterwards.
+ * Both deliver buffered packets ascending and skip missing seqs; they differ in
+ * how far they skip and which §17 counter they charge. The timeout skips the
+ * whole cohort (everything below `reord`); the overflow flush skips one head gap
+ * to free space and lets period_end_if_done decide whether that reached the mark.
  */
 
 /* Skip the current gap: advance expected to the lowest buffered seq, then drain
@@ -587,8 +795,11 @@ skip_to_lowest_and_drain(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64
 }
 
 /* §12.1 gap-timeout handler. Precondition: timer armed (⟺ buffer non-empty,
- * §11.1). Skip the missing seq, drain, then either stop (buffer drained) or
- * rearm (timeout-skip advanced expected → a fresh period may start, §12.2). */
+ * §11.1). Deliver every buffered packet below the mark, skipping each missing
+ * seq, then whatever is contiguous from the mark on. While expected < reord the
+ * seq reord-1 is still buffered, so each iteration delivers at least one packet
+ * and the scan is bounded by the ring size (§13.3). The period ended by timeout;
+ * a new one starts if anything (above the old mark) is still waiting (§12.2). */
 static void
 on_gap_timeout(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
 {
@@ -598,41 +809,72 @@ on_gap_timeout(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
     }
     f->stats.gap_timeout_count++; /* §17: this period ends by timeout */
 
-    skip_to_lowest_and_drain(rx, f, now_us);
-
-    if (ring_empty(&f->buffer)) {
-        stop_gap_timer(f);
-    } else {
-        /* §12.2: timeout-skip made forward progress, so a new period may arm. */
-        arm_gap_timer(f, now_us, f->wait_ms);
-        f->stats.gap_count++;
+    while (!ring_empty(&f->buffer) && f->expected < f->reord) {
+        f->expected =
+            ring_lowest_seq(&f->buffer, f->expected); /* < reord: reord-1 is buffered */
+        drain_contiguous(rx, f, now_us);              /* may run on past reord */
     }
+    f->last_progress_us = now_us;
+
+    stop_gap_timer(f);
+    period_start_if_needed(rx, f, now_us);
 }
 
-/* §12.3 overflow_flush: force-skip the current gap to free buffer space without
- * halting processing. Precondition: buffer non-empty (§11.3/§13.5 — empty-buffer
- * limit/pool exhaustion is a drop, never a flush).
+/* §12.3 overflow_flush: force-skip the current head gap to free buffer space
+ * without halting processing. Precondition: buffer non-empty (§11.3/§13.5 —
+ * empty-buffer limit/pool exhaustion is a drop, never a flush). The head gap is
+ * always inside the cohort (reord-1 is buffered, so lowest <= reord-1).
  *
- * §17 accounting: gap_overflow_count is charged only when the flush actually
- * ENDS the armed period — i.e. it drains the buffer to empty and stops the
- * timer. A partial flush that leaves a higher gap exposed keeps the SAME
- * anchored period alive (no rearm, §12.3 unlike §12.1), so it has not ended a
- * period and must not be counted; counting it would make the §17 identity
- * gap_count = filled + timeout + overflow (+ open) over-count by one. */
+ * §17 accounting: the flush ends the period as overflow only if it carried
+ * expected to the mark; a partial flush that stops at a lower gap keeps the same
+ * anchored period alive (no rearm, no terminator). Either way the mark for any
+ * new period is taken NOW — before the arriving packet that triggered the flush
+ * is classified and inserted — so a gap that packet opens belongs to the next
+ * cohort (bounded by 2W like every deferred gap, §12.2). */
 static void
 overflow_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t now_us)
 {
-    int was_armed = f->gap_timer_active;
     skip_to_lowest_and_drain(rx, f, now_us);
-    if (ring_empty(&f->buffer)) {
-        if (was_armed) {
-            f->stats.gap_overflow_count++; /* §17: period ended by this flush */
-        }
-        stop_gap_timer(f);
+    period_end_if_done(f, &f->stats.gap_overflow_count);
+    period_start_if_needed(rx, f, now_us);
+}
+
+/* §13.4 window slide: `seq` lies at or beyond expected + cap. Dropping it left
+ * the window where it was, and expected only moves when buffered packets
+ * drain: a flow that lost cap or more packets in a row with nothing buffered
+ * then dropped every later packet, and under heavy loss the window crawled one
+ * gap per wait_ms while nearly every arrival fell beyond it. The flow keeps
+ * sending, so idle eviction never rescued it. Move the window instead so that
+ * seq is its last slot: deliver every buffered packet below the new origin in
+ * ascending order, giving up their gaps as a timeout does, then drain the run
+ * that starts at the origin. Like overflow_flush, the slide ends the armed
+ * period as overflow only if it carried expected to the mark, and a new period
+ * starts if anything is still buffered (§12.2). */
+static void
+slide_window_to(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
+                uint64_t now_us)
+{
+    uint64_t origin = seq - f->buffer.cap + 1;
+    /* Every buffered seq lies in [expected, expected + size), so the scan
+     * stops at the ring size however far the window moves. */
+    uint64_t end = origin;
+    if (end - f->expected > f->buffer.size) {
+        end = f->expected + f->buffer.size;
     }
-    /* else: buffer still non-empty → the anchored period continues unbroken (no
-     * rearm, no terminator); the §11.1 invariant is held by the timer staying
-     * active. */
+    for (uint64_t s = f->expected; s < end && !ring_empty(&f->buffer); s++) {
+        uint16_t len = 0;
+        uint64_t enq = 0;
+        void *pkt = ring_remove(&f->buffer, s, &len, &enq);
+        if (pkt != NULL) {
+            deliver_pkt(rx, (const uint8_t *)pkt, len, f, now_us, enq);
+            pool_release(rx, pkt, len);
+        }
+    }
+    f->expected = origin;
+    drain_contiguous(rx, f, now_us);
+    f->last_progress_us = now_us;
+    period_end_if_done(f, &f->stats.gap_overflow_count);
+    period_start_if_needed(rx, f, now_us);
 }
 
 /* ─────────────────── §11.6: FLOW_RESET buffer discard + reset ──────────────
@@ -666,6 +908,8 @@ discard_buffer_for_reset(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f)
         }
     }
     stop_gap_timer(f);
+    f->rx_next = 0; /* §12.2: the new epoch's seqs may be far below the old ones */
+    f->reord = 0;
     ring_free(&f->buffer); /* frees slots, zeroes size/count/bytes; cap preserved */
 }
 
@@ -795,32 +1039,33 @@ flush_buffer_for_demote(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
  */
 
 /* §13.5 per-flow limit predicate: would admitting `len` more bytes push the flow
- * past its packet-count cap or byte budget? count == cap is the §13.5 packet
- * limit (the window already bounds span via the far-ahead gate; this bounds
- * occupancy). bytes is checked against max_buffer_bytes_per_flow. */
+ * past its byte budget (max_buffer_bytes_per_flow)? The §13.5 packet-count
+ * limit needs no check of its own: every buffered seq lies in
+ * (expected, expected + cap) — the far-ahead gate bounds the span and expected
+ * itself is never buffered — so count <= cap - 1 always holds. */
 static int
 would_exceed_per_flow_limits(const mqvpn_reorder_rx_t *rx, const mqvpn_reorder_flow_t *f,
                              uint16_t len)
 {
-    if (f->buffer.count >= f->buffer.cap) {
-        return 1;
-    }
+    assert(f->buffer.count < f->buffer.cap);
     if (f->buffer.bytes + len > rx->cfg.max_buffer_bytes_per_flow) {
         return 1;
     }
     return 0;
 }
 
-/* §13.2 global pool: would charging `len` bytes exceed the shared byte budget? */
+/* §13.2 global pool: would charging `bytes` more (packet bytes plus any ring
+ * growth) exceed the shared byte budget? */
 static int
-pool_would_exhaust(const mqvpn_reorder_rx_t *rx, uint16_t len)
+pool_would_exhaust(const mqvpn_reorder_rx_t *rx, uint64_t bytes)
 {
-    return rx->pool_bytes_used + len > rx->cfg.global_max_buffer_bytes;
+    return rx->pool_bytes_used + rx->ring_bytes_used + bytes >
+           rx->cfg.global_max_buffer_bytes;
 }
 
 /* Commit an in-window, non-duplicate, within-limits ahead packet to the ring:
- * heap-copy, charge the pool, insert, arm the gap timer on empty→non-empty
- * (§11.1/§11.3). Returns REORDER_BUFFERED, or REORDER_DROPPED_LIMIT on a
+ * heap-copy, charge the pool, insert, advance rx_next, arm the gap timer on
+ * empty→non-empty (§11.1/§12.2). Returns REORDER_BUFFERED, or REORDER_DROPPED_LIMIT on a
  * (defensive) copy/insert allocation failure. */
 static reorder_process_result
 buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
@@ -833,7 +1078,6 @@ buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
     }
     memcpy(copy, pkt, len);
 
-    int was_empty = ring_empty(&f->buffer);
     if (ring_insert(&f->buffer, seq, copy, len, f->expected, now_us) != 0) {
         free(copy);
         f->stats.pool_drop_count++;
@@ -841,10 +1085,13 @@ buffer_insert_committed(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_
     }
     rx->pool_bytes_used += len; /* §13.2 charge after a successful insert */
     f->last_progress_us = now_us;
-    if (was_empty) {
-        arm_gap_timer(f, now_us, f->wait_ms);
-        f->stats.gap_count++;
+    /* §12.2: rx_next tracks the highest BUFFERED seq + 1, so it moves only after
+     * a successful insert (a failed insert must not make reord point at a seq
+     * that is not in the ring). Then arm if this made the buffer non-empty. */
+    if (seq + 1 > f->rx_next) {
+        f->rx_next = seq + 1;
     }
+    period_start_if_needed(rx, f, now_us);
     return REORDER_BUFFERED;
 }
 
@@ -864,10 +1111,8 @@ reclassify_after_flush(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         f->expected++;
         f->last_progress_us = now_us;
         drain_contiguous(rx, f, now_us);
-        if (ring_empty(&f->buffer) && f->gap_timer_active) {
-            stop_gap_timer(f);
-            f->stats.gap_filled_count++;
-        }
+        period_end_if_done(f, &f->stats.gap_filled_count);
+        period_start_if_needed(rx, f, now_us);
         return REORDER_DELIVERED;
     }
     if (ring_far_ahead(&f->buffer, seq, f->expected)) {
@@ -906,11 +1151,19 @@ buffer_admit(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
         if (r != REORDER_BUFFERED) {
             return r; /* late / in-order+drain / far-ahead / duplicate resolved it */
         }
+        /* One flush frees at least one packet but not necessarily `len` bytes:
+         * re-check before falling through, like the pool branch below. */
+        if (would_exceed_per_flow_limits(rx, f, len)) {
+            f->stats.per_flow_limit_drop_count++;
+            return REORDER_DROPPED_LIMIT;
+        }
         /* still an in-window ahead packet → fall through to pool + insert below */
     }
 
-    /* --- global pool (§13.2) --- */
-    if (pool_would_exhaust(rx, len)) {
+    /* --- global pool (§13.2): the packet copy plus any slot-array growth its
+     * span needs (the array follows the peer-chosen span, so it is charged
+     * like buffered bytes and cannot outgrow the budget) --- */
+    if (pool_would_exhaust(rx, len + ring_growth_bytes(&f->buffer, seq - f->expected))) {
         if (ring_empty(&f->buffer)) { /* no room to free by flushing self */
             f->stats.pool_drop_count++;
             return REORDER_DROPPED_LIMIT;
@@ -920,7 +1173,9 @@ buffer_admit(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t seq,
         if (r != REORDER_BUFFERED) {
             return r;
         }
-        if (pool_would_exhaust(rx, len)) { /* still no space → drop */
+        /* still no space → drop (expected moved: recompute the growth) */
+        if (pool_would_exhaust(rx,
+                               len + ring_growth_bytes(&f->buffer, seq - f->expected))) {
             f->stats.pool_drop_count++;
             return REORDER_DROPPED_LIMIT;
         }
@@ -944,16 +1199,23 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         return REORDER_DELIVERED;
     }
 
+    /* far ahead: move the window so seq is its last slot (§13.4). With cap 1
+     * that makes seq the expected one; otherwise it is admitted below. Works
+     * even when slots==NULL (§24.9). */
+    if (seq > f->expected && ring_far_ahead(&f->buffer, seq, f->expected)) {
+        slide_window_to(rx, f, seq, now_us);
+    }
+
     if (seq == f->expected) { /* in-order */
         deliver_pkt(rx, pkt, len, f, now_us, now_us);
         f->expected++;
         f->last_progress_us = now_us;
         drain_contiguous(rx, f, now_us);
-        if (ring_empty(&f->buffer) && f->gap_timer_active) {
-            stop_gap_timer(f);
-            f->stats.gap_filled_count++;
-        }
-        return REORDER_DELIVERED; /* non-empty → keep anchored timer (§12.2) */
+        /* §12.2: cohort complete → filled (+ restart if more is buffered);
+         * cohort incomplete → the anchored timer keeps its deadline. */
+        period_end_if_done(f, &f->stats.gap_filled_count);
+        period_start_if_needed(rx, f, now_us);
+        return REORDER_DELIVERED;
     }
 
     if (seq < f->expected) { /* late */
@@ -961,11 +1223,7 @@ process_reorder_packet(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f, uint64_t
         return REORDER_DROPPED_LATE; /* last_progress NOT updated */
     }
 
-    /* --- ahead --- §13.4 off-by-one; works even when slots==NULL (§24.9). */
-    if (ring_far_ahead(&f->buffer, seq, f->expected)) {
-        f->stats.too_far_ahead_drop_count++;
-        return REORDER_DROPPED_FAR_AHEAD;
-    }
+    /* --- ahead, in-window --- */
     return buffer_admit(rx, f, seq, pkt, len, now_us);
 }
 
@@ -1048,6 +1306,12 @@ mqvpn_reorder_rx_new(const mqvpn_reorder_config_t *cfg, uint64_t hash_seed,
         return NULL;
     }
     rx->cfg = *cfg;
+    /* Defensive ceiling on the per-flow window: the slot array costs
+     * RING_SLOT_BYTES(cap) per flow at full span. Both caps are powers of two,
+     * so the clamp keeps the validated invariant. */
+    if (rx->cfg.cap_packets_per_flow > MQVPN_REORDER_CAP_MAX) {
+        rx->cfg.cap_packets_per_flow = MQVPN_REORDER_CAP_MAX;
+    }
     /* Resolve each rule's effective (wait,cap) AFTER the global validate above and
      * the cfg copy. validate is global-only and runs pre-finalize (it would see
      * resolved_cap==0 otherwise); finalize fills resolved_wait_ms/resolved_cap with
@@ -1055,16 +1319,41 @@ mqvpn_reorder_rx_new(const mqvpn_reorder_config_t *cfg, uint64_t hash_seed,
      * single production finalize site — rx_new is always built (INI/JSON/builder
      * all flow through here), so per-flow resolution below can rely on it. */
     mqvpn_reorder_config_finalize(&rx->cfg);
+    for (int i = 0; i < rx->cfg.n_rules; i++) { /* a rule-explicit cap, same ceiling */
+        if (rx->cfg.rules[i].resolved_cap > MQVPN_REORDER_CAP_MAX) {
+            rx->cfg.rules[i].resolved_cap = MQVPN_REORDER_CAP_MAX;
+        }
+    }
     rx->hash_seed = hash_seed;
     rx->deliver = deliver;
     rx->deliver_ctx = deliver_ctx;
-    rx->n_buckets = MQVPN_RX_BUCKETS;
+    rx->next_deadline_us = UINT64_MAX;
+    rx->max_buckets = rx_pick_max_buckets(rx->cfg.max_flows);
+    rx->n_buckets =
+        MQVPN_RX_BUCKETS_INIT < rx->max_buckets ? MQVPN_RX_BUCKETS_INIT : rx->max_buckets;
     rx->buckets = (mqvpn_reorder_flow_t **)calloc(rx->n_buckets, sizeof(*rx->buckets));
     if (!rx->buckets) {
         free(rx);
         return NULL;
     }
     return rx;
+}
+
+/* Bookkeeping after a packet was processed: keep the recency list ordered by
+ * last_progress_us, and lower the cached earliest deadline if the flow's gap
+ * timer is armed (a packet is the only thing besides tick that arms one). Every
+ * last_progress_us update writes the current now_us, so "changed" means "most
+ * recent". */
+static void
+rx_after_flow_update(mqvpn_reorder_rx_t *rx, mqvpn_reorder_flow_t *f,
+                     uint64_t progress_before)
+{
+    if (f->last_progress_us != progress_before) {
+        lru_touch(rx, f);
+    }
+    if (f->gap_timer_active && f->gap_deadline_us < rx->next_deadline_us) {
+        rx->next_deadline_us = f->gap_deadline_us;
+    }
 }
 
 void
@@ -1143,54 +1432,78 @@ mqvpn_reorder_rx_on_packet(mqvpn_reorder_rx_t *rx, const uint8_t *payload, size_
     if (!f) {
         return; /* OOM: drop */
     }
+    uint64_t progress_before = f->last_progress_us;
     on_reordered(rx, f, seq, flags, inner, (uint16_t)inner_len, now_us);
+    rx_after_flow_update(rx, f, progress_before);
 }
 
 void
 mqvpn_reorder_rx_tick(mqvpn_reorder_rx_t *rx, uint64_t now_us)
 {
-    /* Population early-return: both sweeps below walk all rx->n_buckets
-     * (MQVPN_RX_BUCKETS = 1024) bucket heads every call, and the caller
+    /* Population early-return: the sweep below walks every flow, and the caller
      * (mqvpn_client_tick / mqvpn_server_tick) fires per event-loop iteration —
      * potentially thousands of times per second under load. With no flows
-     * there is nothing to time out or evict, so skip the ungated sweeps
-     * entirely. Same pattern as mqvpn_tcp_lane_tick's n_tcp_flows==0 gate.
-     * (No cadence gate here: the gap-timeout sweep has sub-second deadlines,
-     * so it must run every tick while flows exist.) */
+     * there is nothing to time out or evict, so skip it entirely. Same pattern
+     * as mqvpn_tcp_lane_tick's n_tcp_flows==0 gate. */
     if (rx->n_flows == 0) {
+        rx->next_deadline_us = UINT64_MAX;
         return;
     }
 
-    /* §12.1: (a) fire gap timeouts for flows whose deadline has passed. */
-    for (uint32_t i = 0; i < rx->n_buckets; i++) {
-        for (mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
-            if (f->gap_timer_active && f->gap_deadline_us <= now_us) {
-                on_gap_timeout(rx, f, now_us);
-            }
-        }
+    /* The pass runs only once the earliest armed gap deadline
+     * (next_deadline_us) or the earliest idle eviction (next_idle_us) may
+     * have passed; it recomputes both bounds exactly, including timers it
+     * re-arms. */
+    if (now_us < rx->next_deadline_us && now_us < rx->next_idle_us) {
+        return;
     }
+    rx->next_deadline_us = UINT64_MAX;
+    rx->next_idle_us = UINT64_MAX;
 
-    /* §14 / §14.2(c): (b) idle eviction sweep on last_progress_us. A flow that
-     * makes no progress (e.g. all K reset packets lost → stuck blackhole) goes
-     * stale and is evicted here; its next packet re-inits via cold-start
-     * (first-observed). This is the guaranteed reset backstop. */
+    /* One pass over the recency list (flows are independent, so per-flow order
+     * of the two steps is all that matters). A timed-out flow moves to the tail
+     * and a stale one is removed; `next` is read first and the walk is bounded
+     * by the starting population, so each flow is visited exactly once. */
     uint64_t idle_us = (uint64_t)rx->cfg.ingress_idle_timeout_sec * 1000000ULL;
-    for (uint32_t i = 0; i < rx->n_buckets; i++) {
-        mqvpn_reorder_flow_t **pp = &rx->buckets[i];
-        while (*pp != NULL) {
-            mqvpn_reorder_flow_t *f = *pp;
-            /* wrap-safe: a backwards-clock blip must NOT spuriously evict a live
-             * flow (§14 / §14.2(c)). */
-            if (now_us > f->last_progress_us &&
-                (now_us - f->last_progress_us) > idle_us) {
-                *pp = f->next; /* unlink from the chain */
-                flow_destroy(rx, f);
-                rx->n_flows--;
-            } else {
-                pp = &f->next;
+    uint32_t n = rx->n_flows;
+    mqvpn_reorder_flow_t *next = rx->lru_head;
+    for (uint32_t k = 0; k < n && next != NULL; k++) {
+        mqvpn_reorder_flow_t *f = next;
+        next = f->lru_next;
+
+        /* §12.1: (a) fire the gap timeout if its deadline has passed. */
+        if (f->gap_timer_active && f->gap_deadline_us <= now_us) {
+            uint64_t progress_before = f->last_progress_us;
+            on_gap_timeout(rx, f, now_us);
+            if (f->last_progress_us != progress_before) {
+                lru_touch(rx, f);
             }
         }
+
+        /* §14 / §14.2(c): (b) idle eviction on last_progress_us. A flow that
+         * makes no progress (e.g. all K reset packets lost → stuck blackhole)
+         * goes stale and is evicted here; its next packet re-inits via
+         * cold-start (first-observed). This is the guaranteed reset backstop.
+         * wrap-safe: a backwards-clock blip must NOT spuriously evict a live
+         * flow (§14 / §14.2(c)). */
+        if (now_us > f->last_progress_us && (now_us - f->last_progress_us) > idle_us) {
+            flow_remove(rx, f);
+            continue;
+        }
+
+        if (f->gap_timer_active && f->gap_deadline_us < rx->next_deadline_us) {
+            rx->next_deadline_us = f->gap_deadline_us;
+        }
+        /* Evicted on the first tick strictly after this. */
+        uint64_t idle_at = f->last_progress_us + idle_us + 1;
+        if (idle_at < rx->next_idle_us) rx->next_idle_us = idle_at;
     }
+}
+
+uint64_t
+mqvpn_reorder_rx_next_deadline_us(const mqvpn_reorder_rx_t *rx)
+{
+    return rx ? rx->next_deadline_us : UINT64_MAX;
 }
 
 void
@@ -1202,10 +1515,8 @@ mqvpn_reorder_rx_get_stats(const mqvpn_reorder_rx_t *rx, mqvpn_reorder_stats_t *
     /* §17 lifetime snapshot: evicted-flow totals + every currently-live flow.
      * The §17 identity holds over the sum because it holds per-flow. */
     *out = rx->evicted_stats;
-    for (uint32_t i = 0; i < rx->n_buckets; i++) {
-        for (const mqvpn_reorder_flow_t *f = rx->buckets[i]; f; f = f->next) {
-            mqvpn_reorder_stats_accumulate(out, &f->stats);
-        }
+    for (const mqvpn_reorder_flow_t *f = rx->lru_head; f; f = f->lru_next) {
+        mqvpn_reorder_stats_accumulate(out, &f->stats);
     }
 }
 

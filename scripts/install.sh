@@ -14,6 +14,9 @@ set -euo pipefail
 
 REPO="mp0rta/mqvpn"
 INSTALL_PREFIX="/usr/local"
+# Local units go to /etc/systemd/system: /lib/systemd/system belongs to dpkg
+# (the mqvpn .deb ships its own units there under /usr).
+UNIT_DIR="/etc/systemd/system"
 DEFAULT_PORT=443
 DEFAULT_SUBNET="10.0.0.0/24"
 
@@ -112,6 +115,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Older versions of this script wrote the units to /lib/systemd/system.
+# Remove those copies, but never one that a package owns.
+remove_legacy_units() {
+    local u
+    for u in /lib/systemd/system/mqvpn-server.service /lib/systemd/system/mqvpn-client@.service; do
+        [ -e "$u" ] || continue
+        if command -v dpkg >/dev/null 2>&1 && dpkg -S "$u" >/dev/null 2>&1; then
+            continue
+        fi
+        rm -f "$u"
+    done
+}
+
 # --- Uninstall ---
 do_uninstall() {
     info "Stopping mqvpn-server..."
@@ -124,8 +140,8 @@ do_uninstall() {
     rm -f "$INSTALL_PREFIX/lib/libxquic.so"
     rm -rf "$INSTALL_PREFIX/lib/mqvpn"
     rm -rf "$INSTALL_PREFIX/share/doc/mqvpn"
-    rm -f /lib/systemd/system/mqvpn-server.service
-    rm -f /lib/systemd/system/mqvpn-client@.service
+    rm -f "$UNIT_DIR/mqvpn-server.service" "$UNIT_DIR/mqvpn-client@.service"
+    remove_legacy_units
     systemctl daemon-reload 2>/dev/null || true
     ldconfig 2>/dev/null || true
 
@@ -222,15 +238,17 @@ fi
 install -m 644 lib/libxquic.so "$INSTALL_PREFIX/lib/"
 mkdir -p "$INSTALL_PREFIX/lib/mqvpn"
 install -m 755 lib/mqvpn/mqvpn-server-nat.sh "$INSTALL_PREFIX/lib/mqvpn/"
-install -m 644 systemd/mqvpn-server.service /lib/systemd/system/
-install -m 644 systemd/mqvpn-client@.service /lib/systemd/system/
+install -m 755 lib/mqvpn/mqvpn-nat-config "$INSTALL_PREFIX/lib/mqvpn/"
+remove_legacy_units
+install -m 644 systemd/mqvpn-server.service "$UNIT_DIR/"
+install -m 644 systemd/mqvpn-client@.service "$UNIT_DIR/"
 
 # Install license and third-party attribution files (Apache-2.0 §4(a)).
 mkdir -p "$INSTALL_PREFIX/share/doc/mqvpn/third-party"
 install -m 644 LICENSE                "$INSTALL_PREFIX/share/doc/mqvpn/LICENSE"
 install -m 644 NOTICE                 "$INSTALL_PREFIX/share/doc/mqvpn/NOTICE"
-install -m 644 third-party/xquic.txt     "$INSTALL_PREFIX/share/doc/mqvpn/third-party/xquic.txt"
-install -m 644 third-party/boringssl.txt "$INSTALL_PREFIX/share/doc/mqvpn/third-party/boringssl.txt"
+# Every notice the tarball ships (xquic, BoringSSL, lwIP, ...).
+install -m 644 third-party/*.txt "$INSTALL_PREFIX/share/doc/mqvpn/third-party/"
 
 ldconfig
 
@@ -239,7 +257,9 @@ ok "Installed to $INSTALL_PREFIX"
 # --- Step 4: Generate TLS certificate ---
 info "[4/6] Generating TLS certificate..."
 
-mkdir -p /etc/mqvpn
+# 0750: the directory holds the PSK and the TLS private key.
+install -d -m 750 /etc/mqvpn
+chmod 750 /etc/mqvpn
 # Generate self-signed cert ONLY when neither file (or symlink) exists.
 # `-e` so symlinks pointing at certbot/letsencrypt are honored as "exists".
 # - both present: admin set them up (own CA, certbot symlinks, etc.) — skip
@@ -281,6 +301,10 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         fi
     fi
 
+    # umask 077: the file holds the PSK, so it must never exist world-readable,
+    # not even between its creation and the chmod below.
+    old_umask=$(umask)
+    umask 077
     {
         echo "[Interface]"
         echo "Listen = 0.0.0.0:$PORT"
@@ -308,6 +332,7 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
             echo "# Listen = 127.0.0.1:9090"
         fi
     } > /etc/mqvpn/server.conf
+    umask "$old_umask"
     chmod 600 /etc/mqvpn/server.conf
     ok "Generated /etc/mqvpn/server.conf"
 else
@@ -327,7 +352,7 @@ else
         if grep -qE '^[[:space:]]*\[Control\][[:space:]]*$' "$CONF"; then
             warn "[Control] section is already active in $CONF — not modified."
 
-        elif awk -v port="$CONTROL_PORT" '
+        elif (umask 077; awk -v port="$CONTROL_PORT" '
             BEGIN { replaced = 0 }
             {
                 if (!replaced && prev == "# [Control]" \
@@ -345,7 +370,7 @@ else
                 if (prev != "") print prev
                 exit (replaced ? 0 : 1)
             }
-        ' "$CONF" > "$CONF.new"; then
+        ' "$CONF" > "$CONF.new"); then
             chmod --reference="$CONF" "$CONF.new"
             chown --reference="$CONF" "$CONF.new"
             mv "$CONF.new" "$CONF"

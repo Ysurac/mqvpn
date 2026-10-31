@@ -18,6 +18,7 @@
 #define MQVPN_SERVER_INTERNAL_H
 
 #include "libmqvpn.h"          /* mqvpn_server_t */
+#include "mqvpn_internal.h"    /* MQVPN_INTERNAL */
 #include "hybrid/classifier.h" /* mqvpn_cidr_entry_t */
 
 #include <stddef.h>
@@ -40,7 +41,10 @@ typedef struct {
     size_t path_len;
     const char *auth_token; /* Bearer payload, not NUL-terminated */
     size_t auth_token_len;
-    char x_user[64]; /* x-user header value, NUL-terminated */
+    char x_user[64];   /* x-user header value, NUL-terminated */
+    int has_sched_hdr; /* request carried mqvpn-scheduler */
+    const char *sched; /* raw value, not NUL-terminated */
+    size_t sched_len;
     int has_reorder_hdr; /* request advertised mqvpn-reorder (§19.3). Applied to
                           * conn->peer_reorder_supported ONLY when this request
                           * establishes the CONNECT-IP tunnel — a rejected
@@ -48,10 +52,16 @@ typedef struct {
                           * live tunnel's negotiated stamping. */
 } svr_req_headers_t;
 
+/* Test hook (mqvpn_server.c). */
+MQVPN_INTERNAL const char *mqvpn_server_test_sched_refusal_reason(int xqc_rc);
+
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on
- * purpose: a server with no PSK/users configured is intentionally open on
- * BOTH protocols, not just one — do not let the two call sites diverge. */
+ * purpose: a server created with no PSK/users is intentionally open on BOTH
+ * protocols, not just one — do not let the two call sites diverge. Once any
+ * credential has been configured (at creation or by add_user) it stays true
+ * for the server's life, even if remove_user deletes the last one: auth fails
+ * closed (everyone is refused) rather than open. */
 int svr_auth_required(const mqvpn_server_t *s);
 
 /* Credential check shared by every authenticated request type. Constant-
@@ -160,9 +170,10 @@ int svr_egress_fd_register_is_set(mqvpn_server_t *s);
  * platform never installed the callback. */
 void svr_egress_fd_unregister(mqvpn_server_t *s, int fd);
 
-/* Wall-clock microseconds — the SAME source mqvpn_server.c uses everywhere
- * else (gettimeofday-based; see now_us() in mqvpn_server.c). Exposed so
- * tcp_egress.c's connect-deadline computation doesn't introduce a second
+/* Microseconds on the server's clock — the SAME source mqvpn_server.c uses
+ * everywhere else (the library's clock, mqvpn_clock.c: not the wall clock;
+ * see now_us() in mqvpn_server.c). Only differences are meaningful. Exposed
+ * so tcp_egress.c's connect and idle deadlines don't introduce a second
  * clock idiom. */
 uint64_t svr_now_us(void);
 

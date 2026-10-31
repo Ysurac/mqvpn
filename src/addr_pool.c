@@ -64,6 +64,23 @@ mqvpn_addr_pool_init(mqvpn_addr_pool_t *pool, const char *cidr)
         return -1;
     }
 
+    /* A non-aligned base shifts the pool, but every handed-out address must
+     * stay inside the prefix: the server's TUN route covers only the
+     * prefix, so an address past its last host would get no downlink. */
+    uint32_t mask = 0xFFFFFFFFu << host_bits;
+    uint32_t last_host = (base_h & mask) | (~mask - 1u);
+    if (base_h != (base_h & mask)) {
+        uint32_t room = last_host > base_h ? last_host - base_h : 0;
+        if (room < 2) {
+            LOG_ERR("addr_pool: %s leaves no client address inside the prefix", cidr);
+            return -1;
+        }
+        if (room < pool->pool_size) pool->pool_size = room;
+        LOG_WRN("addr_pool: %s is not a network address; the pool starts at it and "
+                "is limited to the prefix",
+                cidr);
+    }
+
     LOG_INF("addr_pool: %s, %u addresses available", cidr, pool->pool_size - 1);
     return 0;
 }
@@ -96,8 +113,7 @@ mqvpn_addr_pool_alloc(mqvpn_addr_pool_t *pool, struct in_addr *out)
 int
 mqvpn_addr_pool_alloc_at(mqvpn_addr_pool_t *pool, uint32_t offset, struct in_addr *out)
 {
-    if (offset < 2 || offset > pool->pool_size || pool->used[offset])
-        return -1;
+    if (offset < 2 || offset > pool->pool_size || pool->used[offset]) return -1;
     pool->used[offset] = 1;
     uint32_t base_h = ntohl(pool->base.s_addr);
     out->s_addr = htonl(base_h + offset);
@@ -135,6 +151,16 @@ mqvpn_addr_pool_server_addr(const mqvpn_addr_pool_t *pool, struct in_addr *out)
 
 /* ---- IPv6 pool (shares offsets with IPv4) ---- */
 
+/* Host bits of the low 32-bit word for an IPv6 prefix in [96,128]. */
+static uint32_t
+host6_mask(int prefix6)
+{
+    int host_bits = 128 - prefix6;
+    if (host_bits >= 32) return 0xFFFFFFFFu;
+    if (host_bits <= 0) return 0;
+    return (1u << host_bits) - 1;
+}
+
 int
 mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6)
 {
@@ -154,11 +180,30 @@ mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6)
         return -1;
     }
 
-    if (inet_pton(AF_INET6, buf, &pool->base6) != 1) {
+    struct in6_addr base6;
+    if (inet_pton(AF_INET6, buf, &base6) != 1) {
         LOG_ERR("addr_pool6: invalid address: %s", buf);
         return -1;
     }
 
+    /* Every offset the shared pool hands out (1..pool_size, sized by the
+     * IPv4 prefix) must land inside this prefix: base6's host part plus
+     * pool_size may neither carry into the network bits nor wrap the low 32
+     * bits. Otherwise clients get addresses outside the server's subnet6,
+     * which it never routes back (e.g. a /24 IPv4 pool with a /126 IPv6
+     * prefix). A non-aligned base is kept as given, as for IPv4. */
+    uint32_t hostmask = host6_mask((int)plen);
+    uint32_t base_low;
+    memcpy(&base_low, &base6.s6_addr[12], sizeof(base_low));
+    uint64_t last = (uint64_t)(ntohl(base_low) & hostmask) + pool->pool_size;
+    if (last > hostmask) {
+        LOG_ERR("addr_pool6: %s cannot hold the %u addresses of the IPv4 pool; use a "
+                "shorter IPv6 prefix or a smaller IPv4 pool",
+                cidr6, pool->pool_size);
+        return -1;
+    }
+
+    pool->base6 = base6;
     pool->prefix6 = (int)plen;
     pool->has_v6 = 1;
 
@@ -168,16 +213,22 @@ mqvpn_addr_pool_init6(mqvpn_addr_pool_t *pool, const char *cidr6)
     return 0;
 }
 
-void
+int
 mqvpn_addr_pool_get6(const mqvpn_addr_pool_t *pool, uint32_t offset, struct in6_addr *out)
 {
     memcpy(out, &pool->base6, sizeof(*out));
-    /* Add offset to the low 32 bits (bytes 12-15) of the IPv6 address */
+    /* Add offset to the host part of the low 32 bits (bytes 12-15). An
+     * offset that would carry into the network bits (or wrap) leaves *out at
+     * the base and fails, rather than yield an address outside the prefix. */
     uint32_t low;
     memcpy(&low, &out->s6_addr[12], sizeof(low));
-    low = ntohl(low) + offset;
-    low = htonl(low);
+    low = ntohl(low);
+    uint32_t hostmask = host6_mask(pool->prefix6);
+    uint64_t host = (uint64_t)(low & hostmask) + offset;
+    if (host > hostmask) return -1;
+    low = htonl((low & ~hostmask) | (uint32_t)host);
     memcpy(&out->s6_addr[12], &low, sizeof(low));
+    return 0;
 }
 
 void
@@ -198,6 +249,9 @@ mqvpn_addr_pool_offset6(const mqvpn_addr_pool_t *pool, const struct in6_addr *ad
     memcpy(&base_low, &pool->base6.s6_addr[12], sizeof(base_low));
     addr_low = ntohl(addr_low);
     base_low = ntohl(base_low);
+    /* ...and the network bits of the low word too (prefixes past /96). */
+    uint32_t hostmask = host6_mask(pool->prefix6);
+    if ((addr_low & ~hostmask) != (base_low & ~hostmask)) return 0;
     if (addr_low < base_low) return 0;
     return addr_low - base_low;
 }

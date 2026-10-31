@@ -47,6 +47,25 @@ v6_lane_ineligible(const mqvpn_flow_key_t *key)
            is_unspecified(key->src_ip);
 }
 
+/* v4 counterpart: a multicast or limited-broadcast address on either side.
+ * lwIP drops such a segment before any pcb sees it — tcp_input refuses a
+ * broadcast/multicast destination, ip4_input a broadcast/multicast source
+ * (RFC 1122 3.2.1.3) — so a SYN laned here would park a PENDING_ACCEPT slot
+ * that no accept ever claims. Route it RAW instead. */
+static int
+v4_addr_is_mcast_or_bcast(const uint8_t a[4])
+{
+    return (a[0] & 0xf0) == 0xe0 ||
+           (a[0] == 0xff && a[1] == 0xff && a[2] == 0xff && a[3] == 0xff);
+}
+
+static int
+v4_lane_ineligible(const mqvpn_flow_key_t *key)
+{
+    return v4_addr_is_mcast_or_bcast(key->dst_ip) ||
+           v4_addr_is_mcast_or_bcast(key->src_ip);
+}
+
 mqvpn_hybrid_lane_t
 mqvpn_hybrid_classify(const uint8_t *pkt, size_t len, const mqvpn_hybrid_config_t *pol,
                       mqvpn_flow_key_t *out_key)
@@ -72,6 +91,7 @@ mqvpn_hybrid_classify(const uint8_t *pkt, size_t len, const mqvpn_hybrid_config_
         /* Address classes lwIP would pre-accept-drop before the stream lane
          * ever sees a PENDING_ACCEPT slot — see v6_lane_ineligible above. */
         if (key->ip_version == 6 && v6_lane_ineligible(key)) return MQVPN_LANE_RAW;
+        if (key->ip_version == 4 && v4_lane_ineligible(key)) return MQVPN_LANE_RAW;
         /* Tunnel-subnet destinations stay RAW: the server-side connect-tcp
          * egress ACL rejects the tunnel subnet unconditionally (its check
          * precedes EgressAllow — svr_tcp_egress_acl_decide), so laning

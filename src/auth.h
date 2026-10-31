@@ -16,7 +16,9 @@
 /* Generate a random PSK and print to stdout. Returns 0 on success. */
 int mqvpn_auth_genkey(void);
 
-/* Constant-time comparison. Returns 0 if equal, nonzero otherwise. */
+/* Constant-time comparison of a peer-supplied value `a` against the expected
+ * secret `b`: the running time depends only on b_len, never on a_len or on
+ * where the first difference is. Returns 0 if equal, nonzero otherwise. */
 int mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_len);
 
 /* Non-cryptographic diagnostic fingerprint of a PSK — FNV-1a over the raw
@@ -30,7 +32,8 @@ int mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_l
  * unlikely but not impossible to also hold for two different keys).
  * Writes exactly 8 hex chars + NUL; dst_len must be >= 9. No-op (dst
  * untouched) if dst_len < 9. */
-void mqvpn_auth_debug_fingerprint(const char *key, size_t key_len, char *dst, size_t dst_len);
+void mqvpn_auth_debug_fingerprint(const char *key, size_t key_len, char *dst,
+                                  size_t dst_len);
 
 /* Base64 encode src into dst. Returns 0 on success, -1 if dst_len too small. */
 int mqvpn_auth_b64_encode(char *dst, size_t dst_len, const unsigned char *src,

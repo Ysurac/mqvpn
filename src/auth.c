@@ -56,14 +56,18 @@ mqvpn_auth_b64_encode(char *dst, size_t dst_len, const unsigned char *src, size_
 
 /* ---- Constant-time comparison ---- */
 
+/* The loop always runs over b_len (the expected secret), whatever a_len (the
+ * peer's input) is, and a length mismatch is folded into the result instead
+ * of returning early: the running time does not depend on how many leading
+ * bytes match nor on whether the lengths agree, so neither the secret's bytes
+ * nor its length can be probed by varying the input. */
 int
 mqvpn_auth_ct_compare(const char *a, size_t a_len, const char *b, size_t b_len)
 {
-    if (a_len != b_len) return 1;
-
-    volatile unsigned char result = 0;
-    for (size_t i = 0; i < a_len; i++) {
-        result |= (unsigned char)a[i] ^ (unsigned char)b[i];
+    volatile unsigned char result = (a_len != b_len) ? 1 : 0;
+    for (size_t i = 0; i < b_len; i++) {
+        unsigned char ac = (i < a_len) ? (unsigned char)a[i] : 0;
+        result |= ac ^ (unsigned char)b[i];
     }
     return result != 0;
 }

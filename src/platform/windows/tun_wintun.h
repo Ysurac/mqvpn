@@ -30,6 +30,9 @@ typedef struct _TUN_SESSION *WINTUN_SESSION_HANDLE;
 /* mqvpn_tun_write() returns this when the ring is full. */
 #  define MQVPN_TUN_EAGAIN (-2)
 
+/* One socketpair frame: 2-byte big-endian length + up to 65535 bytes. */
+#  define MQVPN_TUN_WIN_FRAME_MAX (2 + 65535)
+
 typedef struct {
     /* Wintun handles */
     WINTUN_ADAPTER_HANDLE adapter;
@@ -47,6 +50,8 @@ typedef struct {
     evutil_socket_t pipe_rd; /* libevent monitors this */
     evutil_socket_t pipe_wr; /* reader thread writes here */
     volatile LONG stop;      /* InterlockedExchange flag */
+    uint8_t *rx_buf;         /* main-thread frame reassembly (FRAME_MAX bytes) */
+    int rx_len;              /* bytes of the current frame received so far */
 
     /* Address state */
     struct in_addr addr;
@@ -68,11 +73,22 @@ int mqvpn_tun_win_set_addr(mqvpn_tun_win_t *tun, const char *addr, const char *p
 /* Assign IPv6 address. */
 int mqvpn_tun_win_set_addr6(mqvpn_tun_win_t *tun, const char *addr6, int prefix_len);
 
-/* Set MTU on the adapter. */
+/* Set MTU on the adapter (IPv6 too once an IPv6 address is set; setting the
+ * IPv6 address applies the current MTU to IPv6). */
 int mqvpn_tun_win_set_mtu(mqvpn_tun_win_t *tun, int mtu);
+
+/* Pin the adapter's interface metric (automatic metric off), IPv4 and, once
+ * an IPv6 address is set, IPv6. Lives and dies with the adapter. */
+int mqvpn_tun_win_set_metric(mqvpn_tun_win_t *tun, ULONG metric);
 
 /* Start the reader thread that bridges Wintun → socketpair. */
 int mqvpn_tun_win_start_reader(mqvpn_tun_win_t *tun);
+
+/* Main thread: the next complete packet from the reader thread's pipe,
+ * reassembled across partial reads. Returns its length (> 0) with *pkt valid
+ * until the next call, 0 if no complete packet is buffered yet, -1 on a pipe
+ * error. */
+int mqvpn_tun_win_read(mqvpn_tun_win_t *tun, const uint8_t **pkt);
 
 /* Write a single IP packet to Wintun (called from main thread). */
 int mqvpn_tun_win_write(mqvpn_tun_win_t *tun, const uint8_t *buf, size_t len);

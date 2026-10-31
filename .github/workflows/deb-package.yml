@@ -8,11 +8,14 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      create_release:
-        description: 'Create a GitHub Release from the built packages'
-        type: boolean
-        default: false
+
+# Every branch push and manual run publishes the built packages as a GitHub
+# pre-release. Pull requests only build them and upload them as workflow
+# artifacts. A v* tag is released by release.yml, which owns the release and
+# its (hand-edited, initially empty) body; this workflow never creates or
+# edits that release. The only write-scoped job is the pre-release below.
+permissions:
+  contents: read
 
 jobs:
   build-deb:
@@ -33,19 +36,6 @@ jobs:
         with:
           submodules: recursive
 
-      # BoringSSL is not bundled in the xquic submodule — clone it pinned,
-      # matching the commit used by the main CI workflow.
-      - name: Clone BoringSSL (pinned)
-        run: |
-          # xquic vendors its own boringssl submodule now, so the recursive
-          # checkout above already populated this path; wipe it first so we
-          # always get a full, unshallow clone pinned at the commit below.
-          rm -rf third_party/xquic/third_party/boringssl
-          git clone https://github.com/google/boringssl.git \
-            third_party/xquic/third_party/boringssl
-          cd third_party/xquic/third_party/boringssl
-          git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
-
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -60,7 +50,7 @@ jobs:
       - name: Collect packages
         run: |
           mkdir -p dist
-          mv ../mqvpn_*.deb ../libmqvpn0_*.deb ../libmqvpn-dev_*.deb dist/ 2>/dev/null || true
+          mv ../*.deb dist/
           ls -lh dist/
 
       - name: Upload packages
@@ -71,10 +61,12 @@ jobs:
           retention-days: 30
 
   release:
-    name: Create GitHub Release
+    name: Publish GitHub pre-release
     needs: build-deb
-    # Run on every push (any branch/tag), or when manually requested.
-    if: github.event_name == 'push' || inputs.create_release == true
+    # Never for a pull request, nor for a tag: release.yml owns tag releases.
+    if: >-
+      github.event_name != 'pull_request' &&
+      !startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,18 +89,20 @@ jobs:
       - name: List packages
         run: find dist/ -name '*.deb' | sort
 
-      - name: Create release
+      - name: Create pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF_NAME}"
-          else
-            SAFE_REF="${GITHUB_REF_NAME//\//-}"
-            TAG="${SAFE_REF}-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
-          fi
+          SAFE_REF="${GITHUB_REF_NAME//\//-}"
+          TAG="${SAFE_REF}-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          # --target: without it gh tags the default branch, not this build.
+          # Pre-release and not latest, so it never displaces the current
+          # stable release. Body intentionally empty (edited by hand).
           gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
             --title "mqvpn $TAG" \
-            --generate-notes \
+            --prerelease \
+            --latest=false \
+            --notes "" \
             dist/amd64/*.deb \
             dist/arm64/*.deb

@@ -9,16 +9,27 @@ Prometheus exporter.
 ## 1. Overview
 
 - **Transport:** TCP (plaintext, no TLS)
-- **Framing:** Newline-terminated JSON objects. The server also accepts a bare
-  JSON object terminated by its closing `}` brace, whichever arrives first.
-- **Request:** one JSON object per connection (max 4 KB)
+- **Framing:** one JSON object. The first non-whitespace byte must be `{`;
+  the request ends at the object's matching closing `}` (a trailing newline,
+  as `echo ... | nc` sends, is fine), or at EOF. Only that object is parsed;
+  bytes after it are ignored. Any other input — an HTTP request, for
+  example — is answered with `{"ok":false,"error":"invalid request"}` and
+  the connection is closed without parsing anything.
+- **Request:** one JSON object per connection (max 4 KB). A buffer that
+  fills up without a complete object gets
+  `{"ok":false,"error":"request too large"}`.
 - **Response:** one JSON object, newline-terminated; server closes the
   connection after writing the response.
-- **Idle timeout:** 5 seconds — connections that do not deliver a complete
-  request within 5 seconds are closed without a response.
+- **Deadline:** 5 seconds from accept — a connection that has not completed
+  its request and received its reply within 5 seconds is closed (without a
+  response if the request was incomplete). The limit is absolute: sending
+  bytes slowly does not extend it.
 - **Concurrency:** maximum 8 simultaneous control connections. A 9th connection
   receives `{"ok":false,"error":"too many connections"}` and is immediately
   closed.
+- **Modes:** the same socket is available in server and client mode. User
+  management commands are server-only; `add_path` / `remove_path` /
+  `list_paths` are client-only (§5.11).
 
 ---
 
@@ -41,6 +52,24 @@ sudo mqvpn --mode server ... --control-port 9090
 sudo mqvpn --mode server ... --control-port 9090 --control-addr 127.0.0.1
 ```
 
+From a config file (client or server mode), either form:
+
+```ini
+[Control]
+Listen = 127.0.0.1:9090
+```
+
+```ini
+[Control]
+Port = 9090        ; alias ControlPort
+Addr = 127.0.0.1   ; alias ControlAddr
+```
+
+JSON: `"control_listen": "127.0.0.1:9090"`, or `"control_port"` /
+`"control_addr"`. Precedence per field: `Listen`, then `Port` / `Addr`, then
+`--control-port` / `--control-addr`. `--control-port 0` disables the API
+even when the file sets a port.
+
 ### Security
 
 The control API has **no authentication and no TLS**. If you bind to a
@@ -57,11 +86,20 @@ port beyond localhost.
 
 ## 3. Request Format
 
-A single UTF-8 JSON object, terminated by its closing `}` brace or a newline
-character (`\n`). Maximum size: **4 096 bytes** (`CTRL_MAX_REQ`).
+A single UTF-8 JSON object whose first non-whitespace byte is `{`,
+terminated by its closing `}` brace (or EOF). Maximum size: **4 096 bytes**
+(`CTRL_MAX_REQ`).
 
-All requests must contain a `"cmd"` string field. Unknown commands return an
-error response rather than closing the connection.
+All requests must contain a top-level `"cmd"` string field. Keys are looked
+up among the object's own members only: a `"cmd"` inside a nested object
+does not count. Unknown commands return an error response rather than
+closing the connection.
+
+String values use standard JSON escapes (`\"`, `\\`, `\n`, `\uXXXX`, ...). A
+string longer than the field allows (names 63 bytes, keys 255, interface
+names 15) is rejected, never shortened. Numeric fields must be JSON numbers:
+a quoted number, a sign where none is allowed, a fraction or trailing
+characters are rejected.
 
 ```json
 {"cmd":"<command>", ...}
@@ -84,8 +122,9 @@ connection immediately after writing the response.
 - Additional fields (documented per command) are present only when `ok` is
   `true`, unless noted otherwise.
 
-**Overflow guard:** if an internal response would exceed 128 KB (worst-case
-`get_status` with many clients), the server instead returns:
+**Overflow guard:** if an internal response would exceed 256 KiB
+(`CTRL_MAX_RESP_BYTES`; worst-case `get_status` with many clients), the
+server instead returns:
 
 ```json
 {"ok":false,"error":"response too large"}
@@ -106,10 +145,16 @@ name already exists, the key is updated in place.
 {"cmd":"add_user","name":"alice","key":"alice-secret"}
 ```
 
-| Field  | Type   | Required | Description                          |
-|--------|--------|----------|--------------------------------------|
-| `name` | string | yes      | Username (max 63 chars)              |
-| `key`  | string | yes      | Pre-shared key (max 255 chars)       |
+| Field      | Type   | Required | Description                                          |
+|------------|--------|----------|------------------------------------------------------|
+| `name`     | string | yes      | Username (1–63 UTF-8 bytes, no `"`, `\` or control characters) |
+| `key`      | string | yes      | Pre-shared key (max 255 bytes)                       |
+| `fixed_ip` | string | no       | IPv4 address reserved for this user (see §5.10)      |
+
+With `fixed_ip` the command is atomic: nothing changes unless the address is
+accepted. For an existing user the address is applied first and the key is
+left unchanged if it is refused; a new user is not kept if the address is
+refused.
 
 **Response — success**
 
@@ -121,21 +166,34 @@ name already exists, the key is updated in place.
 
 ```json
 {"ok":false,"error":"name and key required"}
+{"ok":false,"error":"name exceeds 63 bytes"}
 {"ok":false,"error":"add_user failed (-N)"}
+{"ok":false,"error":"fixed_ip invalid or unavailable"}
 ```
 
-- `"name and key required"` — one or both fields are missing or cannot be
-  parsed.
+- `"name and key required"` — one or both fields are missing or are not
+  strings, or the key is too long.
+- `"name exceeds 63 bytes"` — the decoded username exceeds 63 UTF-8 bytes.
+  Overlong names are rejected rather than truncated; existing users and their
+  keys are unchanged.
 - `"add_user failed (-N)"` — the underlying library call returned error code
-  `-N`; check server logs for details.
+  `-N` (for example an invalid name, or the user table is full); check server
+  logs for details.
+- `"fixed_ip invalid or unavailable"` — the address is malformed, outside the
+  client pool, or already reserved.
 
 ---
 
 ### 5.2 `remove_user`
 
-Remove a user from the auth table. Does not forcibly disconnect an active
-session; the session expires naturally after authentication fails on the next
-reconnect.
+Remove a user from the auth table. Active sessions authenticated with that
+username are disconnected immediately, and the user's fixed IP reservation
+(if any) is released.
+
+Removing the last credential does not turn authentication off: a server that
+started with any key or user keeps requiring one, so with no key and no user
+left every new connection is refused (403) until `add_user` adds one. The
+server logs a warning when that happens.
 
 **Request**
 
@@ -145,7 +203,7 @@ reconnect.
 
 | Field  | Type   | Required | Description |
 |--------|--------|----------|-------------|
-| `name` | string | yes      | Username    |
+| `name` | string | yes      | Username (max 63 UTF-8 bytes) |
 
 **Response — success**
 
@@ -157,10 +215,13 @@ reconnect.
 
 ```json
 {"ok":false,"error":"name required"}
+{"ok":false,"error":"name exceeds 63 bytes"}
 {"ok":false,"error":"user not found"}
 ```
 
 - `"name required"` — the `name` field is missing or cannot be parsed.
+- `"name exceeds 63 bytes"` — the decoded username exceeds 63 UTF-8 bytes.
+  Overlong names do not remove a user with a matching prefix.
 - `"user not found"` — no user with that name is registered.
 
 ---
@@ -258,8 +319,8 @@ Notes:
   `tcp_flows_rejected` are wired on both client and server (with the
   per-side semantics in the table above); `pkts_lane_*`,
   `pkts_lane_tcp_dropped`, and `raw_markers_active` are client-only
-  concepts and always report 0 on the server. See §9 for the `[Hybrid]`
-  config keys that control this behavior.
+  concepts and always report 0 on the server. See §9 for background and a
+  link to the `[Hybrid]` configuration reference.
 
 ---
 
@@ -304,7 +365,7 @@ Return per-client and per-path detail for all currently connected clients.
   "n_clients":1,
   "clients":[
     {
-      "user":"alice","endpoint":"1.2.3.4:443",
+      "user":"alice","endpoint":"1.2.3.4:443","scheduler":"wlb",
       "connected_sec":42,
       "bytes_tx":1000,"bytes_rx":2000,
       "n_paths":1,"paths":[
@@ -335,11 +396,12 @@ Return per-client and per-path detail for all currently connected clients.
 |-----------------|--------|----------------------------------------------------|
 | `user`          | string | Username                                           |
 | `endpoint`      | string | Client's remote address and port (`ip:port`)       |
+| `scheduler`     | string | Scheduler this client's connection uses for the server-to-client direction. Equals the server default unless the client asked for another one, `AllowClientScheduler` is on, and none of the exceptions in the configuration guide applied. Added in v0.18.0. |
 | `connected_sec` | uint64 | Seconds since the session was established          |
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
 | `n_paths`       | int    | Number of entries in `paths`                       |
-| `paths`         | array  | Per-path objects (see below)                       |
+| `paths`         | array  | Per-path objects (see below), at most 8, in xquic's order. A closed path stays in the connection until it ends, so a client can have more than 8: then every path that is not closed is listed (the first 8 if there are more), and the first closed ones fill the entries left. Closed and open entries can alternate. |
 
 **Path object**
 
@@ -386,7 +448,7 @@ support was compiled in.
 | Field        | Type    | Description                                                    |
 |--------------|---------|----------------------------------------------------------------|
 | `version`    | string  | Version string from `mqvpn_version_string()`                   |
-| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown`. Client mode: the client's own configured `Scheduler`/`scheduler` setting (previously always reported `"unknown"` regardless of the real configured value — fixed, see §7). |
+| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown`. Server mode: the server default (`Scheduler`); per-client values are in `get_status`. Client mode: the client's own configured `Scheduler`/`scheduler` setting (previously always reported `"unknown"` regardless of the real configured value — fixed, see §7). |
 | `fec_enabled`| integer | `1` if built with `XQC_ENABLE_FEC`; `0` otherwise             |
 
 ---
@@ -413,7 +475,7 @@ that the server was built with `XQC_ENABLE_FEC`.
 
 | Field  | Type   | Required | Description                  |
 |--------|--------|----------|------------------------------|
-| `user` | string | yes      | Username of the active session |
+| `user` | string | yes      | Username of the active session (max 63 UTF-8 bytes) |
 
 **Response — success**
 
@@ -443,11 +505,13 @@ that the server was built with `XQC_ENABLE_FEC`.
 
 ```json
 {"ok":false,"error":"user required"}
+{"ok":false,"error":"name exceeds 63 bytes"}
 {"ok":false,"error":"user not found"}
 {"ok":false,"error":"fec not built"}
 ```
 
 - `"user required"` — the `user` field is missing or cannot be parsed.
+- `"name exceeds 63 bytes"` — the decoded username in `user` exceeds 63 UTF-8 bytes.
 - `"user not found"` — no active session exists for that username.
 - `"fec not built"` — the server was compiled without `XQC_ENABLE_FEC`, or an
   internal null-pointer guard was triggered. Check `get_build_info` first.
@@ -505,7 +569,7 @@ Requires that the server was built with `XQC_ENABLE_FEC`.
 - `"fec not built"` — same semantics as `get_fec_stats`. Consumers should
   stop probing FEC for the rest of this scrape.
 - `"response too large"` — only possible if the user count grows beyond what
-  fits in the 128 KB internal response buffer (currently
+  fits in the 256 KiB response limit (`CTRL_MAX_RESP_BYTES`; currently
   `MQVPN_MAX_USERS=64`, well within budget).
 
 ---
@@ -548,12 +612,12 @@ mode.
 | `gap_count`                    | uint64  | Gap episodes opened (an out-of-order arrival started a hold) |
 | `gap_filled_count`             | uint64  | Gaps closed by the missing packet arriving in time        |
 | `gap_timeout_count`            | uint64  | Gaps closed by the hold timer expiring                    |
-| `gap_overflow_count`           | uint64  | Gaps closed because the reorder buffer pool overflowed     |
+| `gap_overflow_count`           | uint64  | Gaps closed because the reorder buffer overflowed (pool or per-flow byte budget), or because a packet arrived beyond the window and moved it |
 | `gap_demote_count`             | uint64  | Gaps closed by an ACK-driven demotion                      |
 | `gap_reset_count`              | uint64  | Gaps closed by a connection/flow reset                     |
 | `ack_demote_count`             | uint64  | Flows demoted by ACK signal (not gap-scoped)                |
 | `too_late_drop_count`          | uint64  | Packets dropped: arrived after their sequence window closed |
-| `too_far_ahead_drop_count`     | uint64  | Packets dropped: too far ahead of the expected sequence      |
+| `too_far_ahead_drop_count`     | uint64  | Always 0: a packet too far ahead of the expected sequence moves the window instead of being dropped. Kept for compatibility |
 | `duplicate_drop_count`         | uint64  | Duplicate packets dropped                                    |
 | `pool_drop_count`              | uint64  | Packets dropped: reorder buffer pool exhausted                |
 | `per_flow_limit_drop_count`    | uint64  | Packets dropped: per-flow buffering cap reached                |
@@ -580,21 +644,105 @@ A server/client with no reorder-enabled connection returns an all-zero
 
 ---
 
+### 5.10 `set_user_fixed_ip`
+
+Assign, change or clear the fixed (pinned) IPv4 address of an existing user
+at runtime. The address is removed from the dynamic pool and reserved for
+that user from its next connection onward.
+
+**Request**
+
+```json
+{"cmd":"set_user_fixed_ip","name":"carol","fixed_ip":"10.0.0.50"}
+{"cmd":"set_user_fixed_ip","name":"carol","fixed_ip":""}
+```
+
+| Field      | Type   | Required | Description                                         |
+|------------|--------|----------|-----------------------------------------------------|
+| `name`     | string | yes      | Existing username                                   |
+| `fixed_ip` | string | no       | IPv4 address inside the client pool; `""` or absent clears the reservation |
+
+**Response**
+
+```json
+{"ok":true}
+{"ok":false,"error":"name required"}
+{"ok":false,"error":"set_user_fixed_ip failed (-N)"}
+```
+
+`"set_user_fixed_ip failed (-N)"` covers an unknown user, a malformed or
+out-of-pool address, an address already reserved for someone else, and a
+`fixed_ip` that is not a string or is too long.
+
+---
+
+### 5.11 Path commands (client mode, plus a server-mode form)
+
+Keyed by the client's local interface name (`iface`, max 15 bytes).
+`add_path`, `remove_path` and `list_paths` exist only in client mode; a
+server answers `"not supported in server mode"`.
+
+| Request | Success | Errors |
+|---------|---------|--------|
+| `{"cmd":"add_path","iface":"eth0"}` (optional `"backup":true` for a failover-only path) | `{"ok":true}` | `"iface required"`, `"add_path failed"` |
+| `{"cmd":"remove_path","iface":"eth0"}` | `{"ok":true}` | `"iface required"`, `"path not found or last path"` |
+| `{"cmd":"list_paths"}` | `{"ok":true,"paths":["eth0","wlan0"]}` | — |
+| `{"cmd":"set_path_weight","iface":"eth0","weight":10}` | `{"ok":true}` | `"weight required"`, `"weight must be 0-65535"`, `"iface required"`, `"path not found"` |
+| `{"cmd":"set_path_dscp_mask","iface":"eth0","dscp_mask":70368744177664}` | `{"ok":true}` | `"dscp_mask required"`, `"dscp_mask must be a non-negative integer"`, `"iface required"`, `"path not found"` |
+
+- `weight` is a JSON number `0`–`65535` (used by the `wrtt` scheduler; `0`
+  means the default weight). `dscp_mask` is a non-negative JSON number, or
+  a bare `0x`-prefixed hexadecimal token (e.g. `0x400000000000`) as an
+  mqvpn extension; bit *N* allows DSCP class *N* (used by the `dscp`
+  scheduler).
+- By default the client reports its own weight / DSCP mask to the server,
+  which adopts it for its downlink too, so the client-side call is enough
+  for both directions (see `SyncPathLabels` in the configuration guide).
+
+**Server-mode form** of `set_path_weight` / `set_path_dscp_mask`: pins the
+server's downlink value for one client path, overriding what the client
+reports. It needs `user` plus either `iface` (persists across a path
+re-creation and may be sent before the path exists) or `path_id` from
+`get_status` (one-shot); `iface` wins if both are given.
+
+```json
+{"cmd":"set_path_weight","user":"alice","iface":"wlan0","weight":3}
+{"cmd":"set_path_dscp_mask","user":"alice","path_id":2,"dscp_mask":70368744177664}
+```
+
+Additional errors: `"user required"`, `"iface or path_id required"`,
+`"user not found"`, `"path not found"`.
+
+---
+
 ## 6. Error Reference
 
 | Error string             | Returned by                                    |
 |--------------------------|------------------------------------------------|
-| `"missing cmd"`          | any request (no `cmd` field present)           |
+| `"missing cmd"`          | any request that is not a JSON object with a string `cmd` (unparseable JSON, a non-object root, a missing or non-string `cmd`) |
 | `"unknown cmd"`          | any request with an unrecognised `cmd` value   |
 | `"too many connections"` | connection accepted when 8 slots already used  |
 | `"response too large"`   | any command (internal buffer overflow guard)   |
 | `"name and key required"`| `add_user`                                     |
+| `"name exceeds 63 bytes"`| `add_user`, `set_user_fixed_ip`, `remove_user`, `get_fec_stats` |
 | `"add_user failed (-N)"` | `add_user` (N = underlying error code)         |
 | `"name required"`        | `remove_user`                                  |
-| `"user not found"`       | `remove_user`, `get_fec_stats`                 |
-| `"user required"`        | `get_fec_stats`                                |
+| `"user not found"`       | `remove_user`, `get_fec_stats`, server-mode `set_path_weight` / `set_path_dscp_mask` |
+| `"user required"`        | `get_fec_stats`, server-mode `set_path_weight` / `set_path_dscp_mask` |
 | `"fec not built"`        | `get_fec_stats`, `get_all_fec_stats`           |
 | `"internal error"`       | `get_reorder_stats`                            |
+| `"invalid request"`      | any request whose first non-whitespace byte is not `{` |
+| `"request too large"`    | any request that fills the 4 KB buffer without a complete object |
+| `"fixed_ip invalid or unavailable"` | `add_user`                          |
+| `"set_user_fixed_ip failed (-N)"` | `set_user_fixed_ip`                   |
+| `"not supported in server mode"` | `add_path`, `remove_path`, `list_paths` |
+| `"iface required"`       | path commands                                  |
+| `"add_path failed"`      | `add_path`                                     |
+| `"path not found or last path"` | `remove_path`                           |
+| `"path not found"`       | `set_path_weight`, `set_path_dscp_mask`        |
+| `"weight required"`, `"weight must be 0-65535"` | `set_path_weight`       |
+| `"dscp_mask required"`, `"dscp_mask must be a non-negative integer"` | `set_path_dscp_mask` |
+| `"iface or path_id required"` | `set_path_weight`, `set_path_dscp_mask` (server mode) |
 
 ---
 
@@ -610,6 +758,20 @@ mqvpn follows semantic versioning for the control API:
   (future-proofing).
 - **Removing or renaming** a command or a response field is a
   **breaking change** and requires a major version bump.
+- **Request hardening (after v0.17.0):** no command or response field
+  changed, but input that used to be accepted loosely is now refused. A
+  request must start with `{` (an HTTP request, or any text before the
+  object, gets `"invalid request"`; previously such input was dispatched
+  once a newline arrived, which let a browser POST run commands). Keys are
+  matched at the top level only. `weight` / `dscp_mask` must be JSON
+  numbers (`dscp_mask` may also be bare `0x` hex); strings, negatives,
+  fractions and trailing junk are refused instead of parsed leniently.
+  Over-long strings are refused instead of truncated, and an over-long
+  `cmd` is `"unknown cmd"`. A request that fills the 4 KB buffer gets
+  `"request too large"` instead of being dispatched truncated. The 5 s
+  limit is now an absolute deadline rather than an idle timer. `add_user`
+  with `fixed_ip` is atomic. New error strings are listed in §6.
+  `echo '{"cmd":...}' | nc` clients are unaffected.
 - `get_stats` was extended in v0.5.0 with `dgram_sent`, `dgram_recv`,
   `dgram_lost`, `dgram_acked`, and `uptime_sec`. Consumers that only read
   `n_clients`, `bytes_tx`, and `bytes_rx` remain unaffected.
@@ -644,6 +806,9 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
+  struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
+  consumers remain unaffected.
 - `get_status` path objects gained `reinject_tx_bytes` in v0.15.0 — the
   per-path bytes speculatively duplicated by reinjection. Additive; existing
   JSON consumers remain unaffected. The value is read from the server's
@@ -724,61 +889,15 @@ On macOS, replace `-q1` with `-G 1` (BSD netcat).
 
 ## 9. Hybrid mode configuration keys
 
-Hybrid mode terminates inner TCP connections locally (client-side, via an
-embedded lwIP stack) and relays them over a dedicated HTTP/3 request stream
-instead of the datagram CONNECT-IP path. This section is the config-key
-reference; see the README's "Hybrid mode (TCP lane)" section for the lane
-diagram and a minimal example. Same `[Hybrid]` section in both INI
-(`server.conf`/`client.conf`) and JSON (`"hybrid": {...}`) config — JSON
-keys are the snake_case column below.
+Hybrid mode relays inner TCP connections over HTTP/3 streams. Its runtime
+counters are available through `get_stats` (§5.4), but **the control API
+cannot enable, disable, or reconfigure hybrid mode**.
 
-| INI key                | JSON key                  | Type    | Default | Applies to     | Description |
-|-------------------------|---------------------------|---------|---------|----------------|-------------|
-| `Enabled`               | `enabled`                 | bool    | `false` | client + server | Turn hybrid mode on. Disabled by default — existing deployments see no behavior change. |
-| `Tcp`                   | `tcp`                     | string  | `auto`  | client only     | Per-flow TCP lane policy: `stream` (always relay via the TCP lane), `raw` (never — inner TCP stays on the CONNECT-IP datagram path, byte-identical to hybrid disabled), or `auto` (per-flow: TCP lane once ≥2 paths are active at SYN time, RAW otherwise; the decision is latched for the flow's lifetime, never re-evaluated). |
-| `TcpMaxFlows`           | `tcp_max_flows`           | uint32  | `256`   | client + server | Cap on concurrently open TCP-lane flows. Client: caps the local flow table (a SYN over the cap falls back to RAW pre-lwIP, counted in `tcp_flows_rejected`). Server: caps concurrent egress flows per client session (a SYN over the cap gets an HTTP `503`). On the client the honored value is additionally clamped to half the build profile's lwIP pcb pool — 4096 on desktop/router, 256 on Android, 64 on iOS — and the clamp is logged at startup and at lane creation. Raising it for a router deployment needs the matching raise on the **server** too, since the per-session cap here is enforced independently on each side. |
-| `TcpIdleTimeoutSec`     | `tcp_idle_timeout_sec`    | uint32  | `300`   | client + server | Idle-eviction timeout for TCP-lane flows (no activity for this long tears the flow down). `0` disables idle eviction (flows live for the whole connection lifetime). |
-| `TcpConnectTimeoutSec`  | `tcp_connect_timeout_sec` | uint32  | `10`    | server only     | Timeout for the server's egress `connect()` to the requested target; on expiry the client gets an HTTP `504`. |
-| `TcpMaxGlobalFlows`     | `tcp_max_global_flows`    | uint32  | `4096`  | server only     | Whole-server cap on concurrent egress TCP flows, across all client sessions (independent of the per-session `TcpMaxFlows`). A SYN over the cap gets an HTTP `503`. |
-| `EgressAllow`           | `egress_allow`            | CIDR list (repeatable) | *(none)* | server only | Punches a hole through the mandatory default-deny for egress targets inside RFC1918/loopback/link-local ranges (e.g. `EgressAllow = 10.222.0.0/24`). Up to 32 entries. |
-| `EgressDeny`            | `egress_deny`             | CIDR list (repeatable) | *(none)* | server only | Additional egress targets to block, evaluated after `EgressAllow`. Up to 32 entries. |
+Configure it through the `[Hybrid]` section in INI files
+(`server.conf` / `client.conf`) or the `"hybrid"` object in JSON configuration
+files. These JSON keys are configuration-file keys, not control API request
+fields.
 
-Notes:
-- `Tcp`/`tcp` is a client-only knob — the server has no concept of a
-  per-flow lane policy, it only relays whatever the client's classifier
-  routes to it.
-- The egress ACL default-denies RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`,
-  `192.168.0.0/16`), loopback, and link-local ranges even with no
-  `EgressAllow`/`EgressDeny` configured — this is a safety default against a
-  compromised or misconfigured client using the server as an internal-network
-  pivot, not an opt-in feature.
-- `TcpBpHighWater`/`TcpBpLowWater` (uplink backpressure watermarks) are
-  internal compile-time constants, not configurable — see
-  `src/hybrid/tcp_lane.h` if you need to know their values.
-- See §5.4 (`get_stats`) for the runtime counters this config surfaces.
-
-### Known limitations
-
-- **TCP to private targets needs an explicit `EgressAllow`.** The client's
-  TCP-lane classifier has no visibility into the server's `EgressAllow` list,
-  so it cannot decide up front whether a given RFC1918/CGNAT/link-local/
-  loopback target will actually be allowed egress — it always tries the TCP
-  lane for such targets when `Tcp = stream` or `Tcp = auto` picks TCP. If the
-  server's default-deny egress ACL (see the Notes above) then rejects the
-  connect, the failure surfaces *after* the inner app already saw its
-  `connect()` succeed: lwIP answers the inner SYN with a SYN-ACK locally
-  (the TCP-lane accept happens before the server's egress `connect()` is
-  attempted), so the app only finds out via a subsequent RST once the
-  server's `connect()` is denied — not a clean, immediate refusal. UDP and
-  RAW-lane traffic to the same targets are unaffected (no local SYN-ACK
-  step). Operators who need TCP to a private target through the hybrid lane
-  must add an `EgressAllow` entry covering it.
-- **Client-address pools wider than `/24` can deny intra-VPN TCP between
-  clients.** The client only exempts its *own* `/24` from the TCP lane (to
-  keep client-to-client traffic within that `/24` off the egress-ACL path);
-  with a wider pool, two clients in different `/24`s of the same pool hit the
-  server's default-deny egress ACL for TCP between them, same as any other
-  RFC1918 target. Use a `/24`-or-narrower client-address pool, or an
-  `EgressAllow` entry covering the pool, if you need TCP between clients on
-  different `/24`s. The server logs a startup warning when its configured
-  pool is wider than `/24` for this reason.
+See [Configuration → `[Hybrid]`](../website/guide/configuration.md#hybrid)
+for the keys and defaults, and [Hybrid Mode](../website/guide/hybrid-mode.md)
+for behavior, examples, and known limitations.

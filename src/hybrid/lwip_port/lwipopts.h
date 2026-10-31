@@ -200,6 +200,14 @@
 #define TCP_QUEUE_OOSEQ     1
 #define LWIP_TCP_TIMESTAMPS 0
 
+/* Per-pcb bounds on the out-of-order queue. Bytes cannot exceed the window
+ * anyway; the pbuf count is what an inner peer sending tiny out-of-order
+ * segments would otherwise inflate (each is a whole PBUF_RAM packet
+ * allocation, lwip_glue.c) — one pbuf per KiB of window still admits a
+ * full window of ordinary segments. */
+#define TCP_OOSEQ_MAX_BYTES TCP_WND
+#define TCP_OOSEQ_MAX_PBUFS (TCP_WND / 1024)
+
 #define MEM_ALIGNMENT 8
 #define LWIP_STATS    0
 /* LWIP_DEBUG intentionally left undefined — lwIP gates on #ifdef, not

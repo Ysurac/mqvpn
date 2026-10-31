@@ -30,14 +30,14 @@ static int g_passed = 0;
     }                              \
     static void test_##name(void)
 
-#define ASSERT_EQ(a, b)                                                                    \
-    do {                                                                                   \
-        int _a = (int)(a), _b = (int)(b);                                                  \
-        if (_a != _b) {                                                                    \
-            printf("FAIL\n    %s:%d  %s == %d, expected %d\n", __FILE__, __LINE__, #a, _a, \
-                   _b);                                                                    \
-            exit(1);                                                                       \
-        }                                                                                  \
+#define ASSERT_EQ(a, b)                                                                \
+    do {                                                                               \
+        int _a = (int)(a), _b = (int)(b);                                              \
+        if (_a != _b) {                                                                \
+            printf("FAIL\n    %s:%d  %s == %d, expected %d\n", __FILE__, __LINE__, #a, \
+                   _a, _b);                                                            \
+            exit(1);                                                                   \
+        }                                                                              \
     } while (0)
 
 /* ── Helpers ── */

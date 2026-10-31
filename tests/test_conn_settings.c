@@ -125,11 +125,11 @@ test_propagation_cc(void)
     ASSERT_EQ(cs.cc_params.cc_optimization_flags,
               XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE);
 
-    /* BBR — no optimization flags */
+    /* BBR — RTT-variance compensation, as BBR2 */
     in.cc = MQVPN_CC_BBR;
     mqvpn_build_conn_settings(&in, &cs);
     ASSERT_PTR_EQ(cs.cong_ctrl_callback.xqc_cong_ctl_init, xqc_bbr_cb.xqc_cong_ctl_init);
-    ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+    ASSERT_EQ(cs.cc_params.cc_optimization_flags, XQC_BBR_FLAG_RTTVAR_COMPENSATION);
 
     /* CUBIC — no optimization flags */
     in.cc = MQVPN_CC_CUBIC;
@@ -171,12 +171,115 @@ test_propagation_init_max_path_id(void)
     return 0;
 }
 
+static int
+test_path_mtu_sizes_packets(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    static const struct {
+        int path_mtu;
+        size_t pkt;
+    } cases[] = {
+        {0, MQVPN_MAX_PKT_OUT_SIZE},
+        {1280, 1200},
+        {1492, 1412},
+        {1499, 1419},
+        {1500, 1436},
+        {9000, 1436},
+    };
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        in.path_mtu = cases[i].path_mtu;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_pkt_out_size, cases[i].pkt);
+    }
+    /* the largest packet on the wire fits the path, IPv6 header included */
+    for (int mtu = 1280; mtu <= 1500; mtu++) {
+        size_t pkt = mqvpn_pkt_out_size(mtu);
+        size_t ack = pkt < MQVPN_XQC_MAX_PKT_OUT_SIZE ? 16 : 0;
+        ASSERT_EQ(pkt + ack + MQVPN_AEAD_TAG_LEN + 48 <= (size_t)mtu, 1);
+    }
+    return 0;
+}
+
 /* The server forces multipath ON unconditionally — mqvpn's client is the active
  * path creator, so the server allows MP regardless of its input flag
  * (src/mqvpn_conn_settings.c:88-95). test_asymmetry_server_vs_client only feeds
  * the server enable_multipath=true; this pins the "ignore the input flag" half,
  * so a regression that made the server honour in->enable_multipath (silently
  * disabling server-side multipath when a caller passes false) fails here. */
+/* PMTUD: packets start at the base size, probing goes up to the PathMTU
+ * size (or the xquic cap), both ends probe, and nothing changes without it */
+static int
+test_pmtud_sizes(void)
+{
+    xqc_conn_settings_t cs;
+    mqvpn_conn_settings_input_t in = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    static const struct {
+        int path_mtu;
+        size_t start;
+        size_t cap;
+    } cases[] = {
+        {0, MQVPN_PMTUD_BASE_PKT_OUT_SIZE, MQVPN_XQC_MAX_PKT_OUT_SIZE},
+        {1280, 1200, 1200},
+        {1400, MQVPN_PMTUD_BASE_PKT_OUT_SIZE, 1320},
+        {1500, MQVPN_PMTUD_BASE_PKT_OUT_SIZE, MQVPN_XQC_MAX_PKT_OUT_SIZE},
+    };
+
+    in.pmtud = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        in.path_mtu = cases[i].path_mtu;
+        for (int server = 0; server <= 1; server++) {
+            in.is_server = server;
+            mqvpn_build_conn_settings(&in, &cs);
+            ASSERT_EQ(cs.enable_pmtud, 0x3);
+            ASSERT_EQ(cs.max_pkt_out_size, cases[i].start);
+            ASSERT_EQ(cs.probing_pkt_out_size, cases[i].cap);
+        }
+    }
+    /* the base size still gives IPv6 its 1280-byte inner MTU */
+    ASSERT_EQ(MQVPN_PMTUD_BASE_PKT_OUT_SIZE - MQVPN_DGRAM_HEADROOM, 1280);
+
+    /* with reorder, the start size (also where xquic goes back to when a
+     * path shrinks) leaves room for its header, PathMTU still capping it */
+    static const struct {
+        int path_mtu;
+        size_t start;
+    } reorder_cases[] = {
+        {0, MQVPN_PMTUD_BASE_PKT_OUT_SIZE + MQVPN_REORDER_HDR_LEN},
+        {1280, 1200},
+        {1380, 1300}, /* between the two start sizes: the PathMTU size */
+        {1400, MQVPN_PMTUD_BASE_PKT_OUT_SIZE + MQVPN_REORDER_HDR_LEN},
+    };
+    in.reorder = true;
+    for (size_t i = 0; i < sizeof(reorder_cases) / sizeof(reorder_cases[0]); i++) {
+        in.path_mtu = reorder_cases[i].path_mtu;
+        for (int server = 0; server <= 1; server++) {
+            in.is_server = server;
+            mqvpn_build_conn_settings(&in, &cs);
+            ASSERT_EQ(cs.max_pkt_out_size, reorder_cases[i].start);
+        }
+    }
+    in.reorder = false;
+
+    in.pmtud = false;
+    in.is_server = false;
+    in.path_mtu = 1500;
+    mqvpn_build_conn_settings(&in, &cs);
+    ASSERT_EQ(cs.enable_pmtud, 0);
+    ASSERT_EQ(cs.probing_pkt_out_size, 0);
+    ASSERT_EQ(cs.max_pkt_out_size, MQVPN_XQC_MAX_PKT_OUT_SIZE);
+    return 0;
+}
+
 static int
 test_server_forces_multipath_regardless_of_input(void)
 {
@@ -287,14 +390,13 @@ test_reinjection_mapping(void)
     ASSERT_EQ(cs.reinj_hard_deadline, 100000);
     ASSERT_EQ(cs.reinj_deadline_lower_bound, 100000);
 
-    /* dgram: AFTER_SEND only; scheduler_callback must NOT be overridden */
-    in.reinjection = MQVPN_REINJ_DGRAM;
+    /* 3 was the removed dgram value: now invalid -> off, WLB survives */
+    in.reinjection = (mqvpn_reinjection_t)3;
     mqvpn_build_conn_settings(&in, &cs);
-    ASSERT_EQ(cs.mp_enable_reinjection, XQC_REINJ_UNACK_AFTER_SEND);
-    ASSERT_PTR_EQ(cs.reinj_ctl_callback.xqc_reinj_ctl_can_reinject,
-                  xqc_dgram_reinj_ctl_cb.xqc_reinj_ctl_can_reinject);
+    ASSERT_EQ(cs.mp_enable_reinjection, 0);
+    ASSERT_PTR_EQ(cs.reinj_ctl_callback.xqc_reinj_ctl_can_reinject, NULL);
     ASSERT_PTR_EQ(cs.scheduler_callback.xqc_scheduler_get_path,
-                  xqc_wlb_scheduler_cb.xqc_scheduler_get_path); /* WLB survives */
+                  xqc_wlb_scheduler_cb.xqc_scheduler_get_path);
 
     /* invalid enum value -> off */
     in.reinjection = (mqvpn_reinjection_t)99;
@@ -403,10 +505,66 @@ test_stream_unsent_cap_both_sides(void)
     return 0;
 }
 
+/* Both sides cap their datagram backlog too: tunnelled IP packets are
+ * DATAGRAMs, so the stream cap alone leaves the tunnel unbounded. */
+static int
+test_dgram_unsent_cap_both_sides(void)
+{
+    for (int server = 0; server <= 1; server++) {
+        xqc_conn_settings_t cs;
+        mqvpn_conn_settings_input_t in = {
+            .is_server = server,
+            .enable_multipath = true,
+            .scheduler = MQVPN_SCHED_WLB,
+        };
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.max_dgram_unsent_packets, MQVPN_DGRAM_UNSENT_PACKETS);
+        ASSERT_EQ(cs.max_dgram_unsent_delay_ms, MQVPN_DGRAM_UNSENT_DELAY_MS);
+        if (cs.max_dgram_unsent_packets == 0 ||
+            cs.max_dgram_unsent_packets >= cs.sndq_packets_used_max)
+            FAIL("dgram cap %u not below sndq_packets_used_max %llu",
+                 cs.max_dgram_unsent_packets,
+                 (unsigned long long)cs.sndq_packets_used_max);
+    }
+    return 0;
+}
+
+/* Not conn settings proper, but this is the unit test that links mqvpn_lib
+ * with the internal config layout: a user added into a slot vacated by
+ * mqvpn_config_remove_user() must not inherit the old occupant's fixed IP,
+ * and names/keys that would only fit shortened are refused. */
+static int
+test_config_user_slot_reuse(void)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_EQ(cfg != NULL, 1);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "alice", "ka"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bob", "kb"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_user_fixed_ip(cfg, "bob", "10.0.0.7"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_remove_user(cfg, "bob"), MQVPN_OK);
+    ASSERT_EQ(cfg->user_fixed_ips[1][0], '\0');
+    ASSERT_EQ(cfg->user_keys[1][0], '\0');
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "carol", "kc"), MQVPN_OK);
+    ASSERT_EQ(strcmp(cfg->user_names[1], "carol"), 0);
+    ASSERT_EQ(cfg->user_fixed_ips[1][0], '\0');
+
+    char longname[80];
+    memset(longname, 'n', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    ASSERT_EQ(mqvpn_config_add_user(cfg, longname, "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user(cfg, "bad\"name", "k"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_auth_username(cfg, "a\nb"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_auth_username(cfg, "ok-user"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_config_set_auth_username(cfg, ""), MQVPN_OK);
+    mqvpn_config_free(cfg);
+    return 0;
+}
+
 int
 main(void)
 {
     int failed = 0;
+    failed += test_config_user_slot_reuse();
     failed += test_asymmetry_server_vs_client();
 #ifdef MQVPN_XQUIC_HAS_DEFER_SEND_FLUSH
     failed += test_defer_flush_tracks_batch_registration();
@@ -414,10 +572,13 @@ main(void)
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_propagation_init_max_path_id();
+    failed += test_path_mtu_sizes_packets();
+    failed += test_pmtud_sizes();
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();
     failed += test_stream_unsent_cap_both_sides();
+    failed += test_dgram_unsent_cap_both_sides();
     if (failed) {
         fprintf(stderr, "test_conn_settings: %d FAILED\n", failed);
         return 1;

@@ -4,11 +4,12 @@
 #include "libmqvpn.h"
 #include "log.h"
 #include "config.h"
-#include "json_mini.h"
+#include "json_util.h" /* mqvpn_user_name_ok */
 #include "auth.h"
 #include "vpn_client.h"
 #include "vpn_server.h"
 #include "flow_sched.h"
+#include "redundant_tx.h"
 #include "mqvpn_sched_names.h"
 
 #include <xquic/xquic.h> /* for XQC_ENABLE_* compile-time defines */
@@ -79,15 +80,26 @@ usage(const char *prog)
         "  --no-routes               Skip all automatic route setup; manage routes\n"
         "  --noroutes               Alias for --no-routes\n"
         "                            manually (client mode)\n"
-        "  --control-port PORT       TCP port for JSON control API (server mode)\n"
+        "  --no-manage-routes        Do not modify the host routing table "
+        "(router/embedded integration; same as --no-routes)\n"
+        "  --control-port PORT       TCP port for JSON control API (0 disables it)\n"
         "  --control-addr ADDR       Bind address for control API (default 127.0.0.1)\n"
-        "                            (also configurable via [Control] Listen in INI / "
-        "control_listen in JSON)\n"
+        "                            (also configurable via [Control] Listen or "
+        "Port/Addr in INI,\n"
+        "                            control_listen or control_port/control_addr in "
+        "JSON)\n"
         "  --status                  Query server status via control API and exit\n"
         "                            (uses --control-port, or [Control] Listen from "
         "--config)\n"
         "  --scheduler minrtt|wlb|backup|wlb_udp_pin|backup_fec|rap|wrtt|wrr|\n"
         "              redundant|dscp   Multipath scheduler (default wlb)\n"
+        "  --allow-client-scheduler  Let clients pick the download scheduler for their "
+        "own\n"
+        "                            connection (server mode)\n"
+        "  --request-server-scheduler\n"
+        "                            Ask the server to use --scheduler for the download "
+        "too\n"
+        "                            (client mode)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
         "                            TP (default = xquic default 8; set lower, "
@@ -96,21 +108,28 @@ usage(const char *prog)
         "  --fec-enable              Enable FEC\n"
         "  --no-fec                  Disable FEC\n"
         "  --fec-scheme galois_calculation|packet_mask|reed_solomon|xor  FEC scheme\n"
-        "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited|none  Congestion control (default bbr2)\n"
+        "  --cc bbr2|bbr|cubic|new_reno|copa|unlimited|none  Congestion control (default "
+        "bbr2)\n"
         "  --mtu N                   TUN MTU, 1280-9000 (client: cap on negotiated;\n"
         "                            server: sets TUN MTU; default: auto = ~1382)\n"
+        "  --path-mtu N              Underlay MTU to size QUIC packets for, 1280-9000\n"
+        "                            (default: 0 = 1400-byte packets)\n"
+        "  --pmtud                   Discover the path MTU (both ends, default off);\n"
+        "                            --path-mtu is the cap\n"
         "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
         "  --no-sync-path-labels     Don't sync per-path weight/dscp_mask between\n"
         "                            client and server; configure them independently.\n"
         "                            Server: don't auto-adopt the client's own value\n"
         "                            for downlink scheduling. Client: don't announce\n"
         "                            its own value to the server. (default: sync\n"
-        "                            enabled; either side alone is enough to disable it)\n"
+        "                            enabled; either side alone is enough to disable "
+        "it)\n"
         "  --push-path-labels        Push an operator-pinned per-path weight/dscp_mask\n"
         "                            from server to client (reverse of the above), so\n"
         "                            it also governs that client's own uplink, keyed by\n"
         "                            user. Server: send the push. Client: adopt one\n"
-        "                            received. (default: off; BOTH sides must enable it)\n"
+        "                            received. (default: off; BOTH sides must enable "
+        "it)\n"
         "  --log-level debug|info|warn|error  (default info)\n"
         "  --version                 Show version and exit\n"
         "  --help                    Show this help\n"
@@ -119,42 +138,48 @@ usage(const char *prog)
         prog, prog, prog);
 }
 
+/* Strict decimal integer in [min, max]: no sign prefix other than '-', no
+ * whitespace, no trailing junk, no overflow. Returns 0 on success. */
 static int
-parse_host_port(const char *str, char *host, size_t host_len, int *port)
+parse_cli_int(const char *s, long min, long max, int *out)
 {
-    if (str[0] == '[') {
-        /* Bracket notation for IPv6: [host]:port */
-        const char *close = strchr(str, ']');
-        if (!close || close[1] != ':') {
-            fprintf(stderr, "error: expected [HOST]:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(close - str - 1);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str + 1, hlen);
-        host[hlen] = '\0';
-        *port = atoi(close + 2);
-    } else {
-        /* Legacy: host:port (last colon) */
-        const char *colon = strrchr(str, ':');
-        if (!colon) {
-            fprintf(stderr, "error: expected HOST:PORT, got '%s'\n", str);
-            return -1;
-        }
-        size_t hlen = (size_t)(colon - str);
-        if (hlen >= host_len) hlen = host_len - 1;
-        memcpy(host, str, hlen);
-        host[hlen] = '\0';
-        *port = atoi(colon + 1);
-    }
-    if (*port <= 0 || *port > 65535) {
-        fprintf(stderr, "error: invalid port in '%s'\n", str);
+    if (!s || !(*s == '-' || (*s >= '0' && *s <= '9'))) return -1;
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE || v < min || v > max) return -1;
+    *out = (int)v;
+    return 0;
+}
+
+static int
+parse_host_port(const char *str, char *host, size_t host_len, int *port,
+                const char *label)
+{
+    if (mqvpn_parse_host_port(str, host, host_len, port) < 0) {
+        fprintf(stderr,
+                "error: invalid %s address '%s': use HOST:PORT or [IPv6]:PORT, "
+                "port 1-65535\n",
+                label, str);
         return -1;
     }
     return 0;
 }
 
-/* mqvpn_copy_str is provided by json_mini.h as mqvpn_copy_str */
+static int
+parse_mtu_arg(const char *opt, const char *str, int *out)
+{
+    char *end = NULL;
+    errno = 0;
+    long lv = strtol(str, &end, 10);
+    if (end == str || !end || *end != '\0' || errno == ERANGE ||
+        (lv != 0 && (lv < 1280 || lv > 9000))) {
+        fprintf(stderr, "error: %s must be 0 or 1280..9000\n", opt);
+        return -1;
+    }
+    *out = (int)lv;
+    return 0;
+}
 
 int
 main(int argc, char *argv[])
@@ -192,6 +217,8 @@ main(int argc, char *argv[])
         {"fec-enable", no_argument, NULL, 'E'},
         {"no-fec", no_argument, NULL, 'e'},
         {"fec-scheme", required_argument, NULL, 'F'},
+        {"path-mtu", required_argument, NULL, 0x107},
+        {"pmtud", no_argument, NULL, 0x10f},
         {"max-clients", required_argument, NULL, 'M'},
         {"log-level", required_argument, NULL, 'L'},
         {"no-reconnect", no_argument, NULL, 'R'},
@@ -201,10 +228,13 @@ main(int argc, char *argv[])
         {"routesviaserver", no_argument, NULL, 'w'},
         {"no-routes", no_argument, NULL, 'W'},
         {"noroutes", no_argument, NULL, 'W'},
+        {"no-manage-routes", no_argument, NULL, 0x103},
         {"tls-server-name", required_argument, NULL, 0x104},
-        {"pinned-pubkey", required_argument, NULL, 0x107},
+        {"pinned-pubkey", required_argument, NULL, 0x110},
         {"no-sync-path-labels", no_argument, NULL, 0x105},
         {"push-path-labels", no_argument, NULL, 0x106},
+        {"allow-client-scheduler", no_argument, NULL, 0x108},
+        {"request-server-scheduler", no_argument, NULL, 0x109},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -224,6 +254,8 @@ main(int argc, char *argv[])
     const char *key_file = NULL;
     const char *cipher_list = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
+    int allow_client_sched = -1;
+    int request_server_sched = -1;
     const char *tls_server_name = NULL;
     const char *pinned_pubkey = NULL;
     const char *auth_key = NULL;
@@ -236,7 +268,9 @@ main(int argc, char *argv[])
     const char *cc_str = NULL;
     uint64_t init_max_path_id = 0; /* 0 = unset → xquic default (8) */
     int init_max_path_id_set = 0;
-    int cli_mtu = -1;     /* -1 means "not set by CLI" */
+    int cli_mtu = -1; /* -1 means "not set by CLI" */
+    int cli_path_mtu = -1;
+    int cli_pmtud = -1;
     int fec_enable = -1; /* -1 means not set by CLI */
     const char *fec_scheme_str = NULL;
     int max_clients = -1; /* -1 means "not set by CLI" */
@@ -247,18 +281,20 @@ main(int argc, char *argv[])
     const char *dns_servers[4];
     int n_dns = 0;
     int no_reconnect = 0;
-    int kill_switch = -1;        /* -1 = not set by CLI */
-    int route_via_server = -1;   /* -1 = not set by CLI */
-    int no_routes = -1;          /* -1 = not set by CLI */
-    int sync_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
-    int push_path_labels = -1;   /* -1 = not set by CLI (client and server modes) */
+    int kill_switch = -1;      /* -1 = not set by CLI */
+    int route_via_server = -1; /* -1 = not set by CLI */
+    int no_routes = -1;        /* -1 = not set by CLI */
+    int manage_routes = -1;    /* -1 = not set by CLI; 0 = --no-manage-routes */
+    int sync_path_labels = -1; /* -1 = not set by CLI (client and server modes) */
+    int push_path_labels = -1; /* -1 = not set by CLI (client and server modes) */
     int control_port = 0;
     int control_port_set = 0; /* 1 iff --control-port was passed explicitly */
     const char *control_addr = NULL;
     int status_mode = 0;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:YZ:EeF:Q:M:L:X:x:wWRKTVh",
+    while ((opt = getopt_long(argc, argv,
+                              "C:m:s:l:n:6:t:c:k:y:ia:u:Gp:b:d:S:EeF:M:L:X:x:wWRKTVh",
                               long_opts, NULL)) != -1) {
         switch (opt) {
         case 'C': config_path = optarg; break;
@@ -280,6 +316,10 @@ main(int argc, char *argv[])
                 return 1;
             }
             char pair[360];
+            if (strlen(optarg) >= sizeof(pair)) {
+                fprintf(stderr, "error: --user value too long\n");
+                return 1;
+            }
             snprintf(pair, sizeof(pair), "%s", optarg);
             char *sep = strchr(pair, ':');
             if (!sep) {
@@ -287,15 +327,34 @@ main(int argc, char *argv[])
                 return 1;
             }
             *sep = '\0';
-            mqvpn_copy_str(cli_user_names[n_cli_users],
-                           sizeof(cli_user_names[n_cli_users]), pair);
-            mqvpn_copy_str(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
-                           sep + 1);
-            if (cli_user_names[n_cli_users][0] == '\0' ||
-                cli_user_keys[n_cli_users][0] == '\0') {
+            if (pair[0] == '\0' || sep[1] == '\0') {
                 fprintf(stderr, "error: --user must be NAME:KEY\n");
                 return 1;
             }
+            /* Same rule as [Auth] User / mqvpn_config_add_user: a name the
+             * library would reject must stop startup here, not be dropped
+             * later and leave the server running without that credential. */
+            if (strlen(pair) >= sizeof(cli_user_names[0])) {
+                fprintf(stderr, "error: --user name exceeds %zu bytes\n",
+                        sizeof(cli_user_names[0]) - 1);
+                return 1;
+            }
+            if (!mqvpn_user_name_ok(pair, sizeof(cli_user_names[0]))) {
+                fprintf(stderr,
+                        "error: --user name must be 1-%zu bytes without '\"', '\\' "
+                        "or control characters\n",
+                        sizeof(cli_user_names[0]) - 1);
+                return 1;
+            }
+            if (strlen(sep + 1) >= sizeof(cli_user_keys[0])) {
+                fprintf(stderr, "error: --user key too long (max %zu bytes)\n",
+                        sizeof(cli_user_keys[0]) - 1);
+                return 1;
+            }
+            snprintf(cli_user_names[n_cli_users], sizeof(cli_user_names[n_cli_users]),
+                     "%.*s", (int)(sizeof(cli_user_names[n_cli_users]) - 1), pair);
+            snprintf(cli_user_keys[n_cli_users], sizeof(cli_user_keys[n_cli_users]),
+                     "%.*s", (int)(sizeof(cli_user_keys[n_cli_users]) - 1), sep + 1);
             n_cli_users++;
             break;
         }
@@ -312,7 +371,8 @@ main(int argc, char *argv[])
             if (n_backup_paths < MQVPN_MAX_PATH_IFACES) {
                 backup_ifaces[n_backup_paths++] = optarg;
             } else {
-                fprintf(stderr, "error: max %d backup paths supported\n", MQVPN_MAX_PATH_IFACES);
+                fprintf(stderr, "error: max %d backup paths supported\n",
+                        MQVPN_MAX_PATH_IFACES);
                 return 1;
             }
             break;
@@ -348,34 +408,36 @@ main(int argc, char *argv[])
         case 'E': fec_enable = 1; break;
         case 'e': fec_enable = 0; break;
         case 'F': fec_scheme_str = optarg; break;
-        case 0x102: {
-            char *end = NULL;
-            errno = 0;
-            long lv = strtol(optarg, &end, 10);
-            if (end == optarg || !end || *end != '\0' || errno == ERANGE ||
-                lv < INT_MIN || lv > INT_MAX) {
-                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
-                return 1;
-            }
-            int v = (int)lv;
-            if (v != 0 && (v < 1280 || v > 9000)) {
-                fprintf(stderr, "error: --mtu must be 0 or 1280..9000\n");
-                return 1;
-            }
-            cli_mtu = v;
+        case 0x102:
+            if (parse_mtu_arg("--mtu", optarg, &cli_mtu) < 0) return 1;
             break;
-        }
-        case 'M': max_clients = atoi(optarg); break;
+        case 0x107:
+            if (parse_mtu_arg("--path-mtu", optarg, &cli_path_mtu) < 0) return 1;
+            break;
+        case 0x10f: cli_pmtud = 1; break;
+        case 'M':
+            /* 0 keeps its historical meaning: the library default (64). */
+            if (parse_cli_int(optarg, 0, INT_MAX, &max_clients) < 0) {
+                fprintf(stderr, "error: --max-clients must be a non-negative integer\n");
+                return 1;
+            }
+            break;
         case 'R': no_reconnect = 1; break;
         case 'K': kill_switch = 1; break;
         case 'w': route_via_server = 1; break;
         case 'W': no_routes = 1; break;
+        case 0x103: manage_routes = 0; break;
         case 0x104: tls_server_name = optarg; break;
-        case 0x107: pinned_pubkey = optarg; break;
+        case 0x110: pinned_pubkey = optarg; break;
         case 0x105: sync_path_labels = 0; break;
         case 0x106: push_path_labels = 1; break;
+        case 0x108: allow_client_sched = 1; break;
+        case 0x109: request_server_sched = 1; break;
         case 'X':
-            control_port = atoi(optarg);
+            if (parse_cli_int(optarg, 0, 65535, &control_port) < 0) {
+                fprintf(stderr, "error: --control-port must be 0..65535 (0 disables)\n");
+                return 1;
+            }
             control_port_set = 1;
             break;
         case 'x': control_addr = optarg; break;
@@ -404,24 +466,30 @@ main(int argc, char *argv[])
         }
     }
 
-    /* Resolve effective control endpoint (INI base + per-field CLI overrides).
-     * Used by both --status (below) and the server-mode listener (further down). */
+    /* Resolve effective control endpoint ([Control] Listen, then [Control]
+     * Port/Addr, then per-field CLI overrides). Used by --status (below) and
+     * by the control listener in both client and server mode. */
     char eff_control_addr_buf[256] = {0};
     const char *eff_control_addr = NULL;
     int eff_control_port = 0;
-    if (mqvpn_resolve_control_endpoint(file_cfg.control_listen, control_addr,
-                                       control_port, control_port_set,
-                                       eff_control_addr_buf, sizeof(eff_control_addr_buf),
-                                       &eff_control_addr, &eff_control_port) < 0) {
+    if (mqvpn_resolve_control_endpoint_ex(
+            file_cfg.control_listen, file_cfg.control_addr, file_cfg.control_port,
+            control_addr, control_port, control_port_set, eff_control_addr_buf,
+            sizeof(eff_control_addr_buf), &eff_control_addr, &eff_control_port) < 0) {
         fprintf(stderr, "error: invalid [Control] Listen = '%s'\n",
                 file_cfg.control_listen);
         return 1;
     }
-    /* --control-addr without a port is a silent-disable trap: warn so admins
-     * notice the missing --control-port / [Control] Listen. */
-    if (eff_control_addr != NULL && eff_control_port == 0) {
-        LOG_WRN("--control-addr ignored: no port configured (use --control-port "
-                "or [Control] Listen)");
+    /* An address without a port is a silent-disable trap: warn so admins
+     * notice the missing port. An explicit --control-port 0 is a deliberate
+     * disable and stays quiet. */
+    if (eff_control_addr != NULL && eff_control_port == 0 && !control_port_set) {
+        if (control_addr)
+            LOG_WRN("--control-addr ignored: no port configured (use --control-port "
+                    "or [Control] Listen)");
+        else
+            LOG_WRN("[Control] Addr ignored: no port configured (use [Control] Port "
+                    "or Listen)");
     }
 
 #ifndef _WIN32
@@ -453,12 +521,19 @@ main(int argc, char *argv[])
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
     const char *eff_tls_ciphers = cipher_list ? cipher_list : file_cfg.tls_ciphers;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
+    int eff_allow_client_sched =
+        allow_client_sched >= 0 ? allow_client_sched : file_cfg.allow_client_scheduler;
+    int eff_request_server_sched = request_server_sched >= 0
+                                       ? request_server_sched
+                                       : file_cfg.request_server_scheduler;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
     int eff_sync_path_labels =
         sync_path_labels >= 0 ? sync_path_labels : file_cfg.sync_path_labels;
     int eff_push_path_labels =
         push_path_labels >= 0 ? push_path_labels : file_cfg.push_path_labels;
+    int eff_path_mtu = cli_path_mtu >= 0 ? cli_path_mtu : file_cfg.path_mtu;
+    int eff_pmtud = cli_pmtud >= 0 ? cli_pmtud : file_cfg.pmtud;
 
     /* Auth key: CLI > config (use auth_key for client, server_auth_key for server) */
     const char *eff_auth_key =
@@ -483,10 +558,13 @@ main(int argc, char *argv[])
         for (int i = 0; i < eff_n_users; i++) {
             eff_user_names[i] = file_cfg.user_names[i];
             eff_user_keys[i] = file_cfg.user_keys[i];
-            eff_user_fixed_ips[i] = file_cfg.user_fixed_ips[i][0]
-                                        ? file_cfg.user_fixed_ips[i] : NULL;
+            eff_user_fixed_ips[i] =
+                file_cfg.user_fixed_ips[i][0] ? file_cfg.user_fixed_ips[i] : NULL;
         }
     }
+
+    /* Server address: CLI > config */
+    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
 
     /* Determine mode: CLI > config file > error */
     const char *eff_mode = mode;
@@ -494,7 +572,7 @@ main(int argc, char *argv[])
         if (config_path) {
             eff_mode = file_cfg.is_server ? "server" : "client";
             /* Client mode needs server address */
-            if (!file_cfg.is_server && file_cfg.server_addr[0] == '\0') {
+            if (!file_cfg.is_server && eff_server[0] == '\0') {
                 fprintf(
                     stderr,
                     "error: config has no [Server] Address and no --mode specified\n");
@@ -507,9 +585,6 @@ main(int argc, char *argv[])
             return 1;
         }
     }
-
-    /* Server address: CLI > config */
-    const char *eff_server = server_str ? server_str : file_cfg.server_addr;
 
     /* Set log level */
     mqvpn_log_level_t log_level = MQVPN_LOG_INFO;
@@ -570,7 +645,7 @@ main(int argc, char *argv[])
     if (reinj_lookup < 0) {
         fprintf(stderr,
                 "warning: [Multipath] Reinjection '%s' not recognized "
-                "(expected 'off', 'deadline', 'idle', or 'dgram'); using 'off'\n",
+                "(expected 'off', 'deadline', or 'idle'); using 'off'\n",
                 file_cfg.reinjection);
     } else {
         reinjection = reinj_lookup;
@@ -580,12 +655,11 @@ main(int argc, char *argv[])
      * keys, superseded by [Multipath] Reinjection above. Only consulted
      * when Reinjection was left at its "off" default, so an explicit
      * modern key always wins. "default" maps to IDLE (closest equivalent
-     * of the old always-on, xqc_default_reinj_ctl_cb behavior). */
+     * of the old always-on, xqc_default_reinj_ctl_cb behavior), and so does
+     * "dgram", whose mode was removed. */
     if (reinjection == MQVPN_REINJ_OFF && file_cfg.reinjection_control) {
         if (strcmp(file_cfg.reinjection_mode, "deadline") == 0) {
             reinjection = MQVPN_REINJ_DEADLINE;
-        } else if (strcmp(file_cfg.reinjection_mode, "dgram") == 0) {
-            reinjection = MQVPN_REINJ_DGRAM;
         } else {
             reinjection = MQVPN_REINJ_IDLE;
         }
@@ -600,9 +674,28 @@ main(int argc, char *argv[])
     } else if (strcmp(eff_fec_scheme, "galois_calculation") == 0) {
         fec_scheme = MQVPN_FEC_SCHEME_GALOIS_CALCULATION;
     } else if (strcmp(eff_fec_scheme, "reed_solomon") != 0) {
-        fprintf(stderr,
-                "error: --fec-scheme must be 'galois_calculation', 'packet_mask', 'reed_solomon' or 'xor'\n");
+        fprintf(stderr, "error: --fec-scheme must be 'galois_calculation', "
+                        "'packet_mask', 'reed_solomon' or 'xor'\n");
         return 1;
+    }
+
+    /* Redundant mode: a bad RedundantPorts list is fatal only when the mode is
+     * on; it never degrades to "all UDP". */
+    uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS] = {0};
+    int n_redundant_ports = 0;
+    if (file_cfg.redundant && strcmp(eff_mode, "client") == 0) {
+        n_redundant_ports =
+            file_cfg.redundant_ports_err
+                ? -1
+                : mqvpn_redundant_parse_ports(file_cfg.redundant_ports, redundant_ports,
+                                              MQVPN_REDUNDANT_MAX_PORTS);
+        if (n_redundant_ports < 0) {
+            fprintf(stderr,
+                    "error: [Multipath] RedundantPorts '%s' is not a comma-separated "
+                    "list of up to 16 ports (1-65535)\n",
+                    file_cfg.redundant_ports);
+            return 1;
+        }
     }
 
     /* Paths: CLI paths override config paths entirely */
@@ -637,7 +730,7 @@ main(int argc, char *argv[])
 
         char host[256];
         int port;
-        if (parse_host_port(eff_server, host, sizeof(host), &port) < 0) {
+        if (parse_host_port(eff_server, host, sizeof(host), &port, "server") < 0) {
             return 1;
         }
 
@@ -651,15 +744,31 @@ main(int argc, char *argv[])
 
         int eff_reconnect = no_reconnect ? 0 : file_cfg.reconnect;
 
+        /* NoRoutes/--no-routes (this fork) and ManageRoutes/--no-manage-routes
+         * (upstream v0.16.0) are one switch: either one asking mqvpn to keep
+         * out of the routing table wins. CLI still overrides the file for the
+         * flag it names. Routes are managed iff manage_routes && !no_routes. */
+        int eff_no_routes_flag = no_routes >= 0 ? no_routes : file_cfg.no_routes;
+        int eff_manage_routes =
+            manage_routes >= 0 ? manage_routes : file_cfg.manage_routes;
+        int eff_no_routes = eff_no_routes_flag || !eff_manage_routes;
+
         const char *eff_auth_key_client = eff_auth_key;
-        const char *eff_auth_username = file_cfg.auth_username[0] ? file_cfg.auth_username : NULL;
+        const char *eff_auth_username =
+            file_cfg.auth_username[0] ? file_cfg.auth_username : NULL;
         if (!eff_auth_key_client && eff_n_users > 0) {
             /* User = NAME:KEY style: use first entry's key and name */
             if (eff_n_users > 1)
                 LOG_WRN("client mode: only the first user credential is used");
             eff_auth_key_client = eff_user_keys[0];
-            if (!eff_auth_username)
-                eff_auth_username = eff_user_names[0];
+            if (!eff_auth_username) eff_auth_username = eff_user_names[0];
+        }
+        /* The username travels in a request header and is echoed by the
+         * control API: hold it to the same rule as a server-side user name. */
+        if (eff_auth_username && !mqvpn_user_name_ok(eff_auth_username, 64)) {
+            fprintf(stderr, "error: [Auth] Username must be 1-63 bytes without '\"', "
+                            "'\\' or control characters\n");
+            return 1;
         }
         const char *eff_tls_name = tls_server_name ? tls_server_name
                                    : file_cfg.tls_server_name[0]
@@ -671,7 +780,8 @@ main(int argc, char *argv[])
             .server_port = port,
             .tls_server_name = eff_tls_name,
             .tun_name = eff_tun_name,
-            .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
+            .tls_ciphers =
+                (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .insecure = eff_insecure,
             .pinned_pubkey = eff_pinned_pubkey,
             .log_level = log_level,
@@ -681,25 +791,30 @@ main(int argc, char *argv[])
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
+            .request_server_scheduler = eff_request_server_sched,
             .auth_key = eff_auth_key_client,
             .auth_username = eff_auth_username,
             .n_dns = n_dns,
             .reconnect = eff_reconnect,
             .reconnect_interval = file_cfg.reconnect_interval,
             .kill_switch = kill_switch >= 0 ? kill_switch : file_cfg.kill_switch,
-            .route_via_server = route_via_server >= 0 ? route_via_server
-                                                      : file_cfg.route_via_server,
-            .no_routes = no_routes >= 0 ? no_routes : file_cfg.no_routes,
-            .manage_routes = file_cfg.manage_routes,
-            .control_port = control_port ? control_port : file_cfg.control_port,
-            .control_addr = control_addr ? control_addr
-                          : (file_cfg.control_addr[0] ? file_cfg.control_addr : NULL),
+            .route_via_server =
+                route_via_server >= 0 ? route_via_server : file_cfg.route_via_server,
+            /* Both spellings mean the same thing (see eff_no_routes). */
+            .no_routes = eff_no_routes,
+            .manage_routes = !eff_no_routes,
+            .control_port = eff_control_port,
+            .control_addr = eff_control_addr,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .path_mtu = eff_path_mtu,
+            .pmtud = eff_pmtud,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
             .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
             .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
+            .redundant = file_cfg.redundant,
+            .n_redundant_ports = n_redundant_ports,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
@@ -720,7 +835,12 @@ main(int argc, char *argv[])
              * gates whether it adopts a server-pushed weight/dscp_mask
              * (mqvpn_client.c's process_capsules PATH_LABEL_PUSH handler). */
             .push_path_labels = eff_push_path_labels,
+            /* [Advanced] TunOffload / TunGro; default 1. Linux only. */
+            .tun_offload = file_cfg.tun_offload,
+            .tun_gro = file_cfg.tun_gro,
         };
+        memcpy(cfg.redundant_ports, redundant_ports,
+               (size_t)n_redundant_ports * sizeof(redundant_ports[0]));
         for (int i = 0; i < n_paths; i++) {
             cfg.path_ifaces[i] = path_ifaces[i];
         }
@@ -748,7 +868,8 @@ main(int argc, char *argv[])
 
         char bind_addr[256] = "0.0.0.0";
         int bind_port = 443;
-        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port) < 0) {
+        if (parse_host_port(eff_listen, bind_addr, sizeof(bind_addr), &bind_port,
+                            "listen") < 0) {
             return 1;
         }
 
@@ -760,19 +881,24 @@ main(int argc, char *argv[])
             .tun_name = eff_tun_name,
             .cert_file = eff_cert,
             .key_file = eff_key,
-            .tls_ciphers = (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
+            .tls_ciphers =
+                (eff_tls_ciphers && eff_tls_ciphers[0]) ? eff_tls_ciphers : NULL,
             .log_level = log_level,
             .scheduler = scheduler,
             .fec_enable = eff_fec_enable,
             .fec_scheme = fec_scheme,
             .cc = cc,
+            .allow_client_scheduler = eff_allow_client_sched,
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,
+            .max_sessions_per_user = file_cfg.max_sessions_per_user,
             .control_addr = eff_control_addr,
             .control_port = eff_control_port,
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
+            .path_mtu = eff_path_mtu,
+            .pmtud = eff_pmtud,
             .reinjection = reinjection,
             .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
             .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
@@ -796,6 +922,9 @@ main(int argc, char *argv[])
             .push_path_labels = eff_push_path_labels,
             /* [Multipath] path_policy; JSON-only, no CLI equivalent. */
             .n_path_policy = file_cfg.n_path_policy,
+            /* [Advanced] TunOffload / TunGro; default 1. Linux only. */
+            .tun_offload = file_cfg.tun_offload,
+            .tun_gro = file_cfg.tun_gro,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];
@@ -803,10 +932,10 @@ main(int argc, char *argv[])
             cfg.user_fixed_ips[i] = eff_user_fixed_ips[i];
         }
         for (int i = 0; i < file_cfg.n_path_policy; i++) {
-            mqvpn_copy_str(cfg.path_policy[i].user, sizeof(cfg.path_policy[i].user),
-                           file_cfg.path_policy[i].user);
-            mqvpn_copy_str(cfg.path_policy[i].iface, sizeof(cfg.path_policy[i].iface),
-                           file_cfg.path_policy[i].iface);
+            snprintf(cfg.path_policy[i].user, sizeof(cfg.path_policy[i].user), "%s",
+                     file_cfg.path_policy[i].user);
+            snprintf(cfg.path_policy[i].iface, sizeof(cfg.path_policy[i].iface), "%s",
+                     file_cfg.path_policy[i].iface);
             cfg.path_policy[i].has_weight = file_cfg.path_policy[i].has_weight;
             cfg.path_policy[i].weight = file_cfg.path_policy[i].weight;
             cfg.path_policy[i].has_dscp_mask = file_cfg.path_policy[i].has_dscp_mask;

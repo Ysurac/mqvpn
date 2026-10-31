@@ -4,6 +4,15 @@
 
 .PHONY: help test test-build test-run test-unit test-e2e test-clean test-all
 
+# Debug build, separate from build.sh's Release build/ (test results are only
+# claimed from Debug or sanitizer builds); same dir as the CMake preset.
+# Configured with an absolute XQUIC_BUILD_DIR (a relative one links the
+# wrong libxquic.so) and built with `cmake --build`, whatever the generator.
+DEBUG_BUILD_DIR := $(CURDIR)/build-debug
+XQUIC_BUILD_DIR := $(CURDIR)/third_party/xquic/build
+CONFIGURE_DEBUG := cmake -S $(CURDIR) -B $(DEBUG_BUILD_DIR) \
+	-DCMAKE_BUILD_TYPE=Debug -DXQUIC_BUILD_DIR=$(XQUIC_BUILD_DIR)
+
 # Default help target
 help:
 	@echo "mqvpn Testing Targets:"
@@ -45,28 +54,22 @@ test-run:
 # Unit tests only (loopback, no namespaces)
 test-unit:
 	@echo "Running unit tests..."
-	@mkdir -p build
-	@if [ ! -f build/tests/test_server ]; then \
-		echo "Building test_server first..."; \
-		cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && ninja test_server; \
-	fi
-	@./build/tests/test_server
+	@$(CONFIGURE_DEBUG) > /dev/null
+	@cmake --build $(DEBUG_BUILD_DIR) --target test_server
+	@$(DEBUG_BUILD_DIR)/tests/test_server
 
 # E2E tests only (namespaces) - requires root
 test-e2e:
 	@echo "Running E2E tests (requires root)..."
 	@chmod +x scripts/ci_e2e/run_path_api_test.sh
-	@if [ ! -f build/mqvpn ]; then \
-		echo "Building mqvpn first..."; \
-		mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && ninja mqvpn; \
-	fi
-	@scripts/ci_e2e/run_path_api_test.sh ./build/mqvpn
+	@$(CONFIGURE_DEBUG) > /dev/null
+	@cmake --build $(DEBUG_BUILD_DIR) --target mqvpn
+	@scripts/ci_e2e/run_path_api_test.sh $(DEBUG_BUILD_DIR)/mqvpn
 
 # Clean test artifacts
 test-clean:
 	@echo "Cleaning test artifacts..."
 	@rm -rf .test-work
-	@rm -rf /tmp/tmp.*/ 2>/dev/null || true
 	@echo "OK: Test artifacts cleaned"
 
 # Quick syntax validation

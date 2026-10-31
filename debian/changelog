@@ -1,3 +1,269 @@
+mqvpn (0.18.0+20261026-1) UNRELEASED; urgency=medium
+
+  * Merge of upstream 0.18.0 (up to 5a07f86).
+  * feat(multipath): redundant mode. Redundant = on ([Multipath], JSON
+    redundant, client only) sends a copy of outgoing UDP packets over
+    every usable path, so a live stream keeps going when one connection
+    drops for a few seconds; RedundantPorts limits it to up to 16
+    destination ports (an invalid list stops the client at startup). It
+    uses up to twice the data with two paths, three times with three, and
+    stops copying to a path that falls behind. CC = bbr is recommended
+    with it; the Android app has the setting.
+  * feat(reinjection)!: the dgram reinjection mode is removed. A config
+    file that sets Reinjection = dgram gets a warning and runs with off;
+    the old ReinjectionMode / reinjection_mode = dgram alias now gives
+    idle. Use redundant mode to duplicate packets.
+  * feat(mtu): PathMTU ([Interface], JSON path_mtu, --path-mtu) sizes the
+    QUIC packets for the underlay: 1500 gives 1436-byte packets and a TUN
+    MTU of 1418 (1382 before). PMTUD = true (JSON pmtud, --pmtud) probes
+    the path instead, starting at the size that still gives IPv6 its 1280,
+    with PathMTU as the cap, and goes back down when larger packets stop
+    getting through. A datagram too large for the interface is now a lost
+    packet instead of a fatal send error. A client whose IPv6 tunnel
+    cannot get an inner MTU of 1280 now closes the connection ("IPv6
+    requires an inner MTU of at least 1280").
+  * feat(linux): the TUN reads and writes GSO super-packets (TCP, and UDP
+    for sockets with UDP_GRO), so bulk traffic costs far fewer syscalls.
+    [Advanced] TunOffload and TunGro (JSON advanced.tun_offload /
+    tun_gro, default on) turn it off; they replace the MQVPN_TUN_OFFLOAD
+    environment variable.
+  * fix: mqvpn and xquic are timed with CLOCK_BOOTTIME (Windows: the
+    interrupt time) instead of the wall clock, so an NTP step on a router
+    without an RTC no longer skews path RTTs or closes the connection as
+    idle (which recreated the TUN and dropped every connection through
+    it). connected_sec in get_status still counts from the wall clock.
+  * feat(cc): BBR (CC = bbr) compensates its cwnd for RTT variation like
+    bbr2; it no longer collapses on links whose RTT swings past twice
+    their minimum.
+  * fix(config): the JSON config file, the library's JSON config and the
+    control API are parsed with a full JSON parser (vendored yyjson
+    0.13.0). Malformed JSON that used to be let through now fails, a key
+    is looked up only in its own object, the first of two duplicate keys
+    wins, and escapes are decoded. A value too long for its field is
+    still refused rather than shortened. The server's NAT helper
+    (mqvpn-server-nat.sh) reads Subnet, Subnet6 and TunName with mqvpn's
+    own parser through the new mqvpn-nat-config helper, installed next to
+    it in /usr/lib/mqvpn; a manual install must keep the two together.
+    Teardown still leaves IP forwarding on, and removes the rules even if
+    the config changed or was deleted.
+  * Control API compatibility: a request that is not valid JSON now gets
+    "missing cmd" instead of a per-field error (e.g. "weight":3abc), and a
+    name over 63 bytes in add_user, set_user_fixed_ip, remove_user or
+    get_fec_stats gets "name exceeds 63 bytes" (was "name and key
+    required" / "name required"). dscp_mask still accepts bare 0x hex.
+    Replies keep their keys, order and types. --user with a name over 63
+    bytes now prints "error: --user name exceeds 63 bytes".
+  * fix(server): in get_status, a client's bytes_tx counts only what the
+    server sent to it (it included the received bytes), and its paths
+    list keeps the paths carrying traffic after networks came back and
+    paths were re-created. The listen socket gets the same large buffers
+    as the client paths, so one fast upload no longer overflows it.
+  * fix(server): a Subnet6 too small to hold the IPv4 pool is refused at
+    startup.
+  * fix(linux): ICMP errors the server sends from its tunnel address
+    (Fragmentation Needed, Time Exceeded) now reach the sender, and the
+    server hop answers traceroute.
+  * fix(client): a connection lost before the platform activates the TUN
+    reconnects instead of asserting; a server certificate rejected inside
+    the library is reported as a TLS error and not retried; a client that
+    reaches CLOSED on its own (--no-reconnect, rejected certificate) exits
+    non-zero.
+  * feat(log): path status lines name the interface: "path <handle>
+    (<iface>) -> <status>".
+  * perf: each tunnelled packet is copied once, and the reorder buffer and
+    the hybrid TCP lane no longer walk their whole flow tables per packet
+    or tick.
+  * fix(android): the UI re-attaches to a VPN that kept running after the
+    activity was destroyed.
+  * fix(debian): ship mqvpn-nat-config, which mqvpn-server-nat.sh now
+    needs; build BoringSSL without LTO (a false -Werror warning broke the
+    arm64 build).
+  * xquic: bump to 2bf181c (mqvpn-main ea3d00a):
+    - PMTU black-hole detection (RFC 8899 section 4.3), used by PMTUD
+      above; a lost PMTU probe no longer counts as congestion, and paths
+      not yet validated no longer limit the connection's packet size;
+    - a spilled ACK stays within the packet cap, which goes up to 1436;
+    - BBR's RTT-variance compensation is compiled in;
+    - every library-side certificate rejection is reported to mqvpn;
+    - closed paths and abandoned CID sets are kept out of the per-packet
+      path and CID walks;
+    - allocation failures while creating a connection are survived, FEC
+      reserves room for its largest frame, and two signed shifts are
+      fixed;
+    - BoringSSL 0.20260929.0.
+
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 26 Oct 2026 12:27:20 +0100
+
+mqvpn (0.17.0+20261015-1) UNRELEASED; urgency=medium
+
+  * fix(reorder): a packet that arrived CapPackets (1024) or more sequence
+    numbers ahead of the one the reorder buffer waited for was dropped,
+    and nothing moved the window again while the flow kept sending: after
+    one burst of lost packets the flow delivered nothing at all, and with
+    half the packets lost about 1% got through. Flooding the tunnel with
+    150 Mbit/s over ~70 Mbit/s of uplinks made the server receive almost
+    nothing after the first second. The window now moves forward and the
+    packet is kept. Only configs with [Reorder] Enabled are affected
+    (OpenMPTCProuter enables it). get_reorder_stats keeps
+    too_far_ahead_drop_count, now always 0.
+  * fix(tunnel): cap the tunnel packets waiting unsent in xquic at 50 ms
+    of the paths' estimated bandwidth (64 to 4096 packets). When the busy
+    WAN went down and a 3 Mbit/s one remained, up to ~23 MB queued: tunnel
+    ping grew past 40 s, DNS through the tunnel failed and
+    OpenMPTCProuter's tracker restarted the client 83 s after the cut.
+    Ping now stays near 0.7 s and the tunnel stays up; 2x500 Mbit/s
+    throughput is unchanged (OpenMPTCProuter issue 4401).
+  * fix(server): one slow or stalled client paused TUN reading for every
+    client, forever if it disconnected before draining. Backpressure is
+    now per session: that client's packets are dropped and the others
+    keep flowing.
+  * fix(server): authentication: removing the last user of a server
+    without a global key no longer opens it to anyone (every request is
+    refused, with a warning); PSKs are compared in constant time; the
+    Bearer scheme matches case-insensitively; a connection is closed
+    after 3 failed auth attempts; shared-key x-user names can no longer
+    fill the lease table and evict configured users' leases;
+    peer-triggered log lines are rate limited (new lines "<what>: N
+    similar log lines suppressed" and "closing connection after N
+    authentication failures").
+  * feat(server): [Auth] MaxSessionsPerUser (JSON max_sessions_per_user)
+    caps the established tunnels per credential; default 0 = unlimited.
+    Over the cap the client gets the same 403 as from a full server.
+  * fix(server): addresses: an exhausted pool is answered with 503 on the
+    stream instead of closing the connection; a pinned user reconnecting
+    at max_clients supersedes its old tunnel instead of being refused;
+    set_user_fixed_ip is transactional (a refused move keeps the old pin,
+    the server's own address is refused); a Subnet6 too small for the
+    IPv4 pool now stops startup (it handed out unroutable IPv6
+    addresses); a non-aligned Subnet (10.0.0.5/24) no longer spills past
+    its prefix.
+  * fix(server): protocol: capsules split by stream flow control are
+    queued instead of cut in half; ADDRESS_REQUEST is answered per entry
+    in the requested family (RFC 9484 section 4.7.2); a refused request
+    closing after the tunnel was up no longer stops path label pushes;
+    connected clients get a CONNECTION_CLOSE on shutdown, so they
+    reconnect at once instead of waiting for their idle timeout;
+    get_status reports connected_sec for clients of a server without
+    auth.
+  * fix(icmp): ICMP errors are rate limited per client session (one
+    client could starve the others' path MTU discovery), and none are
+    sent about ICMP errors, non-first fragments or multicast and
+    broadcast destinations (RFC 1122, RFC 4443).
+  * fix(client): close the connection when the CONNECT-IP tunnel is
+    refused (403) or goes away, so the reconnect logic runs instead of
+    the client sitting in AUTHENTICATING forever, which a 15 s watchdog
+    now bounds. A malformed ADDRESS_ASSIGN aborts the request; datagrams
+    of another request or Context ID are dropped; an expiring downlink
+    packet no longer injects an ICMP error from the client's own address
+    into the TUN; a stack overflow with both Key and Username on the
+    hybrid lane is fixed.
+  * fix(client): backup paths (BackupPath, add_path "backup":true) are
+    held in standby and report "standby" instead of "active". With the
+    xquic bump below, WLB, minrtt and the other schedulers keep them idle
+    while a primary path works.
+  * fix(client): a PATH_ABANDON refused for the last active path is
+    retried once another path validates, instead of leaving the dead path
+    live next to its replacement.
+  * fix: client and server timers run on a monotonic clock, so an NTP
+    step no longer fires or stalls watchdogs, reconnect backoff, reorder
+    gaps and idle deadlines; reorder gap timeouts now wake the event loop
+    instead of firing late on a quiet tunnel.
+  * fix(api): mqvpn_client_get_stats, get_interest and get_paths honour
+    struct_size (callers should set it). No layout change.
+  * fix(control): the control socket accepts only requests that start
+    with '{' (a browser POST could run add_user), uses an absolute 5 s
+    deadline, writes replies in full and refuses over-long or malformed
+    arguments. New error replies: "invalid request", "request too large",
+    "dscp_mask must be a non-negative integer". A refused ninth
+    connection now receives its "too many connections" reply before the
+    close. Commands and reply fields are unchanged.
+  * fix(config): "Key = value  # comment" works; booleans accept
+    true/false/yes/no/on/off/1/0 and warn on anything else; over-long
+    values are refused instead of truncated; a key file readable by group
+    or others gets a warning. ManageRoutes (JSON manage_routes) and
+    --no-manage-routes are restored (upstream 0.16.0). [Control] Listen,
+    Port and Addr work in both modes. CLI numbers and --user names are
+    checked strictly (--max-clients 12abc now fails). A user added after
+    a removal no longer inherits the removed user's fixed IP.
+  * fix(path_label): a peer interface name with control bytes, '"' or '\'
+    is refused (it could forge log lines or break control API JSON).
+  * fix(hybrid): TCP lane: use-after-free on re-entrant teardown fixed;
+    bodies of refused or still-connecting connect-tcp requests are
+    bounded; egress to the server's own addresses and to IPv4 through
+    NAT64 or 6to4 addresses is denied by default (an EgressAllow entry
+    restores it), Teredo and NAT64 local-use are denied; uplink queue
+    memory is accounted per packet; SYNs lwIP drops no longer pin flow
+    slots; a 4-tuple reused while in TIME_WAIT connects again; a clean
+    close no longer truncates downlink data.
+  * feat(hybrid): a paused TCP-lane flow pushes back through QUIC flow
+    control (256 KiB high-water mark) instead of buffering without bound.
+  * fix(linux): resolv.conf is rewritten in place where the systemd
+    sandbox forbids the atomic rename (DNS setup failed under the unit);
+    route discovery polls every 200 ms instead of sleeping 1 s per retry
+    (new log line "route discovery failed for <ip>, retrying for up to
+    <n> ms").
+  * fix(windows): the DNS override adds a crash-safe NRPT rule, so
+    Windows stops also asking other adapters' DNS servers.
+  * fix(ios): the PoC keeps its auth key in the keychain instead of
+    providerConfiguration.
+  * feat(scheduler): per-connection download scheduler (upstream
+    0.18.0). A client with RequestServerScheduler = true (JSON
+    request_server_scheduler, --request-server-scheduler) asks the
+    server to use its own Scheduler for the download direction too; a
+    server with AllowClientScheduler = true (JSON allow_client_scheduler,
+    --allow-client-scheduler) applies it to that connection only. Both
+    default to false, so nothing changes until both ends opt in. The
+    request is not applied (the connection keeps the server's Scheduler)
+    when either side asks for backup_fec, when the connection already
+    changed it once, or when it already uses more than one path; a
+    requesting client therefore brings its other paths up only after the
+    server answered. The server always reports the scheduler a connection
+    runs: get_status client objects gain "scheduler", and in server mode
+    get_build_info's scheduler is the server default. New log lines:
+    server "client requested scheduler <s>: applied (user=<u>)" and
+    "client requested scheduler <s>: not applied (<reason>), using <s>
+    (user=<u>)"; client "server scheduler: <s> (requested <s>)" and
+    "server did not report its scheduler (requested <s>)". The Android
+    app can pick the scheduler and shows the server's. Older servers
+    ignore the request: checked against a 0.16.0 server, the tunnel and
+    both paths come up as without it.
+  * fix(reorder): a missing datagram is now waited for at least MaxWaitMs
+    and at most about twice that. The wait started when the buffer first
+    filled and a timeout gave up only the oldest gap, so with traffic
+    spread over several paths a gap opened just before the deadline was
+    given up almost at once (~0.8% of packets dropped as late), while a
+    packet behind a later gap could wait longer than MaxWaitMs. Counter
+    names are unchanged. Moving the window past a far-ahead packet
+    (above) ends and restarts these waits the same way.
+  * xquic: bump to 17d16b2:
+    - WLB, minrtt, wrr, wrtt, dscp and rap keep new data off a standby
+      path while a usable path exists;
+    - h3 recv_body_buf_high_water, used by the hybrid flow control above;
+    - max_dgram_unsent_packets and max_dgram_unsent_delay_ms, used by the
+      datagram cap above;
+    - xqc_conn_reapply_settings, used by the per-connection scheduler
+      above;
+    - a path that silently stops delivering while traffic is still sent
+      on it (an upstream outage, an LTE cell that stops passing traffic)
+      is now noticed and demoted, instead of minrtt and WLB still picking
+      it;
+    - WLB stops weighting a path at its old rate after the path slowed
+      down, and paths not given enough data no longer look saturated;
+    - BBRv2 lowers its rate estimate again after the link capacity drops;
+    - ACK frames are no longer protected by FEC repair (RFC 9221
+      section 5.2);
+    - transport parameters are decoded within their declared length, and
+      a max_ack_delay of 2^14 or more is refused (RFC 9000 section 18).
+    Two xquic structs grew: rebuild everything linked against libxquic.
+  * build/test/docs: sanitizer builds use -Wall -Wextra; new
+    test_server_hardening drives a real server over raw xquic; the docs
+    cover the parsed config keys and the control API framing and
+    commands; CI cross-builds for armhf and runs the unit tests there
+    (the formal-model struct size check now applies to 64-bit builds
+    only), and the fuzzers run alongside the e2e steps.
+
+ -- mqvpn maintainers <maintainers@example.com>  Fri, 16 Oct 2026 12:50:53 +0200
+
 mqvpn (0.17.0-1) UNRELEASED; urgency=medium
 
   * fix: removing the initial path (path_id 0) through the control API
@@ -65,6 +331,20 @@ mqvpn (0.17.0-1) UNRELEASED; urgency=medium
   * Merge upstream mqvpn main (0.17.0): shared-library SOVERSION bumped to
     4 (callback ABI 3 removed mqvpn_client_add_path_fd and friends);
     Windows arm64 release built with the VS 2026 generator; docs fixes.
+  * packaging: the library package is now libmqvpn4, named after its
+    soname (Replaces/Breaks/Provides libmqvpn0 >= 0.16.3~, which already
+    carried libmqvpn.so.4), and ships the libxquic.so that libmqvpn.so.4
+    needs; libmqvpn.so exports only its API (lwIP and BoringSSL symbols are
+    hidden); a prerm stops mqvpn-server and mqvpn-client@ instances on
+    removal so the NAT teardown still runs; /etc/mqvpn is 0750 root:root;
+    debian/rules builds like build.sh, applies the hardening flags to
+    BoringSSL, xquic and mqvpn, and fails on unit test failures.
+  * systemd: mqvpn-client@.service starts again under ProtectSystem=strict
+    (it failed with 226/NAMESPACE when no resolv.conf backup existed) and
+    is bounded to CAP_NET_ADMIN and CAP_NET_RAW. The server NAT helper
+    reads Subnet/Subnet6/TunName like the server does (case-insensitive,
+    trailing comment allowed), masquerades on every egress but the tunnel,
+    and no longer switches IP forwarding off on stop.
 
  -- mqvpn maintainers <maintainers@example.com>  Fri, 09 Oct 2026 11:32:04 +0200
 

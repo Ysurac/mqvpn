@@ -139,7 +139,9 @@ static void
 test_v4_time_exceeded_zero_mtu(void)
 {
     reset_cap();
-    uint8_t orig[20] = {0x45};
+    /* Source 10.0.0.9: an all-zero source does not name a host and would
+     * (correctly) get no ICMP error at all. */
+    uint8_t orig[20] = {0x45, [12] = 10, [15] = 9};
     const uint8_t src_ip[4] = {192, 168, 1, 1};
 
     mqvpn_icmp_send_v4(capture, NULL, src_ip, 11, 0, 0, orig, sizeof(orig));
@@ -160,6 +162,8 @@ test_v4_quote_len_caps_at_ihl_plus_8(void)
     uint8_t orig[60];
     memset(orig, 0, sizeof(orig));
     orig[0] = 0x45;
+    orig[12] = 10; /* source 10.0.0.9 */
+    orig[15] = 9;
 
     mqvpn_icmp_send_v4(capture, NULL, (const uint8_t[]){1, 2, 3, 4}, 3, 4, 1400, orig,
                        sizeof(orig));
@@ -247,6 +251,8 @@ test_v6_truncates_to_min_mtu(void)
     uint8_t orig[2000];
     memset(orig, 0, sizeof(orig));
     orig[0] = 0x60;
+    orig[8] = 0xFD; /* source fd00::9 (an unspecified source gets no error) */
+    orig[23] = 9;
 
     mqvpn_icmp_send_v6(capture, NULL, (const uint8_t[16]){0}, 2, 0, 1400, orig,
                        sizeof(orig));
@@ -276,6 +282,156 @@ test_v6_guards(void)
     CHECK(g_cap.called == 0);
 }
 
+/* ── Error eligibility (RFC 1122 §3.2.2 / RFC 4443 §2.4(e)) ── */
+
+/* A plain UDP datagram 10.0.0.9 -> 192.0.2.1 that may draw an error. */
+static void
+make_v4(uint8_t *p, size_t len)
+{
+    memset(p, 0, len);
+    p[0] = 0x45;
+    p[9] = 17;
+    p[12] = 10;
+    p[15] = 9;
+    p[16] = 192;
+    p[18] = 2;
+    p[19] = 1;
+}
+
+static int
+v4_sent(const uint8_t *orig, size_t len)
+{
+    reset_cap();
+    mqvpn_icmp_send_v4(capture, NULL, (const uint8_t[]){10, 0, 0, 1}, 11, 0, 0, orig,
+                       len);
+    return g_cap.called;
+}
+
+static void
+test_v4_error_eligibility(void)
+{
+    uint8_t p[48];
+
+    make_v4(p, sizeof(p));
+    CHECK(mqvpn_icmp_error_allowed_v4(p, sizeof(p)) == 1);
+    CHECK(v4_sent(p, sizeof(p)) == 1);
+
+    /* Non-first fragment (offset 185 * 8); a first fragment (MF only) is fine. */
+    make_v4(p, sizeof(p));
+    p[6] = 0x00;
+    p[7] = 0xB9;
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+    p[6] = 0x20; /* MF, offset 0 */
+    p[7] = 0x00;
+    CHECK(v4_sent(p, sizeof(p)) == 1);
+
+    /* Multicast and limited-broadcast destinations. */
+    make_v4(p, sizeof(p));
+    p[16] = 224;
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+    memset(p + 16, 255, 4);
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+
+    /* Sources that do not name a single host. */
+    make_v4(p, sizeof(p));
+    memset(p + 12, 0, 4);
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+    p[12] = 127;
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+    p[12] = 239;
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+    p[12] = 240;
+    CHECK(v4_sent(p, sizeof(p)) == 0);
+
+    /* ICMP errors get none, ICMP informational messages do. */
+    make_v4(p, sizeof(p));
+    p[9] = 1;
+    const uint8_t errs[] = {3, 4, 5, 11, 12};
+    for (size_t i = 0; i < sizeof(errs); i++) {
+        p[20] = errs[i];
+        CHECK(v4_sent(p, sizeof(p)) == 0);
+    }
+    p[20] = 8; /* echo request */
+    CHECK(v4_sent(p, sizeof(p)) == 1);
+    /* ICMP header not even present: cannot tell, so no error. */
+    CHECK(v4_sent(p, 20) == 0);
+}
+
+/* A plain UDP datagram fd00::9 -> 2001:db8::1. */
+static void
+make_v6(uint8_t *p, size_t len)
+{
+    memset(p, 0, len);
+    p[0] = 0x60;
+    p[6] = 17;
+    p[8] = 0xFD;
+    p[23] = 9;
+    p[24] = 0x20;
+    p[25] = 0x01;
+    p[26] = 0x0d;
+    p[27] = 0xb8;
+    p[39] = 1;
+}
+
+static int
+v6_sent(const uint8_t *orig, size_t len, uint8_t type, uint8_t code)
+{
+    reset_cap();
+    mqvpn_icmp_send_v6(capture, NULL, (const uint8_t[16]){0xFD, [15] = 1}, type, code,
+                       1280, orig, len);
+    return g_cap.called;
+}
+
+static void
+test_v6_error_eligibility(void)
+{
+    uint8_t p[96];
+
+    make_v6(p, sizeof(p));
+    CHECK(mqvpn_icmp_error_allowed_v6(p, sizeof(p), 3, 0) == 1);
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 1);
+
+    /* Unspecified and multicast sources. */
+    make_v6(p, sizeof(p));
+    memset(p + 8, 0, 16);
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 0);
+    p[8] = 0xFF;
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 0);
+
+    /* Multicast destination: Time Exceeded no, Packet Too Big yes. */
+    make_v6(p, sizeof(p));
+    p[24] = 0xFF;
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 0);
+    CHECK(v6_sent(p, sizeof(p), 2, 0) == 1);
+
+    /* ICMPv6 error (Destination Unreachable) vs informational (Echo). */
+    make_v6(p, sizeof(p));
+    p[6] = 58;
+    p[40] = 1;
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 0);
+    p[40] = 128;
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 1);
+
+    /* Behind a Hop-by-Hop header (8 bytes), an ICMPv6 error is still seen. */
+    make_v6(p, sizeof(p));
+    p[6] = 0;
+    p[40] = 58; /* next header */
+    p[41] = 0;  /* (0 + 1) * 8 bytes */
+    p[48] = 2;  /* ICMPv6 Packet Too Big */
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 0);
+
+    /* Fragment header: a non-first fragment gets none, the first does. */
+    make_v6(p, sizeof(p));
+    p[6] = 44;
+    p[40] = 17;   /* next header UDP */
+    p[42] = 0x05; /* offset 0x5A8 >> 3 = 181 */
+    p[43] = 0xA8;
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 0);
+    p[42] = 0x00;
+    p[43] = 0x01; /* offset 0, M flag */
+    CHECK(v6_sent(p, sizeof(p), 3, 0) == 1);
+}
+
 int
 main(void)
 {
@@ -286,6 +442,8 @@ main(void)
     test_v6_ptb_layout_and_checksum();
     test_v6_truncates_to_min_mtu();
     test_v6_guards();
+    test_v4_error_eligibility();
+    test_v6_error_eligibility();
 
     if (g_failed) {
         fprintf(stderr, "test_icmp: %d CHECK(s) FAILED\n", g_failed);
