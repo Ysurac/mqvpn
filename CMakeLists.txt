@@ -318,6 +318,7 @@ set(MQVPN_LIB_SOURCES
     src/icmp.c
     src/reorder_tx.c
     src/reorder_rx.c
+    src/dgram_dedup.c
     src/hybrid/classifier.c
     third_party/yyjson/yyjson.c
 )
@@ -1072,7 +1073,8 @@ if(BUILD_TESTING)
     add_executable(test_path_line tests/test_path_line.c src/mqvpn_util.c)
     # Library clock on its own (test_clock covers it with xquic's tokens).
     add_executable(test_clock_source tests/test_clock_source.c src/mqvpn_clock.c)
-    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_path_label test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source)
+    add_executable(test_dgram_dedup tests/test_dgram_dedup.c src/dgram_dedup.c)
+    set(MQVPN_UNIT_TESTS test_config test_auth test_session test_dns test_route_check test_flow_sched test_redundant_tx test_path_label test_status test_path_rotation test_fec_reinj test_ciphers test_path_error_policy test_path_state_machine test_path_slot_oracle test_reorder_common test_reorder_tx test_reorder_rx test_reorder_config test_config_bridge test_classifier test_icmp test_reorder_gate test_path_readd test_path_line test_clock_source test_dgram_dedup)
 
     # test_tcp_lane #include's BOTH src/hybrid/tcp_lane.c AND
     # src/hybrid/tcp_lane_uplink.c (Task 12 split the uplink relay out of

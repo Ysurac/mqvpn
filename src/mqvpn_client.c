@@ -61,6 +61,7 @@
 #include "reorder_rx.h"
 #include "reorder_tx.h"
 #include "redundant_tx.h"
+#include "dgram_dedup.h"
 
 /* ─── Constants ─── */
 
@@ -178,6 +179,11 @@ struct cli_conn_s {
     /* Test seam: NULL in production (the real xquic sends). */
     mqvpn_test_send_fn test_send;
     void *test_send_ud;
+
+    /* Redundant scheduler only: drops the extra copies of a datagram that
+     * arrive over the other paths. Created on the first datagram, freed on
+     * conn teardown. */
+    mqvpn_dgram_dedup_t *dgram_dedup;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* H2: lwIP TCP-lane stack. Created at tunnel-ready (needs the resolved
@@ -2905,6 +2911,21 @@ cli_reorder_deliver(const uint8_t *pkt, size_t len, void *ctx)
     forward_inner_ip((cli_conn_t *)ctx, pkt, len);
 }
 
+/* The redundant scheduler sends every packet on every usable path, and a
+ * DATAGRAM frame carries no identifier (RFC 9221 §4), so each copy arrives
+ * here: let the first one through. */
+static int
+cli_dgram_is_copy(cli_conn_t *conn, const uint8_t *pkt, size_t len)
+{
+    mqvpn_client_t *c = conn->client;
+    if (!conn->dgram_dedup) {
+        conn->dgram_dedup =
+            mqvpn_dgram_dedup_new(client_now_us(c) ^ ((uint64_t)c->conn_id << 32));
+        if (!conn->dgram_dedup) return 0;
+    }
+    return mqvpn_dgram_dedup_seen(conn->dgram_dedup, pkt, len, client_now_us(c));
+}
+
 static void
 cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *user_data,
               uint64_t ts)
@@ -2941,6 +2962,9 @@ cb_dgram_read(xqc_h3_conn_t *h3_conn, const void *data, size_t data_len, void *u
         LOG_D(c, "dgram: empty payload");
         return;
     }
+    if (c->config.scheduler == MQVPN_SCHED_REDUNDANT &&
+        cli_dgram_is_copy(conn, payload, payload_len))
+        return;
 
     /* §5/§8.1 self-describing dispatch on payload[0]. */
     switch (mqvpn_reorder_classify_byte(payload[0])) {
@@ -3470,6 +3494,8 @@ cli_conn_destroy(mqvpn_client_t *c)
     }
     mqvpn_redundant_tx_free(conn->redundant_tx);
     conn->redundant_tx = NULL;
+    mqvpn_dgram_dedup_free(conn->dgram_dedup);
+    conn->dgram_dedup = NULL;
 
 #ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
     /* Teardown contract: tcp_lane BEFORE lwip_ctx — flow teardown will
