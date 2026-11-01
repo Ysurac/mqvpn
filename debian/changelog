@@ -1,3 +1,46 @@
+mqvpn (0.19.0+20261101-1) UNRELEASED; urgency=medium
+
+  * Merge of upstream 0.19.0 (up to 2d2da3e).
+  * fix(config)!: an on/off key with a value that is not a boolean now
+    stops mqvpn at startup instead of logging a warning and keeping the
+    default. INI still accepts true/yes/on/1 and false/no/off/0 (any
+    case); JSON needs true or false without quotes. [Reorder] Enabled no
+    longer accepts auto, and the JSON reorder "enabled" must be a JSON
+    boolean ("on"/"off" strings now fail the load); the shipped JSON
+    examples use false.
+  * fix(config): InitMaxPathId is limited to 1-128 (it was 1-4294967295).
+  * feat(control): get_stats reports udp_rx_drops, the datagrams the
+    kernel dropped because mqvpn could not read its UDP sockets fast
+    enough (listen socket on the server, path sockets on the client).
+  * fix(server): one client's backlog no longer slows the others. Its
+    packets are dropped and counted ("datagram dropped on EAGAIN" every
+    1024 drops, "dropped=" in the per-connection summary); the TUN is
+    paused only while every connected client is backlogged.
+  * feat(install): the generated server config turns on hybrid mode, the
+    reorder buffer and AllowClientScheduler = true.
+  * fix(client): a replacement path waits for path validation after the
+    connection is established instead of being treated as the bootstrap
+    path.
+  * feat(android): new UI with live speed and reordering charts and
+    per-network switches; the app no longer loses its Disconnect button
+    when reopened while the VPN keeps running.
+  * feat(ios): the app is renamed and redesigned; the access key is kept
+    in the keychain.
+  * xquic: bump to a248a69 (mqvpn-main 68f725b):
+    - multipath key update fixes, a path that misses its validation
+      deadline is abandoned, and a small PATH_CHALLENGE on an active path
+      is answered;
+    - the key update starts before the AEAD limit is reached;
+    - HTTP/3 datagram sends are checked against the peer's
+      SETTINGS_H3_DATAGRAM;
+    - PMTUD: a smaller packet no longer hides the loss of larger ones;
+    - fixes for connection setup failures (queueing, h3 and qpack
+      cleanup) and TLS session age checks;
+    - upstream protocol validation and resource limit hardening;
+    - BoringSSL 0.20261020.0.
+
+ -- mqvpn maintainers <maintainers@example.com>  Sun, 01 Nov 2026 19:30:00 +0100
+
 mqvpn (0.18.0+20261026-1) UNRELEASED; urgency=medium
 
   * Merge of upstream 0.18.0 (up to 5a07f86).
