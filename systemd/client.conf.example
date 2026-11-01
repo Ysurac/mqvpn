@@ -36,6 +36,9 @@ LogLevel = info
 # wrr  = weighted round robin; interleaves packets across paths in proportion to weight
 # redundant = broadcast every packet on every usable path; loss-critical, low-bitrate traffic
 Scheduler = wlb
+# Override the server's scheduler with Scheduler above for this client's downloads
+# (needs AllowClientScheduler = true on the server):
+# RequestServerScheduler = true
 # CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited|none (default bbr2)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
@@ -52,7 +55,7 @@ Scheduler = wlb
 # InitMaxPathId = 8   # draft-21 initial_max_path_id TP; lower it (e.g. 2) to force PATHS_BLOCKED for testing
 
 # [Reorder]
-# Enabled = off              # on|off — reorder buffer for inner UDP (off by default)
+# Enabled = false            # true|false — reorder buffer for inner UDP (off by default)
 # MaxWaitMs = 30             # max hold time before releasing a gap (ms)
 # CapPackets = 1024          # max buffered datagrams per flow (power of two)
 

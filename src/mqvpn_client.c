@@ -514,31 +514,6 @@ path_fsm_fire_path_event(mqvpn_client_t *c, const path_entry_t *p)
     if (c->cbs.path_event) c->cbs.path_event(p->handle, p->status, c->user_ctx);
 }
 
-/* G-P15 (draft-21 §3.3 ¶6): emit PATH_STATUS to peer when local lifecycle
- * moves a live path between classes. app_status is an internal relay code
- * from g_p15_xqc_app_status_for (1=standby, 2=available) that this switch
- * decodes to the named xqc_conn_mark_path_* calls — the raw value is never
- * handed to xquic, so it is NOT an xquic-ABI value dependency.
- *
- * Nothing reaches here today: no FSM event moves ACTIVE <-> STANDBY (a
- * standby path is created standby, see client_path_starts_standby), so the
- * two codes are kept for the day one does. No-op without an engine or
- * connection, or for a path that is not live. */
-MQVPN_INTERNAL
-void
-client_notify_xqc_path_state(mqvpn_client_t *c, const path_entry_t *p, int app_status)
-{
-    if (!c || !c->engine || !c->conn) return;
-    if (!p->xquic_path_live) return;
-    const xqc_cid_t *cid = &c->conn->cid;
-    uint64_t pid = p->xqc_path_id;
-    switch (app_status) {
-    case 1: xqc_conn_mark_path_standby(c->engine, cid, pid); break;
-    case 2: xqc_conn_mark_path_available(c->engine, cid, pid); break;
-    default: break;
-    }
-}
-
 #define LOG_D(c, ...) client_log(c, MQVPN_LOG_DEBUG, __VA_ARGS__)
 #define LOG_I(c, ...) client_log(c, MQVPN_LOG_INFO, __VA_ARGS__)
 #define LOG_W(c, ...) client_log(c, MQVPN_LOG_WARN, __VA_ARGS__)
@@ -2648,14 +2623,14 @@ cli_connect_ip_on_body(cli_stream_t *stream, xqc_h3_request_t *h3_request)
         info.has_server_scheduler = conn->has_peer_sched;
         info.server_scheduler = conn->has_peer_sched ? conn->peer_sched : 0;
 
-        /* Primary path is now validated by handshake — drive
-         * VALIDATING -> ACTIVE via the standard event. tick_check_all_validations
-         * may also fire VALIDATION_OK if it polls between now and the next
-         * tick boundary; path_on_validation_ok's `if (state != VALIDATING)`
-         * guard makes the second dispatch a LOG_D no-op. */
+        /* The handshake validates only the bootstrap path (xquic path id 0):
+         * drive it VALIDATING -> ACTIVE via the standard event. A replacement
+         * path in the primary slot is still being validated by xquic and
+         * waits for the validation poll after ESTABLISHED. */
         int pidx = c->primary_path_idx;
         if (c->n_paths > 0 && pidx < c->n_paths && c->paths[pidx].transport_attached &&
-            c->paths[pidx].state == PATH_LC_VALIDATING) {
+            c->paths[pidx].state == PATH_LC_VALIDATING &&
+            c->paths[pidx].xqc_path_id == 0) {
             path_entry_t *pp = &c->paths[pidx];
             path_event_ctx_t v_ctx = {
                 .validated_target = PATH_LC_ACTIVE,

@@ -647,16 +647,18 @@ on_signal(evutil_socket_t sig, short what, void *arg)
  * ctx's numbers to p only once the library has finalised it (bind_ctx NULL),
  * and the teardown harvest runs after ctrl_socket_destroy. */
 static void
-cli_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+cli_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     platform_ctx_t *p = (platform_ctx_t *)arg;
     *receives = p->gro_receives;
     *datagrams = p->gro_datagrams;
+    *queue_drops = p->rx_queue_drops;
     for (int i = 0; i < p->n_paths; i++) {
-        uint64_t r, d;
-        platform_read_rx_stats(&p->paths[i], &r, &d);
+        uint64_t r, d, q;
+        platform_read_rx_stats(&p->paths[i], &r, &d, &q);
         *receives += r;
         *datagrams += d;
+        *queue_drops += q;
     }
 }
 
@@ -1097,10 +1099,11 @@ cleanup:
      *      are order-independent — the server does them the other way
      *      round, and both lines report the same totals either way. */
     for (int i = 0; i < ctx.n_paths; i++) {
-        uint64_t r, d;
-        platform_read_rx_stats(&ctx.paths[i], &r, &d);
+        uint64_t r, d, q;
+        platform_read_rx_stats(&ctx.paths[i], &r, &d, &q);
         ctx.gro_receives += r;
         ctx.gro_datagrams += d;
+        ctx.rx_queue_drops += q;
     }
 
     /* Library teardown FIRST, while every callback-owned platform object is
@@ -1636,13 +1639,16 @@ svr_create_udp_socket(const char *addr, int port, struct sockaddr_storage *out_a
  * harvest runs after ctrl_socket_destroy, so no request survives to see a
  * ctx's numbers both live and accumulated. */
 static void
-svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams)
+svr_rx_stats(void *arg, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     server_platform_ctx_t *sp = (server_platform_ctx_t *)arg;
     mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
     if (sp->bind_ctx) mqvpn_bind_posix_server_get_stats(sp->bind_ctx, &st);
     *receives = sp->gro_receives + st.rx_receives;
     *datagrams = sp->gro_datagrams + st.rx_datagrams;
+    /* A property of the one listen socket, which outlives every control
+     * request: nothing to accumulate across transport ctxs. */
+    *queue_drops = st.rx_queue_drops;
 }
 
 int

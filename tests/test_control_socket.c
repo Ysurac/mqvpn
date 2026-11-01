@@ -501,11 +501,12 @@ static int g_passed = 0;
  * and unequal so a get_stats regression that hardcodes 0 or swaps the pair
  * cannot pass. */
 static void
-test_rx_stats(void *ctx, uint64_t *receives, uint64_t *datagrams)
+test_rx_stats(void *ctx, uint64_t *receives, uint64_t *datagrams, uint64_t *queue_drops)
 {
     (void)ctx;
     *receives = 61;
     *datagrams = 83;
+    *queue_drops = 29;
 }
 
 /* dispatch() into a buffer the size ctrl_conn_dispatch() passes (yyjson needs
@@ -793,6 +794,7 @@ TEST(get_stats)
     ASSERT_CONTAINS(resp, "\"udp_tx_datagrams\":5678");
     ASSERT_CONTAINS(resp, "\"udp_rx_receives\":61");
     ASSERT_CONTAINS(resp, "\"udp_rx_datagrams\":83");
+    ASSERT_CONTAINS(resp, "\"udp_rx_drops\":29");
     g_n_clients = 0;
     g_uptime = 0;
 }
@@ -825,6 +827,7 @@ TEST(get_stats_client_mode_connected)
     /* udp_rx_* still come from the borrowed GRO counters regardless of mode */
     ASSERT_CONTAINS(resp, "\"udp_rx_receives\":61");
     ASSERT_CONTAINS(resp, "\"udp_rx_datagrams\":83");
+    ASSERT_CONTAINS(resp, "\"udp_rx_drops\":29");
 
     g_cli_state = MQVPN_STATE_IDLE;
     g_cli_uptime = 0;

@@ -31,7 +31,7 @@
     "recv_rate_limit": 0
   },
   "reorder": {
-    "enabled": "off",
+    "enabled": false,
     "max_wait_ms": 30,
     "cap_packets": 1024
   },

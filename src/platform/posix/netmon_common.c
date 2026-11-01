@@ -53,15 +53,18 @@ netmon_drop_reason_str(mqvpn_platform_reason_t reason)
 /* Contract in platform_internal.h. Shared: the counters live in the POSIX
  * bind, which every POSIX platform uses. */
 void
-platform_read_rx_stats(const platform_path_t *s, uint64_t *receives, uint64_t *datagrams)
+platform_read_rx_stats(const platform_path_t *s, uint64_t *receives, uint64_t *datagrams,
+                       uint64_t *queue_drops)
 {
     *receives = 0;
     *datagrams = 0;
+    *queue_drops = 0;
     if (!s->bind_ctx) return;
     mqvpn_bind_posix_stats_t st = {.struct_size = sizeof(st)};
     mqvpn_bind_posix_path_get_stats(s->bind_ctx, &st);
     *receives = st.rx_receives;
     *datagrams = st.rx_datagrams;
+    *queue_drops = st.rx_queue_drops;
 }
 
 /* A release the library refuses right after this platform's own drop or
@@ -94,8 +97,8 @@ fatal_stop(platform_ctx_t *p)
 static void
 release_transport(platform_ctx_t *p, platform_path_t *s)
 {
-    uint64_t rx_r, rx_d;
-    platform_read_rx_stats(s, &rx_r, &rx_d);
+    uint64_t rx_r, rx_d, rx_q;
+    platform_read_rx_stats(s, &rx_r, &rx_d, &rx_q);
 
     platform_path_close_socket(s);
     int rc = mqvpn_client_on_platform_path_released(p->client, s->handle);
@@ -103,6 +106,7 @@ release_transport(platform_ctx_t *p, platform_path_t *s)
         s->bind_ctx = NULL; /* finalised by the library */
         p->gro_receives += rx_r;
         p->gro_datagrams += rx_d;
+        p->rx_queue_drops += rx_q;
         return;
     }
     LOG_ERR("%s: path_released for %s returned %s; transport stays library-owned",

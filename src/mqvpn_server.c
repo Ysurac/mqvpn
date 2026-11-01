@@ -171,6 +171,7 @@ struct svr_conn_s {
     size_t dgram_mss;
     uint64_t dgram_lost_cnt;
     uint64_t dgram_acked_cnt;
+    uint64_t dgram_dropped_cnt; /* refused by xquic (-XQC_EAGAIN) */
 
     /* Wall-clock time the CONNECT-IP request was accepted (control API) */
     uint64_t connected_at_us;
@@ -335,6 +336,8 @@ struct mqvpn_server_s {
      * so one slow or stalled client never stalls the others' downlink, and
      * a blocked session's release (close, re-establishment) unblocks it. */
     int n_dgram_blocked;
+    /* TUN packets dropped because xquic returned -XQC_EAGAIN for their
+     * client (all clients) */
     uint64_t tun_drop_cnt;
 
     /* Timer: next wake (from xquic set_event_timer) */
@@ -1207,8 +1210,11 @@ cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_d
 
     mqvpn_server_t *s = conn->server;
     svr_log_conn_stats(s, "server conn stats", conn->username, cid ? cid : &conn->cid);
-    LOG_I(s, "server dgram summary: acked=%" PRIu64 " lost=%" PRIu64 " (user=%s)",
-          conn->dgram_acked_cnt, conn->dgram_lost_cnt, conn->username);
+    LOG_I(s,
+          "server dgram summary: acked=%" PRIu64 " lost=%" PRIu64 " dropped=%" PRIu64
+          " (user=%s)",
+          conn->dgram_acked_cnt, conn->dgram_lost_cnt, conn->dgram_dropped_cnt,
+          conn->username);
 
     svr_session_release(s, conn);
 
@@ -3882,10 +3888,17 @@ mqvpn_server_on_tun_packet(mqvpn_server_t *s, const uint8_t *pkt, size_t len)
     if (frame_buf != stack_buf) free(frame_buf);
 
     if (xret == -XQC_EAGAIN) {
-        /* This packet is dropped either way (the platform does not retry
-         * it). Block only this session; pause TUN reading only once every
-         * session is blocked, so other clients keep receiving. */
+        /* xquic cannot take this client's datagram now (its send queue is
+         * full, or 1-RTT is not ready yet): drop it, as the client does (the
+         * platform does not retry it). Block only this session; pause TUN
+         * reading only once every session is blocked, so other clients keep
+         * receiving. */
+        target->dgram_dropped_cnt++;
         s->tun_drop_cnt++;
+        if ((target->dgram_dropped_cnt % 1024) == 1) {
+            LOG_I(s, "datagram dropped on EAGAIN: dropped=%" PRIu64 " (user=%s)",
+                  target->dgram_dropped_cnt, target->username);
+        }
         svr_conn_set_dgram_blocked(s, target, 1);
         if (svr_tun_paused(s)) {
             LOG_D(s, "TUN read paused (QUIC backpressure) (user=%s)", target->username);
@@ -4503,8 +4516,9 @@ mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const ch
  * every path not yet CLOSED, and closed ones while room is left. xquic
  * lists every path that reached ACTIVE, closed ones included, until the
  * connection ends, and each network that comes back takes a new path ID, so
- * on a long-lived connection the first MQVPN_MAX_PATHS entries can all be
- * closed paths while the paths that carry the traffic come after them.
+ * a long-lived connection can list more than MQVPN_MAX_PATHS closed paths.
+ * xquic puts the paths not yet CLOSED first; counting them first keeps them
+ * all whatever the order.
  * Writes up to MQVPN_MAX_PATHS indices to idx and returns how many. */
 static int
 svr_status_paths(const xqc_conn_stats_t *st, uint32_t idx[MQVPN_MAX_PATHS])

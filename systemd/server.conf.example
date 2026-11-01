@@ -7,7 +7,8 @@ Subnet = 10.0.0.0/24
 # Subnet6 = fd00:abcd::/112
 TunName = mqvpn0
 LogLevel = info
-# MTU = 1280                   # TUN MTU (1280–9000, default: auto = ~1382)
+# TUN MTU (1280–9000, default: auto = ~1382)
+# MTU = 1280
 
 [TLS]
 Cert = /etc/mqvpn/server.crt
@@ -35,6 +36,9 @@ MaxClients = 64
 # wrr  = weighted round robin; interleaves packets across paths in proportion to weight
 # redundant = broadcast every packet on every usable path; loss-critical, low-bitrate traffic
 Scheduler = wlb
+# Let a client with RequestServerScheduler = true pick the scheduler for its
+# own downloads (default: false)
+# AllowClientScheduler = false
 # CC = bbr2             # bbr2|bbr|cubic|new_reno|copa|unlimited|none (default bbr2)
 # ReinjectionControl = true
 # ReinjectionMode = default   # default|deadline|dgram
@@ -60,7 +64,7 @@ Scheduler = wlb
 # EgressDeny = 10.0.0.0/8   # CIDR blacklist (evaluated after allow list)
 
 # [Reorder]
-# Enabled = off              # on|off — reorder buffer for inner UDP (off by default)
+# Enabled = false            # true|false — reorder buffer for inner UDP (off by default)
 # MaxWaitMs = 30             # max hold time before releasing a gap (ms)
 # CapPackets = 1024          # max buffered datagrams per flow (power of two)
 

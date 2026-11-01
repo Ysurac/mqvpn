@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(mqvpn VERSION 0.18.0.20261026 LANGUAGES C)
+project(mqvpn VERSION 0.19.0.20261101 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -1280,6 +1280,29 @@ if(BUILD_TESTING)
     endif()
     set_target_properties(test_api PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
     add_test(NAME test_api COMMAND test_api)
+
+    # Model-based test of the client's path-slot glue: its own copies of
+    # mqvpn_client.c (via tests/mbt_client_tu.c, against the scripted fake
+    # xquic) and path_state_machine.c, both with asserts on; never mqvpn_lib's.
+    set(MBT_LIB_SOURCES ${MQVPN_LIB_SOURCES})
+    list(REMOVE_ITEM MBT_LIB_SOURCES src/mqvpn_client.c src/mqvpn_server.c
+         src/path_state_machine.c ${CMAKE_SOURCE_DIR}/src/hybrid/tcp_egress.c)
+    add_executable(test_path_slot_mbt tests/test_path_slot_mbt.c tests/mbt_client_tu.c
+        tests/fake_xquic.c tests/fake_transport.c src/path_state_machine.c
+        ${MBT_LIB_SOURCES} ${MQVPN_BIND_SOURCES})
+    target_include_directories(test_path_slot_mbt PRIVATE ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${XQUIC_INCLUDE_DIR}
+        ${BORINGSSL_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/formal/oracle ${CMAKE_SOURCE_DIR}/formal/mbt)
+    target_link_libraries(test_path_slot_mbt ${XQUIC_LIB} ${SSL_LIB} ${CRYPTO_LIB}
+        pthread dl m stdc++)
+    if(MQVPN_HYBRID_TCP_LANE_BUILD)
+        target_link_libraries(test_path_slot_mbt lwip_core)
+        target_compile_definitions(test_path_slot_mbt PRIVATE MQVPN_HYBRID_TCP_LANE_ENABLED)
+    endif()
+    target_compile_options(test_path_slot_mbt PRIVATE -UNDEBUG)
+    set_target_properties(test_path_slot_mbt PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    add_test(NAME test_path_slot_mbt COMMAND test_path_slot_mbt)
 
     # Server API test (links libmqvpn + xquic)
     add_executable(test_server tests/test_server.c tests/fake_transport.c)

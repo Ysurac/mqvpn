@@ -132,11 +132,14 @@ struct platform_ctx {
      * proves GRO was requested, only gro_datagrams > gro_receives proves the
      * kernel actually coalesced. Darwin accumulates only what the release sites
      * add and reports nothing. */
-    uint64_t gro_receives;  /* receives whose data was DELIVERED —
-                             * truncated-dropped and drained-but-undelivered
-                             * receives count toward neither counter, so the
-                             * datagrams/receives factor cannot dip below 1.0 */
-    uint64_t gro_datagrams; /* datagrams delivered to the library */
+    uint64_t gro_receives;   /* receives whose data was DELIVERED —
+                              * truncated-dropped and drained-but-undelivered
+                              * receives count toward neither counter, so the
+                              * datagrams/receives factor cannot dip below 1.0 */
+    uint64_t gro_datagrams;  /* datagrams delivered to the library */
+    uint64_t rx_queue_drops; /* datagrams the kernel dropped at a full UDP
+                              * receive queue (SO_RXQ_OVFL), folded in the
+                              * same way; reported by the control API only */
     char orig_gateway[INET6_ADDRSTRLEN];
     char orig_iface[IFNAMSIZ];
     int server_pin_owned; /* Darwin: setup_routes created the unscoped server
@@ -212,7 +215,7 @@ void schedule_next_tick(platform_ctx_t *p);
  * values to the gro_* totals only once the ctx is definitely gone (released()
  * returned OK, or at teardown). */
 void platform_read_rx_stats(const platform_path_t *s, uint64_t *receives,
-                            uint64_t *datagrams);
+                            uint64_t *datagrams, uint64_t *queue_drops);
 
 /* netmon_common.c — the startup slots: one per configured interface
  * (n_ifaces 0 = one "any" slot), each with its socket, each logged. 0, or -1

@@ -208,15 +208,6 @@ MQVPN_INTERNAL void client_log(struct mqvpn_client_s *c, mqvpn_log_level_t level
 MQVPN_INTERNAL void path_fsm_fire_path_event(struct mqvpn_client_s *c,
                                              const path_entry_t *p);
 
-/* G-P15 (draft-21 §3.3 ¶6): mirror local ACTIVE <-> STANDBY moves onto the
- * xquic conn via xqc_conn_mark_path_{standby,available}. The caller passes
- * the app_status relay code (STANDBY=1, AVAILABLE=2); the accessor
- * dispatches to the right xquic API for a live path. Implementation in
- * mqvpn_client.c (needs the full client struct for c->engine and
- * c->conn->cid). No-op when engine/conn missing. */
-MQVPN_INTERNAL void client_notify_xqc_path_state(struct mqvpn_client_s *c,
-                                                 const path_entry_t *p, int app_status);
-
 /* PR4 - Per-tick stable-budget reset (relocated from mqvpn_client.c for
  * §7.1 file-scope allow on path_stable_since_us / recreate_retries writes).
  * Called per path slot from tick_path_recovery. */
