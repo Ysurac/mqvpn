@@ -137,7 +137,7 @@ test_happy_path(fake_cmd_env_t *e)
     fake_cmd_read_log(e, log, sizeof(log));
     const char *seq[] = {
         "ip|-4|route|get|203.0.113.9",
-        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
         "ip|route|replace|0.0.0.0/1|dev|mqvpn0",
         "ip|route|replace|128.0.0.0/1|dev|mqvpn0",
     };
@@ -153,7 +153,7 @@ test_happy_path(fake_cmd_env_t *e)
     const char *cseq[] = {
         "ip|route|del|0.0.0.0/1|dev|mqvpn0",
         "ip|route|del|128.0.0.0/1|dev|mqvpn0",
-        "ip|-4|route|del|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|del|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
     };
     assert_log_order(log, cseq, 3, "happy-path cleanup sequence");
 }
@@ -221,11 +221,11 @@ test_catchall_failure_rollback(fake_cmd_env_t *e)
     fake_cmd_read_log(e, log, sizeof(log));
     const char *seq[] = {
         "ip|-4|route|get|203.0.113.9",
-        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
         "ip|route|replace|0.0.0.0/1|dev|mqvpn0",
         "ip|route|del|0.0.0.0/1|dev|mqvpn0",
         "ip|route|del|128.0.0.0/1|dev|mqvpn0",
-        "ip|-4|route|del|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|del|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
     };
     assert_log_order(log, seq, 6, "catchall-failure rollback sequence");
     /* The HIGH catch-all's replace is short-circuited (`||`) — it must
@@ -358,7 +358,7 @@ test_v6_server_pin(fake_cmd_env_t *e)
     fake_cmd_read_log(e, log, sizeof(log));
     const char *seq[] = {
         "ip|-6|route|get|2001:db8::9",
-        "ip|-6|route|replace|2001:db8::9/128|via|fe80::1|dev|eth0",
+        "ip|-6|route|replace|2001:db8::9/128|via|fe80::1|dev|eth0|metric|4294967295",
         "ip|route|replace|0.0.0.0/1|dev|mqvpn0", /* v4 catch-alls regardless */
     };
     assert_log_order(log, seq, 3, "v6-server setup sequence");
@@ -366,9 +366,12 @@ test_v6_server_pin(fake_cmd_env_t *e)
     fake_cmd_reset(e);
     cleanup_routes(&p);
     fake_cmd_read_log(e, log, sizeof(log));
-    ASSERT_TRUE(strstr(log, "ip|-6|route|del|2001:db8::9/128|via|fe80::1|dev|eth0") !=
-                    NULL,
-                "v6-server cleanup deletes the -6 /128 pin");
+    ASSERT_TRUE(
+        strstr(
+            log,
+            "ip|-6|route|del|2001:db8::9/128|via|fe80::1|dev|eth0|metric|4294967295") !=
+            NULL,
+        "v6-server cleanup deletes the -6 /128 pin");
 }
 
 /* ================================================================
@@ -420,7 +423,7 @@ test_high_catchall_failure_rollback(fake_cmd_env_t *e)
         "ip|route|replace|128.0.0.0/1|dev|mqvpn0", /* fails */
         "ip|route|del|0.0.0.0/1|dev|mqvpn0",       /* rollback removes LOW */
         "ip|route|del|128.0.0.0/1|dev|mqvpn0",
-        "ip|-4|route|del|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|del|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
     };
     assert_log_order(log, seq, 5, "high-catchall-failure rollback sequence");
 
@@ -552,7 +555,7 @@ test_discovery_two_writes(fake_cmd_env_t *e)
     fake_cmd_read_log(e, log, sizeof(log));
     const char *seq[] = {
         "ip|-4|route|get|203.0.113.9",
-        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
         "ip|route|replace|0.0.0.0/1|dev|mqvpn0",
     };
     assert_log_order(log, seq, 3, "two-writes setup sequence");
@@ -584,7 +587,7 @@ test_route_via_server(fake_cmd_env_t *e)
     char log[4096];
     fake_cmd_read_log(e, log, sizeof(log));
     const char *seq[] = {
-        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0",
+        "ip|-4|route|replace|203.0.113.9/32|via|203.0.113.1|dev|eth0|metric|4294967295",
         "ip|route|replace|0.0.0.0/1|dev|mqvpn0|via|10.0.0.1",
         "ip|route|replace|128.0.0.0/1|dev|mqvpn0|via|10.0.0.1",
     };
@@ -639,7 +642,7 @@ test_discovery_oif_fallback(fake_cmd_env_t *e)
         "ip|-4|route|get|203.0.113.9\n",
         "ip|-4|route|show|203.0.113.9\n",
         "ip|-4|route|get|203.0.113.9|oif|eth1",
-        "ip|-4|route|replace|203.0.113.9/32|via|198.51.100.1|dev|eth1",
+        "ip|-4|route|replace|203.0.113.9/32|via|198.51.100.1|dev|eth1|metric|4294967295",
     };
     assert_log_order(log, seq, 4, "oif-fallback discovery sequence");
 

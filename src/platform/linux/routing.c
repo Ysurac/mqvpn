@@ -35,6 +35,15 @@
 #define ROUTE_DISCOVER_BUDGET_MS           5000
 #define ROUTE_DISCOVER_BUDGET_MS_RECONNECT 1000
 
+/* The server pin only has to beat the /1 catch-alls, which its /32 or /128
+ * prefix does at any metric. With the lowest priority there is, it yields to
+ * a route to the server the host keeps itself: OpenMPTCProuter moves its own
+ * when a WAN fails upstream with the link still up, and a metric 0 pin through
+ * the WAN that was used at startup kept the server traffic there. The metric
+ * is also named on delete: without one the kernel removes the first route to
+ * the server through that gateway and device, the host's own included. */
+#define SERVER_PIN_METRIC "4294967295"
+
 /* Search PATH for the 'ip' binary first, then fall back to known absolute
  * paths: on some distributions /usr/sbin is not in root's PATH under sudo.
  * PATH first so a PATH-stubbed `ip` (tests/test_routing_linux.c) is the one
@@ -372,9 +381,9 @@ setup_routes(platform_ctx_t *p)
     if (p->orig_gateway[0] != '\0') {
         LOG_INF("split tunnel: server %s via %s dev %s", p->server_ip_str,
                 p->orig_gateway, p->orig_iface);
-        const char *const pin[] = {"ip",          ip_flag, "route",         "replace",
-                                   host_cidr,     "via",   p->orig_gateway, "dev",
-                                   p->orig_iface, NULL};
+        const char *const pin[] = {"ip",          ip_flag,  "route",           "replace",
+                                   host_cidr,     "via",    p->orig_gateway,   "dev",
+                                   p->orig_iface, "metric", SERVER_PIN_METRIC, NULL};
         if (run_ip_cmd(pin) < 0) {
             LOG_WRN("failed to pin server route");
             return -1;
@@ -409,9 +418,9 @@ setup_routes(platform_ctx_t *p)
             (void)run_ip_cmd(u1);
             (void)run_ip_cmd(u2);
             if (p->orig_gateway[0]) {
-                const char *u3[] = {"ip",          ip_flag, "route",         "del",
-                                    host_cidr,     "via",   p->orig_gateway, "dev",
-                                    p->orig_iface, NULL};
+                const char *u3[] = {"ip",          ip_flag,  "route",           "del",
+                                    host_cidr,     "via",    p->orig_gateway,   "dev",
+                                    p->orig_iface, "metric", SERVER_PIN_METRIC, NULL};
                 (void)run_ip_cmd(u3);
             }
             return -1;
@@ -471,9 +480,18 @@ cleanup_routes(platform_ctx_t *p)
         int pfx = mqvpn_sa_host_prefix(&p->server_addr);
         char hc[INET6_ADDRSTRLEN + 5];
         snprintf(hc, sizeof(hc), "%s/%d", p->server_ip_str, pfx);
-        const char *d5[] = {
-            "ip",          fl,  "route", "del", hc, "via", p->orig_gateway, "dev",
-            p->orig_iface, NULL};
+        const char *d5[] = {"ip",
+                            fl,
+                            "route",
+                            "del",
+                            hc,
+                            "via",
+                            p->orig_gateway,
+                            "dev",
+                            p->orig_iface,
+                            "metric",
+                            SERVER_PIN_METRIC,
+                            NULL};
         (void)run_ip_cmd(d5);
     }
     p->routing_configured = 0;
