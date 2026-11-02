@@ -26,7 +26,16 @@ mqvpn (0.19.0+20261101-1) UNRELEASED; urgency=medium
     when reopened while the VPN keeps running.
   * feat(ios): the app is renamed and redesigned; the access key is kept
     in the keychain.
-  * xquic: bump to a248a69 (mqvpn-main 68f725b):
+  * fix(linux): the client's route to the server is added with the lowest
+    priority, so a route to the server that the host keeps itself wins:
+    when OpenMPTCProuter moves that route after a WAN fails upstream with
+    the link still up, the server traffic follows it instead of staying on
+    the WAN used at startup. Removing the route no longer deletes the
+    host's own route to the server.
+  * xquic: bump to 7fb6fc8 (mqvpn-main 68f725b):
+    - a quiet connection whose only lost packet is a retry probe is no
+      longer counted as losing 50-100% of its packets, which let new data
+      onto a backup path while the main one was healthy;
     - multipath key update fixes, a path that misses its validation
       deadline is abandoned, and a small PATH_CHALLENGE on an active path
       is answered;
@@ -39,7 +48,7 @@ mqvpn (0.19.0+20261101-1) UNRELEASED; urgency=medium
     - upstream protocol validation and resource limit hardening;
     - BoringSSL 0.20261020.0.
 
- -- mqvpn maintainers <maintainers@example.com>  Sun, 01 Nov 2026 19:30:00 +0100
+ -- mqvpn maintainers <maintainers@example.com>  Mon, 02 Nov 2026 10:00:00 +0100
 
 mqvpn (0.18.0+20261026-1) UNRELEASED; urgency=medium
 
