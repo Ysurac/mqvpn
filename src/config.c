@@ -577,46 +577,49 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
 #define CFGK_OFF(field) offsetof(mqvpn_file_config_t, field)
 
 /* Row helpers keep the table readable; positional init otherwise. */
-#define CFG_STR(sec, ik, jk, field)             \
-    {(sec),                                     \
-     (ik),                                      \
-     (jk),                                      \
-     CFGK_STR,                                  \
-     CFGK_OFF(field),                           \
-     sizeof(((mqvpn_file_config_t *)0)->field), \
-     0,                                         \
-     NULL,                                      \
-     0,                                         \
-     0,                                         \
-     NULL}
-#define CFG_STR_POST(sec, ik, jk, field, post)  \
-    {(sec),                                     \
-     (ik),                                      \
-     (jk),                                      \
-     CFGK_STR,                                  \
-     CFGK_OFF(field),                           \
-     sizeof(((mqvpn_file_config_t *)0)->field), \
-     0,                                         \
-     NULL,                                      \
-     0,                                         \
-     0,                                         \
-     (post)}
-#define CFG_BOOL(sec, ik, jk, field) \
-    {(sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL}
-#define CFG_INT(sec, ik, jk, field, okfn) \
-    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL}
-#define CFG_INT_FB(sec, ik, jk, field, okfn, fb) \
-    {(sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL}
-#define CFG_U32(sec, ik, jk, field) \
-    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL}
-#define CFG_U32_POST(sec, ik, jk, field, post) \
-    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, (post)}
-#define CFG_U32_MAX_POST(sec, ik, jk, field, maxv, post) \
-    {(sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, (post)}
-#define CFG_U16(sec, ik, jk, field) \
-    {(sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL}
-#define CFG_U64(sec, ik, jk, field, maxv) \
-    {(sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL}
+#define CFG_STR(sec, ik, jk, field)                                        \
+    {                                                                      \
+        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
+    }
+#define CFG_STR_POST(sec, ik, jk, field, post)                               \
+    {                                                                        \
+        (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, (post) \
+    }
+#define CFG_BOOL(sec, ik, jk, field)                                          \
+    {                                                                         \
+        (sec), (ik), (jk), CFGK_BOOL, CFGK_OFF(field), 0, 0, NULL, 0, 0, NULL \
+    }
+#define CFG_INT(sec, ik, jk, field, okfn)                                      \
+    {                                                                          \
+        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 0, 0, NULL \
+    }
+#define CFG_INT_FB(sec, ik, jk, field, okfn, fb)                                  \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_INT, CFGK_OFF(field), 0, 0, (okfn), 1, (fb), NULL \
+    }
+#define CFG_U32(sec, ik, jk, field)                                                      \
+    {                                                                                    \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, NULL \
+    }
+#define CFG_U32_POST(sec, ik, jk, field, post)                                      \
+    {                                                                               \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
+            (post)                                                                  \
+    }
+#define CFG_U32_MAX_POST(sec, ik, jk, field, maxv, post)                            \
+    {                                                                               \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, (post) \
+    }
+#define CFG_U16(sec, ik, jk, field)                                                  \
+    {                                                                                \
+        (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
+    }
+#define CFG_U64(sec, ik, jk, field, maxv)                                         \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_U64, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
+    }
 
 static const cfg_key_desc_t cfg_keys[] = {
     /* [Interface] */
@@ -1389,12 +1392,14 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     if (v && json_read_string_array(v, path_buf, MQVPN_CONFIG_MAX_PATHS, &n_paths) == 0) {
         cfg->n_paths = 0;
         for (int i = 0; i < n_paths; i++) {
-            if (strlen(path_buf[i]) >= sizeof(cfg->paths[0])) {
+            size_t len = strlen(path_buf[i]);
+            if (len >= sizeof(cfg->paths[0])) {
                 LOG_WRN("JSON: path '%s' too long; ignoring", path_buf[i]);
                 continue;
             }
-            snprintf(cfg->paths[cfg->n_paths], sizeof(cfg->paths[cfg->n_paths]), "%s",
-                     path_buf[i]);
+            /* memcpy of the checked length: gcc's -Wformat-truncation cannot
+             * see that bound through an snprintf from the 64-byte buffer. */
+            memcpy(cfg->paths[cfg->n_paths], path_buf[i], len + 1);
             cfg->n_paths++;
         }
     }
@@ -1406,13 +1411,12 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
                                     &n_backup_paths) == 0) {
         cfg->n_backup_paths = 0;
         for (int i = 0; i < n_backup_paths; i++) {
-            if (strlen(backup_path_buf[i]) >= sizeof(cfg->backup_paths[0])) {
+            size_t len = strlen(backup_path_buf[i]);
+            if (len >= sizeof(cfg->backup_paths[0])) {
                 LOG_WRN("JSON: backup path '%s' too long; ignoring", backup_path_buf[i]);
                 continue;
             }
-            snprintf(cfg->backup_paths[cfg->n_backup_paths],
-                     sizeof(cfg->backup_paths[cfg->n_backup_paths]), "%s",
-                     backup_path_buf[i]);
+            memcpy(cfg->backup_paths[cfg->n_backup_paths], backup_path_buf[i], len + 1);
             cfg->n_backup_paths++;
         }
     }

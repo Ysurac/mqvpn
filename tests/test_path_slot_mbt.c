@@ -127,7 +127,10 @@ on_tun_output(const uint8_t *pkt, size_t len, void *ctx)
 static int
 public_status(const mqvpn_client_t *c, mqvpn_path_handle_t h)
 {
+    /* The library takes the array stride from info[0].struct_size. */
     mqvpn_path_info_t info[MQVPN_MAX_PATHS];
+    memset(info, 0, sizeof(info));
+    info[0].struct_size = sizeof(info[0]);
     int n = 0;
     if (mqvpn_client_get_paths(c, info, MQVPN_MAX_PATHS, &n) != MQVPN_OK) return -1;
     for (int i = 0; i < n; i++)
