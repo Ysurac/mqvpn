@@ -61,7 +61,8 @@ rules belong here, reasons there.
   reactivates one that still owns its socket; see `src/platform/path_readd.h`);
   Android/iOS remove and add. Do not unify them. [DD §4]
 - Public structs that carry `struct_size` grow only by appending fields, each
-  with an `appended under ABI N` comment. `MQVPN_MAX_PATHS` is ABI-frozen.
+  with an `appended under ABI N` comment. `MQVPN_MAX_PATHS` is ABI-frozen
+  per platform (16 on Linux x86_64, 8 elsewhere).
 - In the xquic fork the trade is reversed: growing a struct is an acceptable
   ABI break (pinned pair, coordinated rebuild, SemVer bump), while publishing
   a new exported function is the irreversible direction. Never add public

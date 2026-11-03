@@ -21,8 +21,8 @@
 
 /* Read buffer for one control-API reply. It starts small and doubles up to
  * STATUS_BUF_MAX: the server caps a reply at CTRL_MAX_RESP_BYTES (256 KiB,
- * src/platform/linux/control_socket.h), and get_status reaches ~210 KB with
- * MQVPN_MAX_USERS clients on MQVPN_MAX_PATHS paths each. */
+ * 512 KiB on Linux x86_64, src/platform/linux/control_socket.h), and
+ * get_status reaches ~210 KB with MQVPN_MAX_USERS clients on 8 paths each. */
 #define STATUS_BUF_INITIAL 32768
 #define STATUS_BUF_MAX     (1024 * 1024)
 

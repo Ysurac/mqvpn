@@ -662,16 +662,12 @@ static void
 test_max_paths_exceeded(void)
 {
     /* (MQVPN_CONFIG_MAX_PATHS + 1)th path should be ignored */
-    const char *ini = "[Multipath]\n"
-                      "Path = eth0\n"
-                      "Path = eth1\n"
-                      "Path = eth2\n"
-                      "Path = eth3\n"
-                      "Path = eth4\n"
-                      "Path = eth5\n"
-                      "Path = eth6\n"
-                      "Path = eth7\n"
-                      "Path = eth8\n";
+    char ini[64 + (MQVPN_CONFIG_MAX_PATHS + 1) * 16];
+    char last[16];
+    int off = snprintf(ini, sizeof(ini), "[Multipath]\n");
+    for (int i = 0; i <= MQVPN_CONFIG_MAX_PATHS; i++)
+        off += snprintf(ini + off, sizeof(ini) - off, "Path = eth%d\n", i);
+    snprintf(last, sizeof(last), "eth%d", MQVPN_CONFIG_MAX_PATHS - 1);
 
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
@@ -681,20 +677,22 @@ test_max_paths_exceeded(void)
 
     ASSERT_EQ_INT(rc, 0, "max paths exceeded no error");
     ASSERT_EQ_INT(cfg.n_paths, MQVPN_CONFIG_MAX_PATHS, "capped at MAX paths");
-    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], "eth7",
-                  "last accepted path is eth7");
+    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], last,
+                  "last accepted path is the MAXth");
 }
 
 static void
 test_max_paths_exceeded_json(void)
 {
     /* JSON path array exceeding cap must be silently capped (parity with INI). */
-    const char *json = "{"
-                       "\"mode\":\"client\","
-                       "\"server\":\"1.2.3.4:443\","
-                       "\"paths\":[\"eth0\",\"eth1\",\"eth2\",\"eth3\","
-                       "\"eth4\",\"eth5\",\"eth6\",\"eth7\",\"eth8\"]"
-                       "}";
+    char json[128 + (MQVPN_CONFIG_MAX_PATHS + 1) * 16];
+    char last[16];
+    int off = snprintf(json, sizeof(json),
+                       "{\"mode\":\"client\",\"server\":\"1.2.3.4:443\",\"paths\":[");
+    for (int i = 0; i <= MQVPN_CONFIG_MAX_PATHS; i++)
+        off += snprintf(json + off, sizeof(json) - off, "%s\"eth%d\"", i ? "," : "", i);
+    snprintf(json + off, sizeof(json) - off, "]}");
+    snprintf(last, sizeof(last), "eth%d", MQVPN_CONFIG_MAX_PATHS - 1);
 
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
@@ -702,8 +700,8 @@ test_max_paths_exceeded_json(void)
 
     ASSERT_EQ_INT(rc, 0, "JSON max paths exceeded no error");
     ASSERT_EQ_INT(cfg.n_paths, MQVPN_CONFIG_MAX_PATHS, "JSON capped at MAX paths");
-    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], "eth7",
-                  "JSON last accepted path is eth7");
+    ASSERT_EQ_STR(cfg.paths[MQVPN_CONFIG_MAX_PATHS - 1], last,
+                  "JSON last accepted path is the MAXth");
 }
 
 static void
@@ -1778,17 +1776,13 @@ test_backup_path_ini_parse(void)
 static void
 test_backup_path_ini_max_cap(void)
 {
-    /* 9 backup paths → capped at MQVPN_CONFIG_MAX_PATHS (8) */
-    const char *ini = "[Multipath]\n"
-                      "BackupPath = b0\n"
-                      "BackupPath = b1\n"
-                      "BackupPath = b2\n"
-                      "BackupPath = b3\n"
-                      "BackupPath = b4\n"
-                      "BackupPath = b5\n"
-                      "BackupPath = b6\n"
-                      "BackupPath = b7\n"
-                      "BackupPath = b8\n";
+    /* MQVPN_CONFIG_MAX_PATHS + 1 backup paths → capped at MQVPN_CONFIG_MAX_PATHS */
+    char ini[64 + (MQVPN_CONFIG_MAX_PATHS + 1) * 24];
+    char last[16];
+    int off = snprintf(ini, sizeof(ini), "[Multipath]\n");
+    for (int i = 0; i <= MQVPN_CONFIG_MAX_PATHS; i++)
+        off += snprintf(ini + off, sizeof(ini) - off, "BackupPath = b%d\n", i);
+    snprintf(last, sizeof(last), "b%d", MQVPN_CONFIG_MAX_PATHS - 1);
 
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
@@ -1797,8 +1791,8 @@ test_backup_path_ini_max_cap(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "backup path cap no error");
-    ASSERT_EQ_INT(cfg.n_backup_paths, 8, "capped at 8 backup paths");
-    ASSERT_EQ_STR(cfg.backup_paths[7], "b7", "backup_path[7]");
+    ASSERT_EQ_INT(cfg.n_backup_paths, MQVPN_CONFIG_MAX_PATHS, "capped at MAX backup paths");
+    ASSERT_EQ_STR(cfg.backup_paths[MQVPN_CONFIG_MAX_PATHS - 1], last, "last backup path");
 }
 
 static void

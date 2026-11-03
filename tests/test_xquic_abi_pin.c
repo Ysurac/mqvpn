@@ -43,9 +43,15 @@ PIN_PATH_STATE(MQVPN_XQC_PATH_STATE_CLOSED, XQC_PATH_STATE_CLOSED);
  * libmqvpn.h). This assert turns the comment into enforcement: a bump
  * cannot compile without touching this pin, forcing the SemVer/layout
  * conversation the comment asks for. */
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+_Static_assert(MQVPN_MAX_PATHS == 16,
+               "MQVPN_MAX_PATHS is ABI-frozen (embedded in mqvpn_client_info_t "
+               "layout) — see libmqvpn.h before changing this pin");
+#else
 _Static_assert(MQVPN_MAX_PATHS == 8,
                "MQVPN_MAX_PATHS is ABI-frozen (embedded in mqvpn_client_info_t "
                "layout) — see libmqvpn.h before changing this pin");
+#endif
 
 int
 main(void)

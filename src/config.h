@@ -19,7 +19,7 @@
 #include "hybrid/classifier.h" /* for embedded mqvpn_hybrid_config_t ([Hybrid]) */
 #include "mqvpn_path_label.h" /* for MQVPN_PATH_LABEL_IFACE_MAX (path_policy.iface cap) */
 
-#define MQVPN_CONFIG_MAX_PATHS 8
+#define MQVPN_CONFIG_MAX_PATHS MQVPN_MAX_PATHS
 #define MQVPN_CONFIG_MAX_DNS   4
 #define MQVPN_CONFIG_MAX_USERS 64
 _Static_assert(MQVPN_CONFIG_MAX_PATHS == MQVPN_MAX_PATHS,

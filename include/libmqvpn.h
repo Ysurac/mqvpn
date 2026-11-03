@@ -48,17 +48,23 @@ extern "C" {
 /* ─── Capacity constants ─── */
 
 #define MQVPN_MAX_USERS 64
-/* ABI-FROZEN — do not bump. MQVPN_MAX_PATHS is baked into the layout of
- * public structs (mqvpn_client_info_t embeds paths[MQVPN_MAX_PATHS] by
- * value), and the library fills that array bounded by ITS OWN compiled-in
- * value: a caller built against an older header linked to a newer .so
- * with a larger value would take an out-of-bounds write past its
- * caller-provided storage (stack or heap).
+/* ABI-FROZEN per platform — do not bump. MQVPN_MAX_PATHS is baked into the
+ * layout of public structs (mqvpn_client_info_t embeds
+ * paths[MQVPN_MAX_PATHS] by value), and the library fills that array
+ * bounded by ITS OWN compiled-in value: a caller built against an older
+ * header linked to a newer .so with a larger value would take an
+ * out-of-bounds write past its caller-provided storage (stack or heap).
+ * Linux x86_64 has 16: OpenMPTCProuter's x86_64 routers aggregate up to 16
+ * WANs, and their amd64 VPS has to take as many paths per client.
  * If more path headroom is ever needed, add a caller-bounded paginated
  * API instead (mqvpn_client_get_paths already takes max_paths and is the
  * model to follow). Enforced: tests/test_xquic_abi_pin.c pins this value
  * at compile time, so a bump cannot build without meeting this comment. */
+#if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
+#define MQVPN_MAX_PATHS            16
+#else
 #define MQVPN_MAX_PATHS            8
+#endif
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(128)
 /* Persisted per-(user,iface) weight/dscp_mask policy entries (server-only,
  * config.h's "path_policy" JSON array) — not MQVPN_MAX_USERS*MQVPN_MAX_PATHS

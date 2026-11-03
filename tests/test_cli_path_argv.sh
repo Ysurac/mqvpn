@@ -19,14 +19,20 @@ fi
 
 # Discover the configured cap by asking for one too many. We mirror the
 # expected message format from src/main.c:248. The cap value is the only
-# number the binary will quote in this message.
-out=$("$MQVPN" --mode client --server 127.0.0.1:443 --insecure \
-    --path lo --path lo --path lo --path lo --path lo \
-    --path lo --path lo --path lo --path lo 2>&1)
+# number the binary will quote in this message. 17 is above the cap of
+# every build: 16 on Linux x86_64, 8 elsewhere (libmqvpn.h).
+case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64) expected=16 ;;
+    *) expected=8 ;;
+esac
+args=()
+for _ in $(seq 17); do args+=(--path lo); done
+
+out=$("$MQVPN" --mode client --server 127.0.0.1:443 --insecure "${args[@]}" 2>&1)
 rc=$?
 
 if [ "$rc" -eq 0 ]; then
-    echo "FAIL: 9 --path args were accepted (expected non-zero exit)" >&2
+    echo "FAIL: 17 --path args were accepted (expected non-zero exit)" >&2
     echo "$out" >&2
     exit 1
 fi
@@ -37,12 +43,12 @@ if ! echo "$out" | grep -qE 'error: max [0-9]+ paths supported'; then
     exit 1
 fi
 
-# Extract the cap and require it matches the build-time constant 8.
+# Extract the cap and require it matches the build-time constant.
 cap=$(echo "$out" | sed -nE 's/.*error: max ([0-9]+) paths supported.*/\1/p' | head -n1)
-if [ "$cap" != "8" ]; then
-    echo "FAIL: expected cap=8, got cap=$cap" >&2
+if [ "$cap" != "$expected" ]; then
+    echo "FAIL: expected cap=$expected, got cap=$cap" >&2
     exit 1
 fi
 
-echo "PASS: 9 --path args rejected with 'max 8 paths supported'"
+echo "PASS: 17 --path args rejected with 'max $expected paths supported'"
 exit 0

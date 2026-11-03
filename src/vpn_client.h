@@ -10,7 +10,7 @@
 #include "reorder.h"           /* mqvpn_reorder_config_t (INI [Reorder] bridge) */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t (INI [Hybrid] bridge) */
 
-#define MQVPN_MAX_PATH_IFACES 8
+#define MQVPN_MAX_PATH_IFACES MQVPN_MAX_PATHS
 _Static_assert(MQVPN_MAX_PATH_IFACES == MQVPN_MAX_PATHS,
                "CLI path cap must equal library cap (libmqvpn.h)");
 
