@@ -1,3 +1,21 @@
+mqvpn (0.19.1+20261103-1) UNRELEASED; urgency=medium
+
+  * Merge of upstream 0.19.1 (up to c67cb54).
+  * fix(security): the QUIC token and stateless reset keys are no longer
+    xquic's built-in token key and empty reset key (RFC 9000 8.1.4,
+    10.3.2). The server picks random token keys at each start and derives
+    its reset key from the TLS key file, so resets keep working after a
+    restart; if it cannot read that file it stops at startup with "cannot
+    make the engine keys from the TLS key file". The client picks a
+    random reset key.
+  * fix(android): the setup mark is drawn on its tile.
+  * xquic: bump to 78c61f1 (mqvpn-main 1e117b5):
+    - a MASQUE capsule's length is checked before it is added;
+    - a slow handshake no longer inflates the RTT estimate, which could
+      leave a lossy connection silent past its idle timeout.
+
+ -- mqvpn maintainers <maintainers@example.com>  Tue, 03 Nov 2026 10:00:00 +0100
+
 mqvpn (0.19.0+20261101-1) UNRELEASED; urgency=medium
 
   * Merge of upstream 0.19.0 (up to 2d2da3e).
