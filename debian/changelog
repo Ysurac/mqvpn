@@ -8,6 +8,10 @@ mqvpn (0.19.1+20261103-1) UNRELEASED; urgency=medium
     restart; if it cannot read that file it stops at startup with "cannot
     make the engine keys from the TLS key file". The client picks a
     random reset key.
+  * feat(multipath): on Linux x86_64 a client can use up to 16 paths
+    (Path / BackupPath lines, --path) and the server names and lists as
+    many per client in its status; other platforms keep 8. Programs built against libmqvpn on
+    Linux x86_64 must be rebuilt, as its client info struct grows.
   * fix(android): the setup mark is drawn on its tile.
   * xquic: bump to 78c61f1 (mqvpn-main 1e117b5):
     - a MASQUE capsule's length is checked before it is added;
