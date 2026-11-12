@@ -115,7 +115,7 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
     { "name": "alice", "key": "<ALICE_PSK>" },
     { "name": "bob", "key": "<BOB_PSK>" }
   ],
-  "max_clients": 64,
+  "max_clients": 253,
   "scheduler": "wlb",
   "allow_client_scheduler": true,
   "cc": "bbr2",
@@ -237,7 +237,7 @@ Always set `Cert` and `Key` explicitly for a server: the defaults are file names
 | `Key` | Pre-shared key (base64, generate with `mqvpn --genkey`) | Required unless `User` is set |
 | `User` | Server: per-user PSK in `NAME:KEY` or `NAME:KEY:FIXED_IP` format (repeatable). Client: `NAME:KEY` uses that name and key; a bare `NAME` sets the client username like `Username`. | — |
 | `Username` | Client only: name sent to the server to identify this client in its status output and logs; it does not affect authentication | — |
-| `MaxClients` | Maximum concurrent clients (server only) | `64` |
+| `MaxClients` | Maximum concurrent clients (server only). Never more than 253: one client address each, from a /24 or smaller subnet | `253` |
 | `MaxSessionsPerUser` | Server only: maximum concurrent tunnels per credential, so one key cannot take every `MaxClients` slot. `0` = no limit | `0` |
 
 User names are 1–63 bytes and may not contain `"`, `\` or control characters; keys are at most 255 bytes. An invalid `--user` on the command line stops startup with an error; an invalid `User` line in a file is skipped with a warning.

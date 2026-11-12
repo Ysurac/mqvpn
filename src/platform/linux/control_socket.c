@@ -469,13 +469,16 @@ ctrl_cmd_get_status(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t 
     mqvpn_server_t *server = cs->server;
     platform_ctx_t *cli_ctx = cs->cli_ctx;
     (void)req;
-    mqvpn_client_info_t clients[MQVPN_MAX_USERS];
+    /* static: MQVPN_MAX_USERS full client records are ~500 KB, too much for
+     * the stack. The control socket runs on the single libevent loop and
+     * dispatch() never re-enters, so one buffer is enough. */
+    static mqvpn_client_info_t clients[MQVPN_MAX_USERS];
     int n_clients = 0;
 
     /* Index-aligned with clients[] above — contract is on
      * mqvpn_server_get_client_reinject() in mqvpn_internal.h. Matched by
      * path_id below anyway, not by array position alone. */
-    mqvpn_internal_client_reinject_t reinj[MQVPN_MAX_USERS];
+    static mqvpn_internal_client_reinject_t reinj[MQVPN_MAX_USERS];
     int n_reinj = 0;
 
     /* Client mode: mqvpn_server_get_client_info(NULL, ...) always yields

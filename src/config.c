@@ -660,7 +660,7 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR_POST(SEC_AUTH, NULL, "server_auth_key", server_auth_key,
                  cfgk_post_warn_server_auth_key),
     CFG_STR(SEC_AUTH, "Username", "auth_username", auth_username),
-    CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
+    CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 253),
     CFG_INT_FB(SEC_AUTH, "MaxSessionsPerUser", "max_sessions_per_user",
                max_sessions_per_user, cfgk_int_nonneg, 0),
     /* [Control] */
@@ -1533,7 +1533,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     cfg->reinjection_srtt_factor_pct = 110;
     cfg->reinjection_hard_deadline_ms = 500;
     cfg->reinjection_deadline_lower_bound_ms = 20;
-    cfg->max_clients = 64;
+    cfg->max_clients = 253;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
     cfg->status_interval = 30;

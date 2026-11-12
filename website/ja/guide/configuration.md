@@ -110,7 +110,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
     { "name": "alice", "key": "<ALICE_PSK>" },
     { "name": "bob", "key": "<BOB_PSK>" }
   ],
-  "max_clients": 64,
+  "max_clients": 253,
   "scheduler": "wlb",
   "allow_client_scheduler": true,
   "cc": "bbr2",
@@ -224,7 +224,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `Key` | 事前共有鍵（base64、`mqvpn --genkey` で生成） | `User` 未設定時は必須 |
 | `User` | サーバー: ユーザー個別の PSK（`NAME:KEY` または `NAME:KEY:FIXED_IP` 形式、複数指定可）。クライアント: `NAME:KEY` はその名前と鍵を使い、`NAME` だけの場合は `Username` と同じくクライアントのユーザー名を設定する | — |
 | `Username` | クライアントのみ: サーバーのステータス出力やログでこのクライアントを識別するために送る名前。認証には影響しない | — |
-| `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
+| `MaxClients` | 最大同時接続クライアント数（サーバーのみ）。上限は 253（クライアントごとにサブネットのアドレスを 1 つ使用、/24 で最大） | `253` |
 | `MaxSessionsPerUser` | サーバーのみ: 認証情報（鍵）ごとの最大同時トンネル数。1 つの鍵で `MaxClients` の枠をすべて使われないようにする。`0` = 無制限 | `0` |
 
 ユーザー名は 1〜63 バイトで、`"`、`\`、制御文字は使えません。鍵は最大 255 バイトです。コマンドラインの `--user` が不正な場合は起動がエラーで止まり、設定ファイルの不正な `User` 行は警告付きでスキップされます。

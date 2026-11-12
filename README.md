@@ -355,7 +355,7 @@ Server example:
         { "name": "carol", "key": "carol-secret", "fixed_ip": "10.0.0.50" },
         "bob:bob-secret"
     ],
-    "max_clients": 64,
+    "max_clients": 253,
     "scheduler": "wlb",
     "allow_client_scheduler": true,
     "cc": "bbr2",

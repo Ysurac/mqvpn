@@ -12,9 +12,10 @@
   "users": [
     { "name": "alice", "key": "<ALICE_PSK_HERE>" },
     { "name": "carol", "key": "<CAROL_PSK_HERE>", "fixed_ip": "10.0.0.50" },
-    "bob:<BOB_PSK_HERE>"
+    "bob:<BOB_PSK_HERE>",
+    "dave:<DAVE_PSK_HERE>:10.0.0.51"
   ],
-  "max_clients": 64,
+  "max_clients": 253,
   "scheduler": "wlb",
   "mtu": 0,
   "cc": "bbr2",

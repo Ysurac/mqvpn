@@ -122,8 +122,9 @@ connection immediately after writing the response.
 - Additional fields (documented per command) are present only when `ok` is
   `true`, unless noted otherwise.
 
-**Overflow guard:** if an internal response would exceed 256 KiB
-(`CTRL_MAX_RESP_BYTES`; worst-case `get_status` with many clients), the
+**Overflow guard:** if an internal response would exceed
+`CTRL_MAX_RESP_BYTES` (512 bytes per client per path: about 1 MB, 2 MB on
+Linux x86_64; worst-case `get_status` with many clients), the
 server instead returns:
 
 ```json
@@ -571,8 +572,8 @@ Requires that the server was built with `XQC_ENABLE_FEC`.
 - `"fec not built"` — same semantics as `get_fec_stats`. Consumers should
   stop probing FEC for the rest of this scrape.
 - `"response too large"` — only possible if the user count grows beyond what
-  fits in the 256 KiB response limit (`CTRL_MAX_RESP_BYTES`; currently
-  `MQVPN_MAX_USERS=64`, well within budget).
+  fits in the response limit (`CTRL_MAX_RESP_BYTES`, which scales with
+  `MQVPN_MAX_USERS=253`, so it stays within budget).
 
 ---
 

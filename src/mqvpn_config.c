@@ -128,7 +128,7 @@ mqvpn_config_new(void)
     cfg->multipath = 1;
     cfg->reconnect_enable = 1;
     cfg->reconnect_interval_sec = 5;
-    cfg->max_clients = 64;
+    cfg->max_clients = 253;
     cfg->listen_port = 443;
     cfg->init_max_path_id = 0;         /* 0 = use xquic default (8) */
     cfg->bbr2_fast_convergence = 1;    /* xquic BBRv2 fast convergence, as always */

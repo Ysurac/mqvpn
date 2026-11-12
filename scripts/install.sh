@@ -327,7 +327,7 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         echo
         echo "[Auth]"
         echo "Key = $AUTH_KEY"
-        echo "MaxClients = 64"
+        echo "MaxClients = 253"
         echo
         echo "[Multipath]"
         echo "Scheduler = wlb"

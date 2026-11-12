@@ -899,7 +899,7 @@ test_phase_d_security() {
         || return 1
     local d7_succ=0
     local d7_fail=0
-    for i in $(seq 1 70); do
+    for i in $(seq 1 259); do
         resp=$(ctrl_local "{\"cmd\":\"add_user\",\"name\":\"u$i\",\"key\":\"k$i\"}")
         if assert_json_field "$resp" ok true; then
             d7_succ=$((d7_succ + 1))
@@ -907,13 +907,13 @@ test_phase_d_security() {
             d7_fail=$((d7_fail + 1))
         fi
     done
-    if (( d7_succ != 64 )); then
-        echo "  D7 expected 64 successes, got $d7_succ"; return 1
+    if (( d7_succ != 253 )); then
+        echo "  D7 expected 253 successes, got $d7_succ"; return 1
     fi
     if (( d7_fail < 6 )); then
         echo "  D7 expected ≥6 'add_user failed' errors, got $d7_fail"; return 1
     fi
-    echo "  D7 max users: 64 succ + $d7_fail fail: OK"
+    echo "  D7 max users: 253 succ + $d7_fail fail: OK"
 
     # D8 — concurrent connections (max-conns enforcement)
     bench_cleanup

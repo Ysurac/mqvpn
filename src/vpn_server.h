@@ -46,11 +46,11 @@ typedef struct mqvpn_server_cfg_s {
     int fec_enable; /* 1=enable FEC */
     int fec_scheme; /* 0=reed_solomon, 1=xor, 2=packet_mask, 3=galois_calculation */
     const char *auth_key; /* PSK for client authentication (NULL = no auth) */
-    const char *user_names[64];
-    const char *user_keys[64];
-    const char *user_fixed_ips[64]; /* NULL or "" = dynamic, "x.x.x.x" = pinned */
+    const char *user_names[253];
+    const char *user_keys[253];
+    const char *user_fixed_ips[253]; /* NULL or "" = dynamic, "x.x.x.x" = pinned */
     int n_users;
-    int max_clients;           /* max concurrent clients (default 64) */
+    int max_clients;           /* max concurrent clients (default 253) */
     int max_sessions_per_user; /* per-credential session cap (0 = unlimited) */
     const char *control_addr;  /* bind address for JSON control API (default 127.0.0.1) */
     int control_port;          /* TCP port for JSON control API (0 = disabled) */
@@ -81,8 +81,8 @@ typedef struct mqvpn_server_cfg_s {
     /* [Multipath] persisted per-(user,iface) weight/dscp_mask overrides;
      * JSON "path_policy" array only (config.h), no CLI/INI equivalent.
      * Matches MQVPN_CONFIG_MAX_PATH_POLICY (config.h), hardcoded here the
-     * same way user_names[64]/user_keys[64] above mirror MQVPN_MAX_USERS
-     * without including that header. */
+     * same way user_names[253]/user_keys[253] above mirror MQVPN_MAX_USERS
+     * without including that header (main.c asserts both). */
     mqvpn_path_policy_entry_t path_policy[128];
     int n_path_policy;
     int tun_offload; /* [Advanced] TunOffload; default 1 */

@@ -124,7 +124,7 @@ mqvpn --mode client|server [options]
   --mtu N                TUN MTU（1280-9000、デフォルト: auto）
   --path-mtu N           QUIC パケットのサイズを合わせる経路 MTU（1280-9000、デフォルト: 0）
   --pmtud                経路 MTU を探索する（両端で指定）。--path-mtu が上限になる
-  --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
+  --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 253）
   --control-port PORT    Control API の TCP ポート（クライアント・サーバー、0 で無効）
   --control-addr ADDR    Control API のバインドアドレス（デフォルト: 127.0.0.1）
   --status               サーバーの稼働状況を Control API 経由で表示して終了

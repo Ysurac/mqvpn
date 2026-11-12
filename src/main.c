@@ -32,6 +32,11 @@
 #include <string.h>
 #include <getopt.h>
 
+_Static_assert(sizeof(((mqvpn_server_cfg_t *)0)->user_names) /
+                       sizeof(((mqvpn_server_cfg_t *)0)->user_names[0]) ==
+                   MQVPN_MAX_USERS,
+               "vpn_server.h user arrays must match MQVPN_MAX_USERS (libmqvpn.h)");
+
 #ifndef MQVPN_GIT_COMMIT
 #  define MQVPN_GIT_COMMIT "unknown"
 #endif
@@ -116,7 +121,7 @@ usage(const char *prog)
         "                            (default: 0 = 1400-byte packets)\n"
         "  --pmtud                   Discover the path MTU (both ends, default off);\n"
         "                            --path-mtu is the cap\n"
-        "  --max-clients N           Max concurrent clients (server mode, default 64)\n"
+        "  --max-clients N           Max concurrent clients (server mode, default 253)\n"
         "  --no-sync-path-labels     Don't sync per-path weight/dscp_mask between\n"
         "                            client and server; configure them independently.\n"
         "                            Server: don't auto-adopt the client's own value\n"
@@ -419,7 +424,7 @@ main(int argc, char *argv[])
             break;
         case 0x10f: cli_pmtud = 1; break;
         case 'M':
-            /* 0 keeps its historical meaning: the library default (64). */
+            /* 0 keeps its historical meaning: the library default (253). */
             if (parse_cli_int(optarg, 0, INT_MAX, &max_clients) < 0) {
                 fprintf(stderr, "error: --max-clients must be a non-negative integer\n");
                 return 1;

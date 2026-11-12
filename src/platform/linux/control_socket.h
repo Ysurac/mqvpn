@@ -30,11 +30,11 @@
  * <event2/event.h> directly. */
 struct event_base;
 
-/* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
- * MQVPN_MAX_PATHS=8 produces ~210 KB; round up to 256 KB, 32 KB a path. The
- * exact bound is verified by tests/test_control_socket.c — bump it if the
- * users limit grows. */
-#define CTRL_MAX_RESP_BYTES (MQVPN_MAX_PATHS * 32 * 1024)
+/* Maximum response size: 512 bytes per (client, path) pair. Worst-case
+ * get_status with 64 clients on 8 paths produced ~210 KB against 256 KB; it
+ * scales linearly in both caps (~1 MB budget at 253 x 8, ~2 MB at 253 x 16).
+ * The exact bound is verified by tests/test_control_socket.c. */
+#define CTRL_MAX_RESP_BYTES (MQVPN_MAX_USERS * MQVPN_MAX_PATHS * 512)
 
 typedef struct ctrl_socket_s ctrl_socket_t;
 

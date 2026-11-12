@@ -92,7 +92,7 @@ test_defaults(void)
     ASSERT_EQ_STR(cfg.key_file, "server.key", "default key_file");
     ASSERT_EQ_STR(cfg.tls_ciphers, "", "default tls_ciphers");
     ASSERT_EQ_INT(cfg.insecure, 0, "default insecure");
-    ASSERT_EQ_INT(cfg.max_clients, 64, "default max_clients");
+    ASSERT_EQ_INT(cfg.max_clients, 253, "default max_clients");
     ASSERT_EQ_INT(cfg.max_sessions_per_user, 0, "default max_sessions_per_user");
     ASSERT_EQ_INT(cfg.n_paths, 0, "default n_paths");
     ASSERT_EQ_INT(cfg.n_dns, 0, "default n_dns");
@@ -812,7 +812,7 @@ test_max_paths_exceeded_json(void)
 static void
 test_max_clients_edge_cases(void)
 {
-    /* MaxClients = 0 → should fallback to 64 */
+    /* MaxClients = 0 → should fallback to 253 */
     const char *ini_zero = "[Auth]\n"
                            "MaxClients = 0\n";
 
@@ -821,9 +821,9 @@ test_max_clients_edge_cases(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=0 → default 64");
+    ASSERT_EQ_INT(cfg.max_clients, 253, "MaxClients=0 → default 253");
 
-    /* MaxClients = -1 → should fallback to 64 */
+    /* MaxClients = -1 → should fallback to 253 */
     const char *ini_neg = "[Auth]\n"
                           "MaxClients = -1\n";
 
@@ -831,9 +831,9 @@ test_max_clients_edge_cases(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=-1 → default 64");
+    ASSERT_EQ_INT(cfg.max_clients, 253, "MaxClients=-1 → default 253");
 
-    /* MaxClients = abc → invalid, fallback to 64 */
+    /* MaxClients = abc → invalid, fallback to 253 */
     const char *ini_abc = "[Auth]\n"
                           "MaxClients = abc\n";
 
@@ -841,7 +841,7 @@ test_max_clients_edge_cases(void)
     mqvpn_config_defaults(&cfg);
     mqvpn_config_load(&cfg, path);
     unlink(path);
-    ASSERT_EQ_INT(cfg.max_clients, 64, "MaxClients=abc → default 64");
+    ASSERT_EQ_INT(cfg.max_clients, 253, "MaxClients=abc → default 253");
 
     /* MaxClients = 128 → valid */
     const char *ini_valid = "[Auth]\n"
@@ -1908,7 +1908,8 @@ test_backup_path_ini_max_cap(void)
     unlink(path);
 
     ASSERT_EQ_INT(rc, 0, "backup path cap no error");
-    ASSERT_EQ_INT(cfg.n_backup_paths, MQVPN_CONFIG_MAX_PATHS, "capped at MAX backup paths");
+    ASSERT_EQ_INT(cfg.n_backup_paths, MQVPN_CONFIG_MAX_PATHS,
+                  "capped at MAX backup paths");
     ASSERT_EQ_STR(cfg.backup_paths[MQVPN_CONFIG_MAX_PATHS - 1], last, "last backup path");
 }
 
@@ -2169,7 +2170,7 @@ test_json_numeric_type_strict(void)
         mqvpn_config_defaults(&cfg);
         cfg.max_clients = 99;
         ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), 0, json);
-        ASSERT_EQ_INT(cfg.max_clients, 64, json);
+        ASSERT_EQ_INT(cfg.max_clients, 253, json);
     }
 
     static const char *pid_bad[] = {"18446744073709551615", "18446744073709551616", "-1"};
@@ -3496,7 +3497,7 @@ test_ini_json_invalid_scalar_parity(void)
     ASSERT_EQ_INT(a.tun_mtu, 0, "invalid mtu ini keeps default");
     ASSERT_EQ_INT(b.tun_mtu, 0, "invalid mtu json keeps default");
 
-    /* MaxClients invalid → 64 on both sides */
+    /* MaxClients invalid → 253 on both sides */
     p = write_tmp("[Auth]\nMaxClients = -3\n");
     mqvpn_config_defaults(&a);
     rc = mqvpn_config_load(&a, p);
@@ -3504,10 +3505,10 @@ test_ini_json_invalid_scalar_parity(void)
     ASSERT_EQ_INT(rc, 0, "invalid max_clients ini load rc 0");
     mqvpn_config_defaults(&b);
     mqvpn_config_load_json_filecfg(&b, "{\"max_clients\":-3}");
-    ASSERT_EQ_INT(a.max_clients, 64, "invalid max_clients ini -> 64");
-    ASSERT_EQ_INT(b.max_clients, 64, "invalid max_clients json -> 64");
+    ASSERT_EQ_INT(a.max_clients, 253, "invalid max_clients ini -> 253");
+    ASSERT_EQ_INT(b.max_clients, 253, "invalid max_clients json -> 253");
 
-    /* MaxClients PARSE-FAIL → 64 on both sides. NOTE: on the JSON side this
+    /* MaxClients PARSE-FAIL → 253 on both sides. NOTE: on the JSON side this
      * passes against pre-refactor code for a coincidental reason (old code
      * silently skips the write and the default happens to be 64); after A3
      * the table writes the 64 fallback explicitly + warns (accepted
@@ -3520,8 +3521,8 @@ test_ini_json_invalid_scalar_parity(void)
     ASSERT_EQ_INT(rc, 0, "parse-fail max_clients ini load rc 0");
     mqvpn_config_defaults(&b);
     mqvpn_config_load_json_filecfg(&b, "{\"max_clients\":\"abc\"}");
-    ASSERT_EQ_INT(a.max_clients, 64, "parse-fail max_clients ini -> 64");
-    ASSERT_EQ_INT(b.max_clients, 64, "parse-fail max_clients json -> 64");
+    ASSERT_EQ_INT(a.max_clients, 253, "parse-fail max_clients ini -> 253");
+    ASSERT_EQ_INT(b.max_clients, 253, "parse-fail max_clients json -> 253");
 
     /* InitMaxPathId over bound → keep default 0 on both sides */
     p = write_tmp("[Multipath]\nInitMaxPathId = 129\n");

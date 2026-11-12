@@ -57,7 +57,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     ctrl_socket_t cs;
     memset(&cs, 0, sizeof(cs));
 
-    /* static: CTRL_MAX_RESP_BYTES is 256 KiB — keep it off the per-call
+    /* static: CTRL_MAX_RESP_BYTES is 1-2 MB — keep it off the per-call
      * stack. libFuzzer runs inputs sequentially, so no aliasing. */
     static char resp[CTRL_MAX_RESP_BYTES];
     (void)dispatch(req, resp, sizeof(resp), &cs);

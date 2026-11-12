@@ -47,7 +47,11 @@ extern "C" {
 
 /* ─── Capacity constants ─── */
 
-#define MQVPN_MAX_USERS 64
+/* Named users (auth table) and the per-call client arrays of the status
+ * API. 253 = every client address a /24 pool can hand out (.1 is the
+ * server's), so get_status can report every concurrent session. Not part
+ * of any public struct layout: the arrays are caller-bounded. */
+#define MQVPN_MAX_USERS 253
 /* ABI-FROZEN per platform — do not bump. MQVPN_MAX_PATHS is baked into the
  * layout of public structs (mqvpn_client_info_t embeds
  * paths[MQVPN_MAX_PATHS] by value), and the library fills that array
@@ -61,9 +65,9 @@ extern "C" {
  * model to follow). Enforced: tests/test_xquic_abi_pin.c pins this value
  * at compile time, so a bump cannot build without meeting this comment. */
 #if defined(__linux__) && defined(__x86_64__) && !defined(__ANDROID__)
-#define MQVPN_MAX_PATHS            16
+#  define MQVPN_MAX_PATHS 16
 #else
-#define MQVPN_MAX_PATHS            8
+#  define MQVPN_MAX_PATHS 8
 #endif
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(128)
 /* Persisted per-(user,iface) weight/dscp_mask policy entries (server-only,
