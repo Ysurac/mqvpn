@@ -477,9 +477,9 @@ func runPureCases() -> Int {
         check(serverSchedulerLine(requested: nil, server: nil) == nil, "ss none")
         check(serverSchedulerLine(requested: 1, server: nil) == "Server scheduler: unknown (the server does not report it)", "ss unknown")
         check(serverSchedulerLine(requested: nil, server: 0) == "Server scheduler: minrtt", "ss minrtt")
-        check(serverSchedulerLine(requested: nil, server: 3) == "Server scheduler: wlb_udp_pin", "ss pin")
+        check(serverSchedulerLine(requested: nil, server: 5) == "Server scheduler: wlb_udp_pin", "ss pin")
         check(serverSchedulerLine(requested: 1, server: 1) == "Server scheduler: wlb", "ss equal")
-        check(serverSchedulerLine(requested: 1, server: 2) == "Server scheduler: backup_fec (your setting wlb is not applied — the server's backup_fec cannot be switched)", "ss fec")
+        check(serverSchedulerLine(requested: 1, server: 3) == "Server scheduler: backup_fec (your setting wlb is not applied — the server's backup_fec cannot be switched)", "ss fec")
         check(serverSchedulerLine(requested: 1, server: 0) == "Server scheduler: minrtt (your setting wlb is not applied — check AllowClientScheduler on the server)", "ss allow")
         check(!schedulerApplied(requested: nil, server: 0) && schedulerApplied(requested: 1, server: 1) && !schedulerApplied(requested: 1, server: 0) && !schedulerApplied(requested: 1, server: nil), "ss applied")
     }

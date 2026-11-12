@@ -93,8 +93,8 @@ data class MqvpnConfig(
     enum class Scheduler(val native: Int) {
         MIN_RTT(0),
         WLB(1),
-        BACKUP_FEC(2),
-        WLB_UDP_PIN(3),
+        BACKUP_FEC(3), // this fork's mqvpn_scheduler_t values
+        WLB_UDP_PIN(5),
     }
 
     @Serializable

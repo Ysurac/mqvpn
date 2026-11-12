@@ -65,7 +65,7 @@ _Static_assert(MQVPN_PATH_PENDING == 0 && MQVPN_PATH_ACTIVE == 1 &&
                    MQVPN_PATH_CLOSED == 4,
                "path status: app EventLog.kt, Derive.kt");
 _Static_assert(MQVPN_SCHED_MINRTT == 0 && MQVPN_SCHED_WLB == 1 &&
-                   MQVPN_SCHED_BACKUP_FEC == 2 && MQVPN_SCHED_WLB_UDP_PIN == 3,
+                   MQVPN_SCHED_BACKUP_FEC == 3 && MQVPN_SCHED_WLB_UDP_PIN == 5,
                "MqvpnConfig.Scheduler");
 _Static_assert(MQVPN_CC_BBR2 == 0 && MQVPN_CC_BBR == 1 && MQVPN_CC_CUBIC == 2,
                "MqvpnConfig.CongestionControl");
