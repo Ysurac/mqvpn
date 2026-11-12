@@ -654,12 +654,15 @@ find_path_by_handle(mqvpn_client_t *c, mqvpn_path_handle_t h)
  * and the iface string a MQVPN_CAPSULE_PATH_LABEL_PUSH carries). Used only by
  * the server-pushed path_label adopter below: every other lookup in this
  * file is keyed by handle or xquic path_id, which the server has no way to
- * know about — iface name is the one identifier both ends share. */
+ * know about — iface name is the one identifier both ends share. Live slots
+ * only: a dropped slot keeps its name until reused, and a desktop re-add of
+ * the same iface may sit in a later slot. */
 static path_entry_t *
 find_path_by_name(mqvpn_client_t *c, const char *name)
 {
     for (int i = 0; i < c->n_paths; i++) {
-        if (strcmp(c->paths[i].name, name) == 0) return &c->paths[i];
+        if (c->paths[i].transport_attached && strcmp(c->paths[i].name, name) == 0)
+            return &c->paths[i];
     }
     return NULL;
 }
