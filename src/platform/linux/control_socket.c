@@ -494,10 +494,18 @@ ctrl_cmd_get_status(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t 
         if (n_reinj < 0) n_reinj = 0;
     }
 
-    /* Same index alignment, see mqvpn_server_get_client_sched(). */
+    /* Same index alignment, see mqvpn_server_get_client_sched(). Client
+     * mode has no server: its one entry carries its own scheduler. */
     mqvpn_internal_client_sched_t sched[MQVPN_MAX_USERS];
-    int n_sched = mqvpn_server_get_client_sched(server, sched, MQVPN_MAX_USERS);
-    if (n_sched < 0) n_sched = 0;
+    int n_sched = 0;
+    if (cli_ctx) {
+        snprintf(sched[0].scheduler, sizeof(sched[0].scheduler), "%s",
+                 mqvpn_client_scheduler_label(cli_ctx->client));
+        n_sched = n_clients;
+    } else {
+        n_sched = mqvpn_server_get_client_sched(server, sched, MQVPN_MAX_USERS);
+        if (n_sched < 0) n_sched = 0;
+    }
 
     uint64_t now = 0;
     struct timeval tv;

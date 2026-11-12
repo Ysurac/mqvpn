@@ -982,6 +982,7 @@ TEST(get_status_client_mode_connected_with_path)
     g_cli_reinject_tmpl.paths[0].path_id = 3;
     g_cli_reinject_tmpl.paths[0].reinject_tx_bytes = 55555;
     g_cli_reinject_rc = 1;
+    g_cli_scheduler_label = "minrtt";
 
     char resp[8192];
     call_dispatch_client("{\"cmd\":\"get_status\"}", resp, sizeof(resp));
@@ -991,8 +992,12 @@ TEST(get_status_client_mode_connected_with_path)
     ASSERT_CONTAINS(resp, "\"path_id\":3");
     ASSERT_CONTAINS(resp, "\"state_label\":\"active\"");
     ASSERT_CONTAINS(resp, "\"reinject_tx_bytes\":55555");
+    /* The client's own scheduler, never the server-side lookup (which
+     * returns -1 for the NULL server in client mode -> "unknown"). */
+    ASSERT_CONTAINS(resp, "\"scheduler\":\"minrtt\"");
 
     g_cli_info_rc = 0;
+    g_cli_scheduler_label = "unknown";
     g_cli_reinject_rc = 0;
 }
 
