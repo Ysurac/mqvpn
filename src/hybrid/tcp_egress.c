@@ -1145,6 +1145,13 @@ svr_tcp_egress_flush_downlink_retry(mqvpn_server_t *server, svr_tcp_egress_flow_
     }
 
     ef->downlink_stash_len = 0;
+    if (ef->downlink_stash_cap > TCP_EGRESS_RELAY_CHUNK) {
+        /* Drained a CONNECTING-phase body: drop the up-to-256 KiB buffer so
+         * the per-flow bound stays one chunk; stash_downlink re-mallocs. */
+        free(ef->downlink_stash);
+        ef->downlink_stash = NULL;
+        ef->downlink_stash_cap = 0;
+    }
     ef->downlink_paused = 0;
     svr_tcp_egress_maybe_shutdown_downlink(ef);
     svr_tcp_egress_update_fd_interest(server, ef);

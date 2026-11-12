@@ -3051,6 +3051,10 @@ TEST(mqvpn_tcp_connecting_body_relayed_after_connect)
         harness_pump_with_sink(&h, &sink, &never, 20);
     ASSERT_EQ(h.probe.raw_recv_len, sizeof(early));
     ASSERT_EQ(memcmp(h.probe.raw_recv_buf, early, sizeof(early)), 0);
+    /* The grown CONNECTING buffer is not kept for the flow's lifetime. */
+    ef = harness_first_flow(&h);
+    ASSERT_EQ(ef != NULL, 1);
+    ASSERT_EQ(ef->downlink_stash_cap <= TCP_EGRESS_RELAY_CHUNK, 1);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
