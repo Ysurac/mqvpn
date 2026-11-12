@@ -660,7 +660,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR_POST(SEC_AUTH, NULL, "server_auth_key", server_auth_key,
                  cfgk_post_warn_server_auth_key),
     CFG_STR(SEC_AUTH, "Username", "auth_username", auth_username),
-    CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 253),
+    CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive,
+               253),
     CFG_INT_FB(SEC_AUTH, "MaxSessionsPerUser", "max_sessions_per_user",
                max_sessions_per_user, cfgk_int_nonneg, 0),
     /* [Control] */

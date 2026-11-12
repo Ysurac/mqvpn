@@ -337,9 +337,11 @@ test_parse_bbr2_flags(void)
             ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, ini);
             unlink(p);
             int want = (i % 2 == 0) ? 1 : 0;
-            ASSERT_EQ_INT(k == 0 ? cfg.bbr2_fast_convergence : cfg.bbr2_rttvar_compensation,
+            ASSERT_EQ_INT(k == 0 ? cfg.bbr2_fast_convergence
+                                 : cfg.bbr2_rttvar_compensation,
                           want, ini);
-            ASSERT_EQ_INT(k == 0 ? cfg.bbr2_rttvar_compensation : cfg.bbr2_fast_convergence,
+            ASSERT_EQ_INT(k == 0 ? cfg.bbr2_rttvar_compensation
+                                 : cfg.bbr2_fast_convergence,
                           1, ini);
         }
     }

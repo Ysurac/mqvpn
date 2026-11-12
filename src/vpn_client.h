@@ -46,17 +46,17 @@ typedef struct mqvpn_client_cfg_s {
     int no_routes;        /* 1=skip automatic route setup entirely (default 0) */
     int manage_routes;    /* 1=manage host routes (default 1), 0=skip routing setup */
     int control_port;     /* TCP port for JSON control API (0 = disabled) */
-    const char *control_addr;   /* bind address for control API (NULL = "127.0.0.1") */
-    uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
+    const char *control_addr;     /* bind address for control API (NULL = "127.0.0.1") */
+    uint64_t init_max_path_id;    /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int bbr2_fast_convergence;    /* [Multipath] Bbr2FastConvergence; default 1 */
     int bbr2_rttvar_compensation; /* [Multipath] Bbr2RttvarCompensation; default 1 */
-    int tun_mtu;                /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
-    int path_mtu;               /* 0=default packet size, >0=underlay MTU */
-    int pmtud;                  /* 1=discover the path MTU, path_mtu is the cap */
-    int cc;                     /* mqvpn_cc_t: congestion control algorithm */
-    int reinjection;            /* mqvpn_reinjection_t; 0=off (default) */
-    int reinj_srtt_factor_pct;  /* deadline mode; percent, e.g. 110 = 1.10x srtt */
-    int reinj_hard_deadline_ms; /* deadline mode */
+    int tun_mtu;                  /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
+    int path_mtu;                 /* 0=default packet size, >0=underlay MTU */
+    int pmtud;                    /* 1=discover the path MTU, path_mtu is the cap */
+    int cc;                       /* mqvpn_cc_t: congestion control algorithm */
+    int reinjection;              /* mqvpn_reinjection_t; 0=off (default) */
+    int reinj_srtt_factor_pct;    /* deadline mode; percent, e.g. 110 = 1.10x srtt */
+    int reinj_hard_deadline_ms;   /* deadline mode */
     int reinj_deadline_lower_bound_ms;                   /* deadline mode */
     int redundant;                                       /* send UDP on every path */
     uint16_t redundant_ports[MQVPN_REDUNDANT_MAX_PORTS]; /* empty = all UDP */
