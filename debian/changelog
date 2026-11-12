@@ -1,3 +1,55 @@
+mqvpn (0.19.2+20261112-1) UNRELEASED; urgency=medium
+
+  * Merge of upstream 0.19.2 (up to 13de90f).
+  * feat(server): the server takes up to 253 named users (was 64), one
+    for each client address a /24 subnet can hand out, and MaxClients
+    now defaults to 253 (was 64); the generated server config writes
+    MaxClients = 253. A config that sets MaxClients keeps its value.
+    get_status lists every connected client, so its reply can reach
+    about 2 MB on Linux x86_64 (1 MB elsewhere): programs that read the
+    control API need a buffer that large.
+  * feat(multipath): [Multipath] Bbr2FastConvergence and
+    Bbr2RttvarCompensation (JSON bbr2_fast_convergence and
+    bbr2_rttvar_compensation) turn off either of the two xquic BBRv2
+    extensions mqvpn has always used. Both default to true, so nothing
+    changes unless they are set, and they apply only with CC = bbr2. The
+    server logs "bbr2 flags: fast_convergence=... rttvar_compensation=...".
+  * fix(hybrid): a TCP-lane download to a receiver that ran out of buffer
+    space in the middle of a burst no longer stops for good after a
+    retransmission timeout.
+  * fix(install): the installer checks that libevent is present for the
+    native architecture before installing.
+  * feat(lib): mqvpn_client_state_string() returns a client state's name.
+  * fix(client): a client whose PinnedPubkey does not match the server's
+    key now stops, like any other rejected certificate, instead of
+    reconnecting to that server forever.
+  * fix(linux): a client started without the kill switch also removes the
+    kill-switch rules a crashed run left behind, which otherwise kept
+    blocking all traffic until removed by hand.
+  * fix(client): a path weight or DSCP mask pushed by the server applies
+    to the live path, not to an earlier closed path on the same interface.
+  * fix(hybrid): once the data a client sent before its TCP-lane
+    connection was open has been passed on, the server frees its buffer
+    (up to 256 KiB) instead of keeping it for the life of the connection.
+  * fix(config): [Control] Port and ControlPort (JSON control_port) must
+    be 1-65535; a larger value is refused with a warning instead of
+    silently leaving the control API off.
+  * fix(config): a JSON "users" string takes the same NAME:KEY:FIXED_IP
+    form as an INI User line. "alice:s3cret:10.0.0.5" used to give alice
+    the key "s3cret:10.0.0.5" and no fixed address; anything after a
+    second ':' is now the fixed address.
+  * fix(control): get_status on a client reports its real scheduler
+    instead of "unknown".
+  * fix(control): add_user with an empty key fails without moving the
+    user's fixed address. add_user for a new user whose fixed_ip cannot
+    be used fails before creating the user, so it no longer disconnects
+    a shared-key client using that name, nor leaves a server without
+    credentials rejecting every client.
+  * lwip: bump to 19a7208 (mqvpn-main): the unsent queue stays sorted
+    when a retransmission timeout requeues unacked data.
+
+ -- mqvpn maintainers <maintainers@example.com>  Thu, 12 Nov 2026 10:00:00 +0100
+
 mqvpn (0.19.1+20261103-1) UNRELEASED; urgency=medium
 
   * Merge of upstream 0.19.1 (up to c67cb54).
