@@ -2674,51 +2674,6 @@ TEST(remove_initial_path_keeps_drop_window_semantics)
     mqvpn_client_destroy(c);
 }
 
-TEST(client_next_primary_idx_skips_closed_and_inactive)
-{
-    mqvpn_client_t *c = make_test_client();
-
-    /* 3 paths. We will mark slot 0 CLOSED (via remove_path) and slot 1
-     * inactive (via drop_path; its `active` flag clears). Slot 2 stays
-     * healthy. Rotation from slot 0 must skip both unreachable slots
-     * and land on slot 2. */
-    mqvpn_path_desc_t d0 = {0};
-    d0.struct_size = sizeof(d0);
-    snprintf(d0.iface, sizeof(d0.iface), "eth0");
-    mqvpn_path_handle_t h0 = add_fake_path(c, &d0, NULL);
-    ASSERT_NE(h0, (mqvpn_path_handle_t)-1);
-
-    mqvpn_path_desc_t d1 = {0};
-    d1.struct_size = sizeof(d1);
-    snprintf(d1.iface, sizeof(d1.iface), "wlan0");
-    mqvpn_path_handle_t h1 = add_fake_path(c, &d1, NULL);
-    ASSERT_NE(h1, (mqvpn_path_handle_t)-1);
-
-    mqvpn_path_desc_t d2 = {0};
-    d2.struct_size = sizeof(d2);
-    snprintf(d2.iface, sizeof(d2.iface), "usb0");
-    mqvpn_path_handle_t h2 = add_fake_path(c, &d2, NULL);
-    ASSERT_NE(h2, (mqvpn_path_handle_t)-1);
-
-    /* remove_path → status=CLOSED + active=0 (predicate excludes BOTH). */
-    ASSERT_EQ(mqvpn_client_remove_path(c, h0), MQVPN_OK);
-    /* drop_path → status=CLOSED + active=0 too; equivalent for rotation. */
-    ASSERT_EQ(mqvpn_client_drop_path(c, h1), MQVPN_OK);
-
-    /* Sanity: from slot 2, rotation wraps full circle and only slot 2
-     * itself qualifies — but the helper looks at OTHER slots first. With
-     * slots 0,1 unreachable it returns from_idx (=2) per the fail-safe. */
-    ASSERT_EQ(mqvpn_client_test_next_primary_idx(c, 2), 2);
-
-    /* From slot 0, walks 1 → 2 → finds 2 active. */
-    ASSERT_EQ(mqvpn_client_test_next_primary_idx(c, 0), 2);
-
-    /* From slot 1, walks 2 → finds 2 active. */
-    ASSERT_EQ(mqvpn_client_test_next_primary_idx(c, 1), 2);
-
-    mqvpn_client_destroy(c);
-}
-
 /* ── Handshake stall watchdog ──
  *
  * If the QUIC handshake doesn't progress past CONNECTING within
@@ -5279,7 +5234,6 @@ main(void)
     run_get_send_handle_prefers_rotated_primary_when_active();
     run_get_send_handle_falls_back_to_first_active_when_primary_dropped();
     run_remove_initial_path_keeps_drop_window_semantics();
-    run_client_next_primary_idx_skips_closed_and_inactive();
 
     /* Permanent path-create failure (XQC_EMP_CREATE_PATH) */
     run_path_create_permanent_failure_marks_closed_immediately();

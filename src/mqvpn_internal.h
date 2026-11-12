@@ -413,8 +413,6 @@ mqvpn_client_test_apply_path_create_permanent_failure(mqvpn_client_t *c,
 MQVPN_INTERNAL int mqvpn_client_test_set_primary_path_idx(mqvpn_client_t *c, int idx);
 MQVPN_INTERNAL mqvpn_path_handle_t
 mqvpn_client_test_get_send_handle_for_path(mqvpn_client_t *c, uint64_t xqc_path_id);
-MQVPN_INTERNAL int mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c,
-                                                      int from_idx);
 MQVPN_INTERNAL uint64_t
 mqvpn_client_test_get_handshake_started_us(const mqvpn_client_t *c);
 MQVPN_INTERNAL int mqvpn_client_test_set_handshake_started_us(mqvpn_client_t *c,

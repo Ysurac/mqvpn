@@ -727,23 +727,6 @@ get_path_entry_for_send(mqvpn_client_t *c, uint64_t xqc_path_id)
     return (idx >= 0) ? &c->paths[idx] : NULL;
 }
 
-/* Pick the next active path index for the next handshake attempt.
- * Skips paths that the platform has marked inactive or the library has
- * already closed. Returns the input index if no other candidate exists. */
-static int
-client_next_primary_idx(const mqvpn_client_t *c, int from_idx)
-{
-    if (c->n_paths <= 0) return 0;
-    int start = (from_idx + 1) % c->n_paths;
-    int i = start;
-    do {
-        const path_entry_t *p = &c->paths[i];
-        if (p->transport_attached && p->status != MQVPN_PATH_CLOSED) return i;
-        i = (i + 1) % c->n_paths;
-    } while (i != start);
-    return from_idx;
-}
-
 /* Test-only wrappers: expose primary-rotation internals so test_api can
  * lock in the issue #46 + OMR-backport composite fallback semantics
  * without driving xquic.  Hidden from libmqvpn.so's dynamic export
@@ -786,14 +769,6 @@ mqvpn_client_test_transport_send(mqvpn_client_t *c, mqvpn_path_handle_t h,
     if (!p || !p->transport_attached) return MQVPN_TX_FAILED;
     return path_transport_send(c, p, bufs, n, (const struct sockaddr *)&c->server_addr,
                                c->server_addrlen);
-}
-
-MQVPN_INTERNAL
-int
-mqvpn_client_test_next_primary_idx(const mqvpn_client_t *c, int from_idx)
-{
-    if (!c) return -1;
-    return client_next_primary_idx(c, from_idx);
 }
 
 MQVPN_INTERNAL

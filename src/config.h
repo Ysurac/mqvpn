@@ -209,9 +209,14 @@ int mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *por
 
 /*
  * Resolve the effective control-API endpoint by merging INI/JSON config
- * with CLI flags. Pure: no I/O, no globals.
+ * with CLI flags. Pure: no I/O, no globals. Precedence per field, lowest
+ * first: [Control] Listen, then [Control] Addr / Port (when set: non-empty /
+ * > 0), then --control-addr / --control-port. Used for both client and
+ * server mode.
  *
  *   file_listen   : file_cfg.control_listen — "" or NULL if absent
+ *   file_addr     : file_cfg.control_addr — "" or NULL if absent
+ *   file_port     : file_cfg.control_port — 0 if absent
  *   cli_addr      : CLI --control-addr value — NULL if not passed
  *   cli_port      : CLI --control-port value (only meaningful when cli_port_set != 0)
  *   cli_port_set  : 1 iff --control-port was passed (so 0 means explicit disable)
@@ -223,18 +228,6 @@ int mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *por
  *   *out_port     : 0 → control API disabled; >0 → bind on this port
  *
  * Returns 0 on success, -1 if file_listen is set but malformed.
- */
-int mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr,
-                                   int cli_port, int cli_port_set, char *addr_buf,
-                                   size_t addr_buf_len, const char **out_addr,
-                                   int *out_port);
-
-/*
- * Same, with the separate [Control] Addr / Port keys (control_addr /
- * control_port in JSON) as well. Precedence per field, lowest first:
- * [Control] Listen, then [Control] Addr / Port (when set: non-empty /
- * > 0), then --control-addr / --control-port. Used for both client and
- * server mode.
  */
 int mqvpn_resolve_control_endpoint_ex(const char *file_listen, const char *file_addr,
                                       int file_port, const char *cli_addr, int cli_port,

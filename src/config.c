@@ -1513,16 +1513,6 @@ mqvpn_resolve_control_endpoint_ex(const char *file_listen, const char *file_addr
     return 0;
 }
 
-int
-mqvpn_resolve_control_endpoint(const char *file_listen, const char *cli_addr,
-                               int cli_port, int cli_port_set, char *addr_buf,
-                               size_t addr_buf_len, const char **out_addr, int *out_port)
-{
-    return mqvpn_resolve_control_endpoint_ex(file_listen, NULL, 0, cli_addr, cli_port,
-                                             cli_port_set, addr_buf, addr_buf_len,
-                                             out_addr, out_port);
-}
-
 /* ---- public API ---- */
 
 void
