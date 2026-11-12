@@ -52,7 +52,7 @@ jobs:
   # ── Unit tests ────────────────────────────────────────────────────────────
   unit-test:
     name: Build and run test_standby_backup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -117,10 +117,10 @@ jobs:
   perf-standby-backup:
     name: Standby backup failover benchmark
     # Only run on pushes to main — benchmark requires networking primitives
-    # (ip netns, tc netem) that are available on ubuntu-latest but we do not
+    # (ip netns, tc netem) that are available on ubuntu-24.04 but we do not
     # want this to run on every PR.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:

@@ -7,7 +7,7 @@ name: FEC and Reinjection Performance Tests
 #   - Push to main when FEC/reinjection source files change
 #   - Manual dispatch (for on-demand comparisons)
 #
-# Runs on standard GitHub-hosted ubuntu-latest runners (ephemeral).
+# Runs on standard GitHub-hosted ubuntu-24.04 runners (ephemeral).
 # Dependencies installed inline.
 
 on:
@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   perf-fec-reinjection:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

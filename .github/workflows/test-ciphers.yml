@@ -35,7 +35,7 @@ permissions:
 jobs:
   test-ciphers:
     name: E2E cipher suite test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:

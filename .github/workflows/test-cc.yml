@@ -44,7 +44,7 @@ permissions:
 jobs:
   cc-unit:
     name: CC config unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -87,7 +87,7 @@ jobs:
 
   cc-e2e:
     name: CC algorithm e2e test (bbr2 / bbr / cubic)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
