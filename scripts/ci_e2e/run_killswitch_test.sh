@@ -420,6 +420,35 @@ stop_client
 echo "=== Test 6: PASS ==="
 
 echo ""
+echo "=== Test 6b: A next client WITHOUT the kill switch also removes them ==="
+start_client "${WORK_DIR}/client6c.log"
+if ! wait_tunnel 15; then
+    echo "=== Test 6b (Tunnel up): FAIL ==="
+    cat "${WORK_DIR}/client6c.log"
+    exit 1
+fi
+DEAD_PID=$CLIENT_PID
+kill -KILL "$DEAD_PID" 2>/dev/null || true
+wait "$DEAD_PID" 2>/dev/null || true
+CLIENT_PID=""
+ip netns exec vpn-client "$MQVPN" --mode client --server 192.168.100.2:4433 \
+    --auth-key "$PSK" --insecure --log-level debug > "${WORK_DIR}/client6d.log" 2>&1 &
+CLIENT_PID=$!
+if ! wait_tunnel 15; then
+    echo "=== Test 6b (Plain client up): FAIL — blocked by the stale rules? ==="
+    cat "${WORK_DIR}/client6d.log"
+    ip netns exec vpn-client iptables -S 2>/dev/null
+    exit 1
+fi
+if ip netns exec vpn-client iptables -S 2>/dev/null | grep -qE "mqvpn-ks:${DEAD_PID}|MQVPN-KS-${DEAD_PID}"; then
+    echo "=== Test 6b (Stale rules removed): FAIL ==="
+    ip netns exec vpn-client iptables -S 2>/dev/null
+    exit 1
+fi
+stop_client
+echo "=== Test 6b: PASS ==="
+
+echo ""
 echo "=== Test 7: Kill switch with --no-routes ==="
 start_client "${WORK_DIR}/client7.log" --no-routes
 for i in $(seq 1 15); do

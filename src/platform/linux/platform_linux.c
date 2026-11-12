@@ -1050,10 +1050,11 @@ linux_platform_run_client(const mqvpn_client_cfg_t *cfg)
     /* Kill switch: block everything but the server before the first packet
      * goes out, and keep it up until the process exits — reconnects and
      * TUN rebuilds only add/remove the TUN ACCEPT. Rules a crashed instance
-     * left behind go first. Done after the signal handlers are armed, so a
-     * SIGTERM from here on still reaches the cleanup. */
+     * left behind go first, kill switch on or off: a run without it would
+     * otherwise stay blocked by them. Done after the signal handlers are
+     * armed, so a SIGTERM from here on still reaches the cleanup. */
+    killswitch_flush_stale();
     if (ctx.killswitch_enabled) {
-        killswitch_flush_stale();
         if (setup_killswitch(&ctx) < 0) {
             LOG_ERR("killswitch setup failed, aborting");
             goto cleanup;
