@@ -100,7 +100,7 @@ ci_bench_netns_kill() {
     local ns pids=()
     for ns in "$@"; do
         # shellcheck disable=SC2207  # PIDs are plain integers
-        pids+=($(ip netns pids "$ns" 2>/dev/null))
+        pids+=($(ip netns pids "$ns" 2>/dev/null || true)) # absent netns: nothing to kill
     done
     ci_bench_kill_pids ${pids[@]+"${pids[@]}"}
 }
