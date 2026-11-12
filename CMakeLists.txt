@@ -1515,9 +1515,17 @@ if(BUILD_TESTING)
         add_test(NAME test_tcp_egress COMMAND test_tcp_egress)
     endif()
 
-    # CLI argv overflow shell test (runs the built mqvpn binary)
+    # CLI argv overflow shell test (runs the built mqvpn binary). The cap is
+    # libmqvpn.h's per-platform MQVPN_MAX_PATHS for the target, not the host:
+    # cross builds (armhf) run the binary under qemu on an x86_64 runner.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+        set(MQVPN_TEST_MAX_PATHS 16)
+    else()
+        set(MQVPN_TEST_MAX_PATHS 8)
+    endif()
     add_test(NAME test_cli_path_argv
-        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>)
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_path_argv.sh $<TARGET_FILE:mqvpn>
+            ${MQVPN_TEST_MAX_PATHS})
 
     add_test(NAME test_cli_config
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_cli_config.sh $<TARGET_FILE:mqvpn>)

@@ -11,6 +11,7 @@
 set -u
 
 MQVPN="${1:-${MQVPN:-./mqvpn}}"
+EXPECTED_CAP="${2:-}"
 
 if [ ! -x "$MQVPN" ]; then
     echo "FAIL: mqvpn binary not found or not executable: $MQVPN" >&2
@@ -20,11 +21,17 @@ fi
 # Discover the configured cap by asking for one too many. We mirror the
 # expected message format from src/main.c:248. The cap value is the only
 # number the binary will quote in this message. 17 is above the cap of
-# every build: 16 on Linux x86_64, 8 elsewhere (libmqvpn.h).
-case "$(uname -s)/$(uname -m)" in
-    Linux/x86_64) expected=16 ;;
-    *) expected=8 ;;
-esac
+# every build: 16 on Linux x86_64, 8 elsewhere (libmqvpn.h). CMake passes
+# the target's cap as $2; the host fallback is wrong for a cross build run
+# under qemu.
+if [ -n "$EXPECTED_CAP" ]; then
+    expected=$EXPECTED_CAP
+else
+    case "$(uname -s)/$(uname -m)" in
+        Linux/x86_64) expected=16 ;;
+        *) expected=8 ;;
+    esac
+fi
 args=()
 for _ in $(seq 17); do args+=(--path lo); done
 
