@@ -132,6 +132,12 @@ typedef struct mqvpn_file_config_s {
 
     /* TUN MTU override; 0 = auto */
     int mtu;
+    /* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation — xquic's two
+     * BBRv2 extensions that mqvpn has always enabled. 1 (default) = enabled,
+     * unchanged; 0 = standard BBRv2 behaviour for that aspect. Ignored
+     * unless CC is bbr2. */
+    int bbr2_fast_convergence;
+    int bbr2_rttvar_compensation;
 
     /* [Interface] — client reconnection */
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */

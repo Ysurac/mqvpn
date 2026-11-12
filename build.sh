@@ -98,17 +98,17 @@ XQUIC_BUILD="$XQUIC_DIR/build"
 
 echo "=== Building xquic ==="
 mkdir -p "$XQUIC_BUILD"
+# The xquic feature flags, shared with CI, plus the extra congestion
+# controllers and FEC schemes dev builds on top.
+XQUIC_FLAGS=$(cat "$SCRIPT_DIR/scripts/xquic-cmake-flags")
 # Always configure xquic so feature flags stay in sync across incremental builds.
+# shellcheck disable=SC2086 # one flag per word
 cmake -S "$XQUIC_DIR" -B "$XQUIC_BUILD" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DSSL_TYPE=boringssl \
     -DSSL_PATH="$BSSL_DIR" \
-    -DXQC_ENABLE_BBR2=ON \
+    $XQUIC_FLAGS \
     -DXQC_ENABLE_RENO=ON \
     -DXQC_ENABLE_COPA=ON \
-    -DXQC_ENABLE_UNLIMITED=ON \
-    -DXQC_ENABLE_FEC=ON \
-    -DXQC_ENABLE_XOR=ON \
     -DXQC_ENABLE_RSC=ON \
     -DXQC_ENABLE_PKM=ON
 make -C "$XQUIC_BUILD" -j"$NPROC"

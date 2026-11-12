@@ -48,6 +48,8 @@ typedef struct mqvpn_client_cfg_s {
     int control_port;     /* TCP port for JSON control API (0 = disabled) */
     const char *control_addr;   /* bind address for control API (NULL = "127.0.0.1") */
     uint64_t init_max_path_id;  /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
+    int bbr2_fast_convergence;    /* [Multipath] Bbr2FastConvergence; default 1 */
+    int bbr2_rttvar_compensation; /* [Multipath] Bbr2RttvarCompensation; default 1 */
     int tun_mtu;                /* TUN MTU override, 0=auto (derived from MASQUE MSS) */
     int path_mtu;               /* 0=default packet size, >0=underlay MTU */
     int pmtud;                  /* 1=discover the path MTU, path_mtu is the cap */

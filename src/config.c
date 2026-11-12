@@ -522,7 +522,7 @@ cfgk_int_nonneg(int v)
 static int
 cfgk_int_mtu(int v)
 {
-    return v == 0 || (v >= 1280 && v <= 9000);
+    return v == 0 || (v >= MQVPN_MTU_MIN && v <= MQVPN_MTU_MAX);
 }
 
 static int
@@ -696,6 +696,11 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_STR(SEC_MULTIPATH, "FecScheme", "fec_scheme", fec_scheme),
     CFG_BOOL(SEC_MULTIPATH, "SyncPathLabels", "sync_path_labels", sync_path_labels),
     CFG_BOOL(SEC_MULTIPATH, "PushPathLabels", "push_path_labels", push_path_labels),
+    /* xquic BBRv2 extensions, default true (mqvpn_config_defaults). */
+    CFG_BOOL(SEC_MULTIPATH, "Bbr2FastConvergence", "bbr2_fast_convergence",
+             bbr2_fast_convergence),
+    CFG_BOOL(SEC_MULTIPATH, "Bbr2RttvarCompensation", "bbr2_rttvar_compensation",
+             bbr2_rttvar_compensation),
     /* [Reorder] — JSON side lives inside the bounded "reorder" object */
     CFG_BOOL(SEC_REORDER, "Enabled", "enabled", reorder.mode),
     CFG_U32_POST(SEC_REORDER, "MaxWaitMs", "max_wait_ms", reorder.max_wait_ms,
@@ -1550,6 +1555,8 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
         0; /* opt-in; memset above already zeroes this, set explicitly for clarity */
     cfg->tun_offload = 1;
     cfg->tun_gro = 1;
+    cfg->bbr2_fast_convergence = 1;
+    cfg->bbr2_rttvar_compensation = 1;
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */
 }

@@ -246,12 +246,8 @@ cb_state_changed(mqvpn_client_state_t old_state, mqvpn_client_state_t new_state,
                  void *user_ctx)
 {
     platform_ctx_t *p = (platform_ctx_t *)user_ctx;
-    static const char *names[] = {"IDLE",         "CONNECTING",  "AUTHENTICATING",
-                                  "TUNNEL_READY", "ESTABLISHED", "RECONNECTING",
-                                  "CLOSED"};
-    const char *os = (old_state < 7) ? names[old_state] : "?";
-    const char *ns = (new_state < 7) ? names[new_state] : "?";
-    LOG_INF("state: %s → %s", os, ns);
+    LOG_INF("state: %s → %s", mqvpn_client_state_string(old_state),
+            mqvpn_client_state_string(new_state));
 
     /* On ESTABLISHED: re-add any paths whose socket was freed by the
      * rollback in netmon_try_readd_removed_path() during the previous
@@ -1719,20 +1715,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     }
     mqvpn_config_set_max_clients(lib_cfg, cfg->max_clients);
     mqvpn_config_set_max_sessions_per_user(lib_cfg, cfg->max_sessions_per_user);
-    mqvpn_scheduler_t sched = MQVPN_SCHED_MINRTT;
-    switch (cfg->scheduler) {
-    case MQVPN_SCHED_WLB: sched = MQVPN_SCHED_WLB; break;
-    case MQVPN_SCHED_BACKUP: sched = MQVPN_SCHED_BACKUP; break;
-    case MQVPN_SCHED_BACKUP_FEC: sched = MQVPN_SCHED_BACKUP_FEC; break;
-    case MQVPN_SCHED_RAP: sched = MQVPN_SCHED_RAP; break;
-    case MQVPN_SCHED_WLB_UDP_PIN: sched = MQVPN_SCHED_WLB_UDP_PIN; break;
-    case MQVPN_SCHED_WRTT: sched = MQVPN_SCHED_WRTT; break;
-    case MQVPN_SCHED_WRR: sched = MQVPN_SCHED_WRR; break;
-    case MQVPN_SCHED_REDUNDANT: sched = MQVPN_SCHED_REDUNDANT; break;
-    case MQVPN_SCHED_DSCP: sched = MQVPN_SCHED_DSCP; break;
-    default: break;
-    }
-    mqvpn_config_set_scheduler(lib_cfg, sched);
+    /* main.c fills scheduler from the name table; the setter rejects others. */
+    mqvpn_config_set_scheduler(lib_cfg, (mqvpn_scheduler_t)cfg->scheduler);
     mqvpn_config_set_allow_client_scheduler(lib_cfg, cfg->allow_client_scheduler);
     mqvpn_config_set_cc(lib_cfg, (mqvpn_cc_t)cfg->cc);
     mqvpn_config_set_reinjection(lib_cfg, (mqvpn_reinjection_t)cfg->reinjection);
@@ -1740,6 +1724,8 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
                                                  cfg->reinj_hard_deadline_ms,
                                                  cfg->reinj_deadline_lower_bound_ms);
     mqvpn_config_set_init_max_path_id(lib_cfg, cfg->init_max_path_id);
+    mqvpn_config_set_bbr2_fast_convergence(lib_cfg, cfg->bbr2_fast_convergence);
+    mqvpn_config_set_bbr2_rttvar_compensation(lib_cfg, cfg->bbr2_rttvar_compensation);
     mqvpn_config_set_tun_mtu(lib_cfg, cfg->tun_mtu);
     mqvpn_config_set_fec(lib_cfg, cfg->fec_enable);
     mqvpn_config_set_fec_scheme(lib_cfg, (mqvpn_fec_scheme_t)cfg->fec_scheme);

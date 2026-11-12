@@ -148,6 +148,16 @@ The file must be strict JSON (RFC 8259): no comments, no trailing commas, and ke
 }
 ```
 
+The `[Interface]` and `[Multipath]` keys these examples leave out are also
+top-level keys in JSON: `mtu` (`MTU`), `path_mtu` (`PathMTU`), `pmtud`
+(`PMTUD`), `manage_routes` (`ManageRoutes`), `init_max_path_id`
+(`InitMaxPathId`), `bbr2_fast_convergence` (`Bbr2FastConvergence`),
+`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`), `reinjection`
+(`Reinjection`), `reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`),
+`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`),
+`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`),
+`redundant` (`Redundant`) and `redundant_ports` (`RedundantPorts`).
+
 ## Multi-User Authentication
 
 The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
@@ -263,6 +273,8 @@ Enables the [Control API](#control-api), in both client and server mode. Disable
 | `SyncPathLabels` | Share per-path weight / DSCP mask between client and server. Client: announce its own values to the server. Server: adopt the values the client announces for its downlink. Either side set to `false` turns the sharing off | `true` |
 | `PushPathLabels` | Push a weight / DSCP mask pinned on the server down to the client, so it also governs the client's uplink. Server: send it. Client: accept it. Both sides must enable it | `false` |
 | `InitMaxPathId` | Initial number of path IDs the connection may use over its lifetime (IDs 0–N; each new path, including a re-added one, uses a fresh ID; the server grants more as needed, up to 128). `1`–`128`; unset or `0` uses `8` | `0` |
+| `Bbr2FastConvergence` | With `CC = bbr2`, enables xquic's BBRv2 fast-convergence extension, which lets the bandwidth estimate drop sooner when the round-trip time rises by more than a quarter from one round trip to the next, and probes for more bandwidth every 5 to 8 round trips instead of every 2 to 3 seconds. `false` gives standard BBRv2 behaviour. Ignored for other `CC` values. | `true` |
+| `Bbr2RttvarCompensation` | With `CC = bbr2`, enables xquic's BBRv2 extension that allows more data in flight (sent but not yet acknowledged) when the round-trip time varies. `false` gives the standard BBRv2 limit on data in flight. Ignored for other `CC` values. | `true` |
 | `Reinjection` | Speculative duplication mode (`off`, `deadline`, or `idle`). `dgram` is no longer supported; a config file that sets it gets a warning and runs with `off`. Use redundant mode (`Redundant = true`) to duplicate packets. | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
@@ -275,7 +287,7 @@ A server of this version tells each connected client which scheduler it uses for
 See [Multipath](./multipath) for scheduler details and
 [Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.
 
-Older configs may use `ReinjectionControl = true` with `ReinjectionMode` (alias `ReinjCtl`, values `default`, `deadline` or `dgram`). These are still read, but only when `Reinjection` is left at `off`; `default` maps to `idle`. New configs should use `Reinjection`.
+Older configs may set `ReinjectionControl` (JSON `reinjection_control`) to true, with `ReinjectionMode` (JSON `reinjection_mode`; alias `ReinjCtl`, JSON `reinj_ctl`; values `default`, `deadline` or `dgram`). These are still read, but only when `Reinjection` is left at `off`; `default` maps to `idle`. New configs should use `Reinjection`.
 
 > `backup_fec` is experimental and requires both peers to run mqvpn ≥ 0.4.0
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
