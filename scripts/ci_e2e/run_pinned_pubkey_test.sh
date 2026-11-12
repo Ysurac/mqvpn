@@ -168,7 +168,16 @@ echo ""
 echo "=== Test 3: a pin refuses the impostor before authentication, Insecure or not ==="
 start_client pin_bad --server "$IMPOSTOR" --insecure \
     --pinned-pubkey "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=; sha256//${PIN_REAL}"
-sleep 4
+# A rejected pin is final, like any TLS rejection: the client reaches CLOSED
+# and exits by itself instead of retrying the same key.
+for _ in $(seq 1 30); do
+    kill -0 "$CLIENT_PID" 2>/dev/null || break
+    sleep 0.5
+done
+kill -0 "$CLIENT_PID" 2>/dev/null && fail "client still running 15s after the pin mismatch"
+check_closed_exit "$CLIENT_PID" "pin_bad" "${WORK_DIR}/pin_bad.log" || fail "pin_bad did not exit cleanly"
+CLIENT_PID=""
+if grep -q "reconnecting in" "${WORK_DIR}/pin_bad.log"; then fail "reconnect after a pin mismatch"; fi
 grep -q "does not match PinnedPubkey (server sha256//${PIN_IMPOSTOR})" "${WORK_DIR}/pin_bad.log" ||
     fail "pin mismatch not logged"
 grep -q "Insecure ignored, PinnedPubkey is enforced" "${WORK_DIR}/pin_bad.log" ||

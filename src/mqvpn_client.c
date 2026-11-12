@@ -1573,6 +1573,7 @@ cli_check_pinned_pubkey(cli_conn_t *conn, xqc_h3_conn_t *h3_conn)
           got[0] ? got : "(no certificate)");
     if (!conn->tunnel_notified) {
         conn->tunnel_notified = 1; /* cb_h3_conn_close then reports nothing more */
+        conn->notified_reason = MQVPN_ERR_TLS; /* no reconnect: same key every retry */
         if (c->cbs.tunnel_closed) c->cbs.tunnel_closed(MQVPN_ERR_TLS, c->user_ctx);
     }
     xqc_h3_conn_close(c->engine, &conn->cid);
