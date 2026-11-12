@@ -82,10 +82,11 @@ mqvpn_user_name_ok(const char *s, size_t cap)
 }
 
 /* "users" array shared by the file config and the Config API. Elements are
- * "name:key" strings (split at the first ':') or
- * {"name":"..","key":"..","fixed_ip":".."} objects (fixed_ip optional). Each
- * entry goes to add_user(ctx, name, key, fixed_ip); fixed_ip is NULL for the
- * string form or when the object has no string "fixed_ip". A name, key or
+ * "name:key[:fixed_ip]" strings (split like INI [Auth] User: a key cannot
+ * contain ':') or {"name":"..","key":"..","fixed_ip":".."} objects (fixed_ip
+ * optional). Each entry goes to add_user(ctx, name, key, fixed_ip); fixed_ip
+ * is NULL when absent or empty, or when the object has no string
+ * "fixed_ip". A name, key or
  * fixed_ip that does not fit is an error, never stored shortened. Returns -1
  * if arr is not an array, an element has the wrong shape, or add_user
  * returns non-zero; elements before the failing one stay applied. */
@@ -102,15 +103,20 @@ mqvpn_json_parse_users(yyjson_val *arr, void *ctx,
         char key[256];
         char fixed_ip[20] = {0};
         if (yyjson_is_str(el)) {
-            char pair[sizeof(name) + sizeof(key)];
+            char pair[sizeof(name) + sizeof(key) + sizeof(fixed_ip)];
             if (yyjson_get_len(el) >= sizeof(pair) ||
                 json_copy_str(el, pair, sizeof(pair)) < 0)
                 return -1;
             char *sep = strchr(pair, ':');
-            if (!sep || (size_t)(sep - pair) >= sizeof(name) ||
-                strlen(sep + 1) >= sizeof(key))
-                return -1;
+            if (!sep) return -1;
             *sep = '\0';
+            char *ip_sep = strchr(sep + 1, ':');
+            if (ip_sep) {
+                *ip_sep = '\0';
+                if (strlen(ip_sep + 1) >= sizeof(fixed_ip)) return -1;
+                memcpy(fixed_ip, ip_sep + 1, strlen(ip_sep + 1) + 1);
+            }
+            if (strlen(pair) >= sizeof(name) || strlen(sep + 1) >= sizeof(key)) return -1;
             snprintf(name, sizeof(name), "%.*s", (int)(sizeof(name) - 1), pair);
             snprintf(key, sizeof(key), "%.*s", (int)(sizeof(key) - 1), sep + 1);
         } else if (yyjson_is_obj(el)) {

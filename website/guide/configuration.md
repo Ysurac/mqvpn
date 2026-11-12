@@ -160,7 +160,7 @@ top-level keys in JSON: `mtu` (`MTU`), `path_mtu` (`PathMTU`), `pmtud`
 
 ## Multi-User Authentication
 
-The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
+The server can authenticate multiple users, each with their own PSK. In JSON config, add a `users` array where each entry is either an object (`{"name":"alice","key":"..."}`) or a shorthand string (`"alice:key"`, or `"alice:key:10.0.0.5"` with a fixed IP, as in INI). In INI config, use repeatable `User = NAME:KEY` lines in the `[Auth]` section. You can also use the [Control API](#control-api) to manage users at runtime.
 
 Config usernames can be at most 63 bytes. Longer names are rejected instead of
 shortened: INI skips the entry with a warning; JSON and `--user` return an error.

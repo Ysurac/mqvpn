@@ -1606,6 +1606,18 @@ test_json_users_with_fixed_ip(void)
     ASSERT_EQ_STR(cfg.user_fixed_ips[0], "10.0.0.5", "json user[0] fixed_ip");
     ASSERT_EQ_STR(cfg.user_names[1], "bob", "json user[1] name");
     ASSERT_EQ_STR(cfg.user_fixed_ips[1], "", "json user[1] no fixed_ip");
+
+    /* The string form splits like INI User = NAME:KEY:FIXED_IP. */
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(
+        &cfg, "{\"users\":[\"alice:s3cret:10.0.0.5\",\"bob:b1:\",\"carol:c1\"]}");
+    ASSERT_EQ_INT(rc, 0, "json user string with fixed_ip parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 3, "3 string users parsed");
+    ASSERT_EQ_STR(cfg.user_keys[0], "s3cret", "json string user[0] key");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[0], "10.0.0.5", "json string user[0] fixed_ip");
+    ASSERT_EQ_STR(cfg.user_keys[1], "b1", "json string user[1] key");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[1], "", "json string user[1] empty fixed_ip");
+    ASSERT_EQ_STR(cfg.user_fixed_ips[2], "", "json string user[2] no fixed_ip");
 }
 
 static void
