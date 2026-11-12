@@ -3810,6 +3810,17 @@ test_resolve_control_endpoint_ex(void)
     load_ini(&cfg, "[Control]\nPort = 9097\nAddr = 127.0.0.1\n");
     ASSERT_EQ_INT(cfg.control_port, 9097, "[Control] Port parsed");
     ASSERT_EQ_STR(cfg.control_addr, "127.0.0.1", "[Control] Addr parsed");
+
+    /* Out-of-range ports are refused (default kept), as --control-port is. */
+    load_ini(&cfg, "[Control]\nPort = 70000\n");
+    ASSERT_EQ_INT(cfg.control_port, 0, "[Control] Port 70000 rejected");
+    load_ini(&cfg, "[Control]\nControlPort = 65536\n");
+    ASSERT_EQ_INT(cfg.control_port, 0, "[Control] ControlPort 65536 rejected");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load_json_filecfg(&cfg, "{\"control_port\":70000}");
+    ASSERT_EQ_INT(cfg.control_port, 0, "JSON control_port 70000 rejected");
+    load_ini(&cfg, "[Control]\nPort = 65535\n");
+    ASSERT_EQ_INT(cfg.control_port, 65535, "[Control] Port 65535 accepted");
 }
 
 static void

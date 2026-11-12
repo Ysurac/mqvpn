@@ -520,6 +520,12 @@ cfgk_int_nonneg(int v)
 }
 
 static int
+cfgk_int_port(int v)
+{
+    return v >= 1 && v <= 65535;
+}
+
+static int
 cfgk_int_mtu(int v)
 {
     return v == 0 || (v >= MQVPN_MTU_MIN && v <= MQVPN_MTU_MAX);
@@ -664,8 +670,8 @@ static const cfg_key_desc_t cfg_keys[] = {
                max_sessions_per_user, cfgk_int_nonneg, 0),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
-    CFG_INT(SEC_CONTROL, "Port", "control_port", control_port, cfgk_int_positive),
-    CFG_INT(SEC_CONTROL, "ControlPort", NULL, control_port, cfgk_int_positive),
+    CFG_INT(SEC_CONTROL, "Port", "control_port", control_port, cfgk_int_port),
+    CFG_INT(SEC_CONTROL, "ControlPort", NULL, control_port, cfgk_int_port),
     CFG_STR(SEC_CONTROL, "Addr", "control_addr", control_addr),
     CFG_STR(SEC_CONTROL, "ControlAddr", NULL, control_addr),
     /* [Multipath] */
