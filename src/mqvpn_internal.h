@@ -601,6 +601,12 @@ typedef struct {
     char scheduler[16];
 } mqvpn_internal_client_sched_t;
 
+/* MQVPN_OK when a user that holds no pin could be pinned at `ip` now (what
+ * mqvpn_server_set_user_fixed_ip would accept for it); its error otherwise.
+ * Lets add_user refuse a bad fixed_ip before creating the user. */
+MQVPN_INTERNAL int mqvpn_server_fixed_ip_available(const mqvpn_server_t *s,
+                                                   const char *ip);
+
 /* Same session-iteration order and tunnel_established guard as
  * mqvpn_server_get_client_info() (index-aligned within one control-command
  * handler). Returns the number of entries filled, or -1 on bad arguments. */

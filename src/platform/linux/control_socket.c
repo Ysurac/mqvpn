@@ -282,6 +282,7 @@ ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *c
     if (json_copy_str(name_val, name, sizeof(name)) < 0 ||
         ctrl_get_str(req, "key", key, sizeof(key)) < 0)
         return ctrl_error(resp, resp_len, "name and key required");
+    if (!key[0]) return ctrl_error(resp, resp_len, "name and key required");
     if (yyjson_get_len(name_val) >= sizeof(name))
         return ctrl_error(resp, resp_len, "name exceeds 63 bytes");
 
@@ -291,9 +292,10 @@ ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *c
 
     /* Atomic: with a fixed_ip, nothing is committed unless the address is
      * accepted. An existing user gets the fixed_ip applied first, so a
-     * refused address leaves its key untouched; a new user is added, and
-     * removed again if the address is refused (it cannot have a session yet:
-     * the loop is single-threaded). */
+     * refused address leaves its key untouched; for a new user the address
+     * is checked before the user is created. Rolling a new user back would
+     * disconnect a shared-key session already using that name (x-user) and
+     * leave auth latched on an open server. */
     int existed = 0;
     if (fixed_ip[0]) {
         char unames[MQVPN_MAX_USERS][64];
@@ -301,6 +303,8 @@ ctrl_cmd_add_user(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *c
         for (int i = 0; i < n && !existed; i++)
             existed = strcmp(unames[i], name) == 0;
         if (existed && mqvpn_server_set_user_fixed_ip(server, name, fixed_ip) != MQVPN_OK)
+            return ctrl_error(resp, resp_len, "fixed_ip invalid or unavailable");
+        if (!existed && mqvpn_server_fixed_ip_available(server, fixed_ip) != MQVPN_OK)
             return ctrl_error(resp, resp_len, "fixed_ip invalid or unavailable");
     }
 

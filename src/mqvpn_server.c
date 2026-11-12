@@ -4427,6 +4427,31 @@ mqvpn_server_set_path_dscp_mask_by_iface(mqvpn_server_t *s, const char *user,
     return MQVPN_ERR_INVALID_ARG; /* user not found / not connected */
 }
 
+/* Pool offset of `ip` (dotted IPv4 inside the client pool, .1 included), or
+ * -1. Shared by set_user_fixed_ip and fixed_ip_available. */
+static int
+svr_fixed_ip_offset(const mqvpn_server_t *s, const char *ip, uint32_t *off)
+{
+    struct in_addr a;
+    if (inet_pton(AF_INET, ip, &a) != 1) return -1;
+    uint32_t base_h = ntohl(s->pool.base.s_addr);
+    uint32_t addr_h = ntohl(a.s_addr);
+    if (addr_h <= base_h || addr_h - base_h > s->pool.pool_size) return -1;
+    *off = addr_h - base_h;
+    return 0;
+}
+
+int
+mqvpn_server_fixed_ip_available(const mqvpn_server_t *s, const char *ip)
+{
+    uint32_t off;
+    if (!s || !ip || svr_fixed_ip_offset(s, ip, &off) < 0 || off == 1)
+        return MQVPN_ERR_INVALID_ARG;
+    if (s->n_pinned_ips >= MQVPN_MAX_USERS) return MQVPN_ERR_MAX_CLIENTS;
+    if (s->pool.used[off]) return MQVPN_ERR_POOL_FULL;
+    return MQVPN_OK;
+}
+
 int
 mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const char *ip)
 {
@@ -4463,15 +4488,8 @@ mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *username, const ch
         return MQVPN_OK;
     }
 
-    /* Parse new IP */
-    struct in_addr new_ip;
-    if (inet_pton(AF_INET, ip, &new_ip) != 1) return MQVPN_ERR_INVALID_ARG;
-
-    uint32_t base_h = ntohl(s->pool.base.s_addr);
-    uint32_t addr_h = ntohl(new_ip.s_addr);
-    if (addr_h <= base_h || addr_h - base_h > s->pool.pool_size)
-        return MQVPN_ERR_INVALID_ARG;
-    uint32_t new_offset = addr_h - base_h;
+    uint32_t new_offset;
+    if (svr_fixed_ip_offset(s, ip, &new_offset) < 0) return MQVPN_ERR_INVALID_ARG;
     if (new_offset == 1) {
         LOG_W(s, "fixed IP %s for user '%s' is the server's own address, rejected", ip,
               username);

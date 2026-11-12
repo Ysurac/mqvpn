@@ -106,6 +106,17 @@ mqvpn_server_set_user_fixed_ip(mqvpn_server_t *s, const char *n, const char *ip)
     return g_set_fixed_ip_rc;
 }
 
+static int g_fixed_ip_avail_rc = MQVPN_OK;
+static int g_fixed_ip_avail_calls = 0;
+int
+mqvpn_server_fixed_ip_available(const mqvpn_server_t *s, const char *ip)
+{
+    (void)s;
+    (void)ip;
+    g_fixed_ip_avail_calls++;
+    return g_fixed_ip_avail_rc;
+}
+
 int
 mqvpn_server_remove_user(mqvpn_server_t *s, const char *n)
 {
@@ -676,14 +687,14 @@ TEST(add_user_with_fixed_ip_success)
 TEST(add_user_with_fixed_ip_failure)
 {
     g_add_user_rc = MQVPN_OK;
-    g_set_fixed_ip_rc = MQVPN_ERR_INVALID_ARG;
+    g_fixed_ip_avail_rc = MQVPN_ERR_INVALID_ARG;
     char resp[256];
     call_dispatch("{\"cmd\":\"add_user\",\"name\":\"carol\","
                   "\"key\":\"pass\",\"fixed_ip\":\"10.0.0.99\"}",
                   resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "\"ok\":false");
     ASSERT_CONTAINS(resp, "fixed_ip invalid");
-    g_set_fixed_ip_rc = MQVPN_OK;
+    g_fixed_ip_avail_rc = MQVPN_OK;
 }
 
 /* ── set_user_fixed_ip ───────────────────────────────────────────────────── */
@@ -1660,22 +1671,45 @@ TEST(set_path_dscp_mask_rejects_non_numbers)
 
 /* ── add_user atomicity ──────────────────────────────────────────────────── */
 
-TEST(add_user_new_user_rolled_back_on_bad_fixed_ip)
+/* A new user is never created then removed: the removal would disconnect a
+ * shared-key session already using the name (x-user). */
+TEST(add_user_new_user_not_created_on_bad_fixed_ip)
 {
     g_add_user_rc = MQVPN_OK;
-    g_set_fixed_ip_rc = MQVPN_ERR_INVALID_ARG;
+    g_fixed_ip_avail_rc = MQVPN_ERR_POOL_FULL;
     g_list_users_n = 0;
+    g_add_user_calls = 0;
     g_remove_user_calls = 0;
+    g_set_fixed_ip_calls = 0;
     char resp[256];
     call_dispatch("{\"cmd\":\"add_user\",\"name\":\"dave\",\"key\":\"k\","
                   "\"fixed_ip\":\"10.0.0.99\"}",
                   resp, sizeof(resp));
     ASSERT_CONTAINS(resp, "fixed_ip invalid");
-    if (g_remove_user_calls != 1) {
-        printf("FAIL\n    new user not removed after fixed_ip failure\n");
+    if (g_add_user_calls != 0 || g_remove_user_calls != 0 || g_set_fixed_ip_calls != 0) {
+        printf("FAIL\n    new user created or removed despite a refused fixed_ip\n");
         exit(1);
     }
-    g_set_fixed_ip_rc = MQVPN_OK;
+    g_fixed_ip_avail_rc = MQVPN_OK;
+}
+
+/* An empty key is refused before anything changes, the fixed IP included. */
+TEST(add_user_empty_key_changes_nothing)
+{
+    g_list_users_n = 1;
+    snprintf(g_list_users_names[0], sizeof(g_list_users_names[0]), "alice");
+    g_add_user_calls = 0;
+    g_set_fixed_ip_calls = 0;
+    char resp[256];
+    call_dispatch("{\"cmd\":\"add_user\",\"name\":\"alice\",\"key\":\"\","
+                  "\"fixed_ip\":\"10.0.0.9\"}",
+                  resp, sizeof(resp));
+    ASSERT_STR_EQ(resp, "{\"ok\":false,\"error\":\"name and key required\"}");
+    if (g_add_user_calls != 0 || g_set_fixed_ip_calls != 0) {
+        printf("FAIL\n    empty key still changed the user\n");
+        exit(1);
+    }
+    g_list_users_n = 0;
 }
 
 TEST(add_user_existing_user_untouched_on_bad_fixed_ip)
@@ -2399,7 +2433,8 @@ main(void)
 
     run_set_path_weight_rejects_non_numbers();
     run_set_path_dscp_mask_rejects_non_numbers();
-    run_add_user_new_user_rolled_back_on_bad_fixed_ip();
+    run_add_user_new_user_not_created_on_bad_fixed_ip();
+    run_add_user_empty_key_changes_nothing();
     run_add_user_existing_user_untouched_on_bad_fixed_ip();
     run_add_user_rejects_overlong_key();
     run_nested_cmd_is_not_a_command();

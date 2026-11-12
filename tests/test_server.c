@@ -2629,8 +2629,15 @@ TEST(server_set_user_fixed_ip_api)
     mqvpn_config_free(cfg);
     ASSERT_NOT_NULL(s);
 
+    /* add_user's pre-check agrees with set_user_fixed_ip for an unpinned user */
+    ASSERT_EQ(mqvpn_server_fixed_ip_available(s, "10.0.0.10"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_fixed_ip_available(s, "10.0.0.1"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_fixed_ip_available(s, "192.168.1.5"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_server_fixed_ip_available(s, "not-an-ip"), MQVPN_ERR_INVALID_ARG);
+
     /* Assign a fixed IP to alice */
     ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "alice", "10.0.0.10"), MQVPN_OK);
+    ASSERT_EQ(mqvpn_server_fixed_ip_available(s, "10.0.0.10"), MQVPN_ERR_POOL_FULL);
 
     /* Same IP for bob must fail */
     ASSERT_EQ(mqvpn_server_set_user_fixed_ip(s, "bob", "10.0.0.10"), MQVPN_ERR_POOL_FULL);
