@@ -219,19 +219,14 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
                 sizeof(cfg->user_names[0]) - 1);
         return;
     }
-
-    /* Reject characters that would break JSON serialization in control API */
-    for (const char *p = name; *p; p++) {
-        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) {
-            LOG_WRN("%s:%d: username contains invalid character", path, lineno);
-            return;
-        }
+    if (!mqvpn_user_name_ok(name, sizeof(cfg->user_names[0]))) {
+        LOG_WRN("%s:%d: username contains invalid character", path, lineno);
+        return;
     }
 
-    /* Too long for the table: skip rather than store a shortened name or key
-     * (a truncated name could collide with another user). */
-    if (strlen(name) >= sizeof(cfg->user_names[0]) ||
-        strlen(key) >= sizeof(cfg->user_keys[0]) ||
+    /* Too long for the table: skip rather than store a shortened key (a
+     * shortened name is refused above). */
+    if (strlen(key) >= sizeof(cfg->user_keys[0]) ||
         (fixed_ip && strlen(fixed_ip) >= sizeof(cfg->user_fixed_ips[0]))) {
         LOG_WRN("%s:%d: user entry too long (name max %zu, key max %zu bytes); ignoring",
                 path, lineno, sizeof(cfg->user_names[0]) - 1,

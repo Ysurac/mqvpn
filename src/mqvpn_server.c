@@ -49,6 +49,7 @@
 #include "addr_pool.h"
 #include "auth.h"
 #include "dgram_frame.h"
+#include "json_util.h" /* mqvpn_user_name_ok */
 #include "flow_sched.h"
 #include "mqvpn_path_label.h"
 #include "icmp.h"
@@ -2019,9 +2020,7 @@ svr_format_peer_addr(const svr_conn_t *conn, char *buf, size_t buflen)
 static int
 svr_x_user_name_acceptable(const mqvpn_server_t *s, const char *name)
 {
-    for (const char *p = name; *p; p++) {
-        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20) return 0;
-    }
+    if (!mqvpn_user_name_ok(name, sizeof(((svr_conn_t *)0)->username))) return 0;
     for (int i = 0; i < s->config.n_users; i++) {
         if (strcmp(s->config.user_names[i], name) == 0) return 0;
     }
@@ -4200,13 +4199,8 @@ mqvpn_server_add_user(mqvpn_server_t *s, const char *username, const char *key)
 {
     if (!s || !username || !key || username[0] == '\0' || key[0] == '\0')
         return MQVPN_ERR_INVALID_ARG;
-    if (strlen(username) >= sizeof(s->config.user_names[0])) return MQVPN_ERR_INVALID_ARG;
-
-    /* Reject characters that would break JSON serialization in control API */
-    for (const char *p = username; *p; p++) {
-        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
-            return MQVPN_ERR_INVALID_ARG;
-    }
+    if (!mqvpn_user_name_ok(username, sizeof(s->config.user_names[0])))
+        return MQVPN_ERR_INVALID_ARG;
 
     for (int i = 0; i < s->config.n_users; i++) {
         if (strcmp(s->config.user_names[i], username) == 0) {
